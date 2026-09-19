@@ -19,7 +19,7 @@
   "telemetry": {
     "title": "Privacy & Telemetry",
     "usageAnalytics": "Usage Analytics",
-    "description": "Help improve LangHire by sending anonymous usage data (feature usage, crash reports). No personal information or job data is transmitted."
+    "description": "Help improve LangHireV2 by sending anonymous usage data (feature usage, crash reports). No personal information or job data is transmitted."
   },
   "blockedDomains": {
     "title": "Blocked Domains",

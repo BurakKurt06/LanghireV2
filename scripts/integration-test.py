@@ -8,7 +8,7 @@ Usage:
   python scripts/integration-test.py
 
   # Test against built binary
-  python scripts/integration-test.py --binary src-tauri/binaries/langhire-backend-aarch64-apple-darwin
+  python scripts/integration-test.py --binary src-tauri/binaries/langhirev2-backend-aarch64-apple-darwin
 """
 import argparse
 import json
@@ -45,11 +45,11 @@ def wait_for_backend() -> bool:
 
 def read_token() -> str:
     if sys.platform == "darwin":
-        path = os.path.expanduser("~/Library/Application Support/langhire/.api_token")
+        path = os.path.expanduser("~/Library/Application Support/langhirev2/.api_token")
     elif sys.platform == "win32":
-        path = os.path.join(os.environ.get("APPDATA", ""), "langhire", ".api_token")
+        path = os.path.join(os.environ.get("APPDATA", ""), "langhirev2", ".api_token")
     else:
-        path = os.path.expanduser("~/.config/langhire/.api_token")
+        path = os.path.expanduser("~/.config/langhirev2/.api_token")
 
     for _ in range(10):
         if os.path.exists(path):

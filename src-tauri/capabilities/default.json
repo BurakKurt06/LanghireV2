@@ -12,7 +12,7 @@
       "identifier": "shell:allow-spawn",
       "allow": [
         {
-          "name": "langhire-backend",
+          "name": "langhirev2-backend",
           "sidecar": true,
           "args": true
         }

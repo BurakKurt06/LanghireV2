@@ -1,5 +1,5 @@
 """
-Shared pytest fixtures for the LangHire backend test suite.
+Shared pytest fixtures for the LangHireV2 backend test suite.
 
 The backend modules import each other with a `backend/`-rooted style
 (e.g. `from core.config import ...`), so we put `backend/` on sys.path here.

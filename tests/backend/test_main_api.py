@@ -1,5 +1,5 @@
 """
-Industry-grade API / integration tests for the LangHire FastAPI backend.
+Industry-grade API / integration tests for the LangHireV2 FastAPI backend.
 
 These exercise ``backend/main.py`` in-process with FastAPI's ``TestClient``
 (no real HTTP server, no subprocess, no browser, no network). Heavy
@@ -341,7 +341,7 @@ class TestJobs:
         assert resp.status_code == 200
         assert "text/csv" in resp.headers["content-type"]
         assert "attachment" in resp.headers["content-disposition"]
-        assert "langhire-jobs.csv" in resp.headers["content-disposition"]
+        assert "langhirev2-jobs.csv" in resp.headers["content-disposition"]
         lines = [ln for ln in resp.text.splitlines() if ln.strip()]
         assert len(lines) == 1  # header only
         assert "Job Title" in lines[0]

@@ -1,4 +1,4 @@
-# Build the LangHire desktop app + installer on Windows.
+# Build the LangHireV2 desktop app + installer on Windows.
 #
 #   Windows -> .exe (NSIS) + .msi  (src-tauri\target\release\bundle\{nsis,msi})
 #
@@ -18,7 +18,7 @@ if (-not $ProjectDir) { $ProjectDir = Split-Path -Parent (Split-Path -Parent $My
 Set-Location $ProjectDir
 
 Write-Host "================================================================"
-Write-Host " LangHire build - host: Windows" $(if ($DebugBuild) { "(debug)" })
+Write-Host " LangHireV2 build - host: Windows" $(if ($DebugBuild) { "(debug)" })
 Write-Host "================================================================"
 
 # 1. Tooling checks

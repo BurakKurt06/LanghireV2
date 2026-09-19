@@ -235,7 +235,7 @@ export default function SettingsPage() {
           <div>
             <p className="text-sm font-semibold text-foreground">Usage Analytics</p>
             <p className="text-[13px] text-muted-foreground mt-1">
-              Help improve LangHire by sending anonymous usage data (feature usage, crash reports).
+              Help improve LangHireV2 by sending anonymous usage data (feature usage, crash reports).
               No personal information or job data is transmitted.
             </p>
           </div>

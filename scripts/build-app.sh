@@ -50,14 +50,14 @@ if [ "$OS" != "Darwin" ] && [ "$OS" != "Linux" ]; then
 fi
 
 # ── 0. Optional: clear local app data for a fresh-install test ───────────────
-# Mirrors core.config.get_data_dir(): macOS → ~/Library/Application Support/langhire,
-# Linux → ~/.config/langhire. Removes profile, jobs, memory DB, settings,
+# Mirrors core.config.get_data_dir(): macOS → ~/Library/Application Support/langhirev2,
+# Linux → ~/.config/langhirev2. Removes profile, jobs, memory DB, settings,
 # saved logins/cookies, and the onboarding flag.
 if [ "$CLEAN_DATA" = "1" ]; then
   if [ "$OS" = "Darwin" ]; then
-    DATA_DIR="$HOME/Library/Application Support/langhire"
+    DATA_DIR="$HOME/Library/Application Support/langhirev2"
   else
-    DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/langhire"
+    DATA_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/langhirev2"
   fi
 
   if [ -d "$DATA_DIR" ]; then

@@ -1,5 +1,5 @@
 """
-Python backend for LangHire desktop app.
+Python backend for LangHireV2 desktop app.
 Runs as a local FastAPI server (sidecar process launched by Tauri).
 """
 import json
@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHire Backend", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.0.0", lifespan=lifespan)
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
 import secrets as _secrets
@@ -694,7 +694,7 @@ def _kill_browser_processes():
     Uses psutil for cross-platform support (macOS, Linux, Windows)."""
     try:
         import psutil
-        target = "langhire/browser_profile"
+        target = "langhirev2/browser_profile"
         procs_to_kill = []
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
@@ -729,7 +729,7 @@ def _kill_browser_processes():
                 )
             else:
                 subprocess.run(
-                    ["pkill", "-f", "user-data-dir=.*langhire/browser_profile"],
+                    ["pkill", "-f", "user-data-dir=.*langhirev2/browser_profile"],
                     timeout=3, capture_output=True,
                 )
         except Exception:
@@ -1092,7 +1092,7 @@ async def export_jobs_csv():
     return StreamingResponse(
         iter([buf.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": 'attachment; filename="langhire-jobs.csv"'},
+        headers={"Content-Disposition": 'attachment; filename="langhirev2-jobs.csv"'},
     )
 
 

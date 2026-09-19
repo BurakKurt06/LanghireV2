@@ -24,10 +24,10 @@ def test_get_data_dir_creates_dir(data_dir):
 @pytest.mark.parametrize(
     "system, expected_parts",
     [
-        ("Darwin", ("Library", "Application Support", "langhire")),
-        ("Windows", ("AppData", "Roaming", "langhire")),
-        ("Linux", (".config", "langhire")),
-        ("FreeBSD", (".config", "langhire")),  # non-Darwin/Windows -> Linux branch
+        ("Darwin", ("Library", "Application Support", "langhirev2")),
+        ("Windows", ("AppData", "Roaming", "langhirev2")),
+        ("Linux", (".config", "langhirev2")),
+        ("FreeBSD", (".config", "langhirev2")),  # non-Darwin/Windows -> Linux branch
     ],
 )
 def test_get_data_dir_per_os(data_dir, monkeypatch, system, expected_parts):

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "LangHire",
+  "productName": "LangHireV2",
   "version": "1.0.0",
-  "identifier": "com.langhire.desktop",
+  "identifier": "com.langhirev2.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "LangHire — AI-Powered Job Applications",
+        "title": "LangHireV2 — AI-Powered Job Applications",
         "width": 1200,
         "height": 800,
         "minWidth": 900,
@@ -33,7 +33,7 @@
       "entitlements": "Entitlements.plist"
     },
     "externalBin": [
-      "binaries/langhire-backend"
+      "binaries/langhirev2-backend"
     ],
     "icon": [
       "icons/32x32.png",

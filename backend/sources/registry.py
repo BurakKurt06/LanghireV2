@@ -1,7 +1,7 @@
 """YAML-based plugin registry for job source plugins.
 
 Loads built-in plugins from backend/sources/plugins/ and community plugins
-from the user data directory (~/.langhire/plugins/).
+from the user data directory (~/.langhirev2/plugins/).
 """
 
 import shutil

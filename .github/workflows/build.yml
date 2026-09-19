@@ -94,7 +94,7 @@ jobs:
       - name: Sign sidecar binary with entitlements (macOS)
         if: runner.os == 'macOS'
         run: |
-          BINARY="src-tauri/binaries/langhire-backend-${{ matrix.target }}"
+          BINARY="src-tauri/binaries/langhirev2-backend-${{ matrix.target }}"
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
           IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -E "Developer ID|Apple Development" | head -1 | awk -F'"' '{print $2}')
           if [ -n "$IDENTITY" ] && [ -f "$BINARY" ]; then
@@ -119,7 +119,7 @@ jobs:
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'LangHire ${{ github.ref_name }}'
+          releaseName: 'LangHireV2 ${{ github.ref_name }}'
           releaseBody: |
             ## Download
 

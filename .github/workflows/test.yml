@@ -100,14 +100,14 @@ jobs:
         env:
           TEST_OPENROUTER_API_KEY: ${{ secrets.TEST_OPENROUTER_API_KEY }}
         run: |
-          uv run python scripts/integration-test.py --binary src-tauri/binaries/langhire-backend-${{ matrix.target }}
+          uv run python scripts/integration-test.py --binary src-tauri/binaries/langhirev2-backend-${{ matrix.target }}
 
       - name: Run integration tests (binary, Windows)
         if: runner.os == 'Windows'
         env:
           TEST_OPENROUTER_API_KEY: ${{ secrets.TEST_OPENROUTER_API_KEY }}
         run: |
-          uv run python scripts/integration-test.py --binary src-tauri/binaries/langhire-backend-${{ matrix.target }}.exe
+          uv run python scripts/integration-test.py --binary src-tauri/binaries/langhirev2-backend-${{ matrix.target }}.exe
 
   summary:
     needs: test

@@ -158,7 +158,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = "langhire-jobs.csv";
+      a.download = "langhirev2-jobs.csv";
       document.body.appendChild(a);
       a.click();
       a.remove();
