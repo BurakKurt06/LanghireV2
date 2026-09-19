@@ -1,0 +1,152 @@
+import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import Sidebar from "./components/layout/Sidebar";
+import ErrorBoundary from "./components/ErrorBoundary";
+import SetupWizard from "./components/SetupWizard";
+import { getSetupStatus, getSettings } from "./lib/api";
+import { initAnalytics, trackPageView } from "./lib/analytics";
+import { trackStartupComplete, markStart, measureAndTrack } from "./lib/perf";
+import { useDirection } from "./i18n/useDirection";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { Wand2, Loader2 } from "lucide-react";
+
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Analytics = lazy(() => import("./pages/Analytics"));
+const Profile = lazy(() => import("./pages/Profile"));
+const LLMSettings = lazy(() => import("./pages/LLMSettings"));
+const Jobs = lazy(() => import("./pages/Jobs"));
+const Memory = lazy(() => import("./pages/Memory"));
+const SettingsPage = lazy(() => import("./pages/Settings"));
+const Logs = lazy(() => import("./pages/Logs"));
+const Guide = lazy(() => import("./pages/Guide"));
+const Feedback = lazy(() => import("./pages/Feedback"));
+const QA = lazy(() => import("./pages/QA"));
+
+function PageLoader() {
+  return (
+    <div className="flex items-center justify-center h-64">
+      <Loader2 className="w-8 h-8 animate-spin text-primary" />
+    </div>
+  );
+}
+
+export default function App() {
+  useDirection();
+  useKeyboardShortcuts();
+  const [showWizard, setShowWizard] = useState(false);
+  const [wizardChecked, setWizardChecked] = useState(false);
+  const [wizardPaused, setWizardPaused] = useState(false);
+  const [wizardStep, setWizardStep] = useState(0);
+  const location = useLocation();
+
+  useEffect(() => {
+    trackStartupComplete();
+    markStart("backend_connect");
+    getSettings()
+      .then((s) => {
+        measureAndTrack("backend_connect");
+        initAnalytics(s.telemetry_enabled !== false);
+      })
+      .catch(() => initAnalytics(true));
+  }, []);
+
+  useEffect(() => {
+    trackPageView(location.pathname);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    let cancelled = false;
+    markStart("backend_startup");
+    async function check() {
+      for (let i = 0; i < 15; i++) {
+        try {
+          const status = await getSetupStatus();
+          if (!cancelled) {
+            measureAndTrack("backend_startup");
+            if (!status.onboarding_completed) {
+              setShowWizard(true);
+            }
+            setWizardChecked(true);
+          }
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+      }
+      if (!cancelled) setWizardChecked(true);
+    }
+    check();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    const handler = () => {
+      setWizardStep(0);
+      setWizardPaused(false);
+      setShowWizard(true);
+    };
+    window.addEventListener("open-setup-wizard", handler);
+    return () => window.removeEventListener("open-setup-wizard", handler);
+  }, []);
+
+  const handleWizardNavigateAway = useCallback((currentStep: number) => {
+    setWizardStep(currentStep);
+    setShowWizard(false);
+    setWizardPaused(true);
+  }, []);
+
+  const handleResumeWizard = useCallback(() => {
+    setWizardPaused(false);
+    setShowWizard(true);
+  }, []);
+
+  const handleWizardClose = useCallback(() => {
+    setShowWizard(false);
+    setWizardPaused(false);
+    setWizardStep(0);
+  }, []);
+
+  return (
+    <div className="flex min-h-screen bg-background">
+      <Sidebar />
+      <main className="flex-1 ml-60 px-10 py-8">
+        <ErrorBoundary>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/analytics" element={<Analytics />} />
+              <Route path="/profile" element={<Profile />} />
+              <Route path="/llm" element={<LLMSettings />} />
+              <Route path="/jobs" element={<Jobs />} />
+              <Route path="/apply" element={<Navigate to="/jobs" replace />} />
+              <Route path="/memory" element={<Memory />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/logs" element={<Logs />} />
+              <Route path="/guide" element={<Guide />} />
+              <Route path="/feedback" element={<Feedback />} />
+              <Route path="/qa" element={<QA />} />
+            </Routes>
+          </Suspense>
+        </ErrorBoundary>
+      </main>
+
+      {wizardChecked && showWizard && (
+        <SetupWizard
+          onClose={handleWizardClose}
+          onNavigateAway={handleWizardNavigateAway}
+          initialStep={wizardStep}
+        />
+      )}
+
+      {wizardPaused && !showWizard && (
+        <button
+          onClick={handleResumeWizard}
+          className="fixed bottom-6 right-6 z-40 flex items-center gap-2 px-4 py-3 bg-primary text-primary-foreground rounded-xl shadow-lg hover:bg-primary/90 transition-all hover:scale-105 text-sm font-medium"
+        >
+          <Wand2 className="w-4 h-4" />
+          Resume Setup Wizard
+        </button>
+      )}
+    </div>
+  );
+}
