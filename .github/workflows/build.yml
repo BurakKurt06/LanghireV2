@@ -15,18 +15,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            target: aarch64-apple-darwin
-            label: macOS-ARM64
-          - platform: macos-latest
-            target: x86_64-apple-darwin
-            label: macOS-x64
-          - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            label: Linux-x64
-          - platform: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            label: Linux-ARM64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows-x64
@@ -53,12 +41,6 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsoup-3.0-dev libjavascriptcoregtk-4.1-dev xdg-utils
-
       - name: Install Node dependencies
         run: npm install
 
@@ -67,53 +49,13 @@ jobs:
           pip install uv
           uv sync
 
-      - name: Build Python backend (PyInstaller)
-        run: bash scripts/build-backend.sh ${{ matrix.target }}
-        if: runner.os != 'Windows'
-
       - name: Build Python backend (PyInstaller, Windows)
         run: powershell -ExecutionPolicy Bypass -File scripts/build-backend.ps1
-        if: runner.os == 'Windows'
-
-      - name: Import Apple certificate
-        if: runner.os == 'macOS'
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-        run: |
-          CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
-          security create-keychain -p "" $KEYCHAIN_PATH
-          security set-keychain-settings $KEYCHAIN_PATH
-          security unlock-keychain -p "" $KEYCHAIN_PATH
-          security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple: -k "" $KEYCHAIN_PATH
-          security list-keychain -d user -s $KEYCHAIN_PATH
-
-      - name: Sign sidecar binary with entitlements (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          BINARY="src-tauri/binaries/langhirev2-backend-${{ matrix.target }}"
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          IDENTITY=$(security find-identity -v -p codesigning $KEYCHAIN_PATH | grep -E "Developer ID|Apple Development" | head -1 | awk -F'"' '{print $2}')
-          if [ -n "$IDENTITY" ] && [ -f "$BINARY" ]; then
-            codesign --force --options runtime --entitlements src-tauri/Entitlements.plist --sign "$IDENTITY" "$BINARY"
-            echo "✅ Signed sidecar with: $IDENTITY"
-            codesign -d --entitlements - "$BINARY" 2>&1 | head -5
-          else
-            echo "⚠️ No identity found or binary missing — skipping sidecar sign"
-          fi
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
           VITE_GA_API_SECRET: ${{ secrets.VITE_GA_API_SECRET }}
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
@@ -125,11 +67,7 @@ jobs:
 
             | OS | File |
             |----|------|
-            | macOS (Apple Silicon) | `.dmg` |
-            | macOS (Intel) | `.dmg` |
-            | Windows | `.exe` installer |
-            | Linux x64 | `.AppImage` or `.deb` |
-            | Linux ARM64 | `.deb` |
+            | Windows x64 | `.exe` installer |
 
             ### What's New
             See the [release notes](https://github.com/${{ github.repository }}/releases) for details.
@@ -153,8 +91,4 @@ jobs:
           echo "## Build Results" >> $GITHUB_STEP_SUMMARY
           echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS ARM64 | ${{ needs.build-tauri.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS x64 | ${{ needs.build-tauri.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux x64 | ${{ needs.build-tauri.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux ARM64 | ${{ needs.build-tauri.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Windows x64 | ${{ needs.build-tauri.result }} |" >> $GITHUB_STEP_SUMMARY
