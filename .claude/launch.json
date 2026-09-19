@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "langhirev2-dev", "runtimeExecutable": "npm", "runtimeArgs": ["run", "dev"], "port": 1420 }
+  ]
+}
