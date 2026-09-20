@@ -766,6 +766,15 @@ async def start_collection(body: CollectRequest):
     """Start job collection in-process (no subprocess, no external Python needed)."""
     global _collection_thread, _collection_status
 
+    # Read the switch fresh — the UI writes settings.json while we are running.
+    if not load_settings().get("job_collection_enabled", True):
+        return _api_error(
+            "collection_disabled",
+            "Job board collection is turned off in Settings. Turn it back on to collect, "
+            "or add jobs with Paste Links.",
+            409,
+        )
+
     if _collection_status["running"]:
         return {"success": False, "message": "Collection already running"}
 

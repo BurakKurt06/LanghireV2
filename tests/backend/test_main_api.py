@@ -721,6 +721,26 @@ class TestResumeTailor:
 
 # ── Job-collection / apply request validation (no worker thread started) ──────
 class TestCollectApplyValidation:
+    def test_collect_refused_when_the_switch_is_off(self, auth_client):
+        """Turning collection off must stop it at the API, not just in the UI."""
+        auth_client.put("/settings", json={"job_collection_enabled": False})
+        resp = auth_client.post("/jobs/collect", json={"title": "Engineer"})
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "collection_disabled"
+
+    def test_collect_switch_defaults_to_enabled(self, auth_client):
+        """With no setting written, collection behaves as it always has."""
+        resp = auth_client.post("/jobs/collect", json={"max_jobs": 10000})
+        # Rejected for the max_jobs bound, not for being disabled.
+        assert resp.status_code == 422
+
+    def test_bulk_add_still_works_when_collection_is_off(self, auth_client):
+        """The switch gates board scraping only; pasting links is unaffected."""
+        auth_client.put("/settings", json={"job_collection_enabled": False})
+        resp = auth_client.post("/jobs/add-bulk", json={"text": "https://jobs.example.com/a"})
+        assert resp.status_code == 200
+        assert resp.json()["added"] == 1
+
     def test_collect_rejects_out_of_range_max_jobs(self, auth_client):
         """max_jobs > 500 violates the pydantic CollectRequest model -> 422."""
         resp = auth_client.post("/jobs/collect", json={"max_jobs": 10000})

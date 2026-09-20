@@ -108,6 +108,17 @@ def load_settings() -> dict:
         "data_dir": str(get_data_dir()),
         "telemetry_enabled": True,
         "theme": "system",
+        # Job board collection (LinkedIn, Indeed, ... plugins). Default ON so
+        # the app behaves exactly as before.
+        "job_collection_enabled": True,
+        # Anti-detection: stealth patches + randomised pauses between jobs.
+        "stealth_enabled": False,
+        "human_delay_enabled": False,
+        "human_delay_min": 5,
+        "human_delay_max": 15,
+        # 2Captcha solver. Off by default; the key is never sent to the LLM.
+        "captcha_solver_enabled": False,
+        "captcha_api_key": "",
     })
 
 
@@ -116,6 +127,14 @@ def save_settings(settings: dict):
         settings["max_failures"] = max(1, min(int(settings["max_failures"]), 50))
     if "stagger_delay" in settings:
         settings["stagger_delay"] = max(0, min(int(settings["stagger_delay"]), 300))
+    if "human_delay_min" in settings:
+        settings["human_delay_min"] = max(0, min(int(settings["human_delay_min"]), 300))
+    if "human_delay_max" in settings:
+        settings["human_delay_max"] = max(0, min(int(settings["human_delay_max"]), 300))
+    # Keep the window coherent: a max below the min would make the range empty.
+    if "human_delay_min" in settings and "human_delay_max" in settings:
+        if settings["human_delay_max"] < settings["human_delay_min"]:
+            settings["human_delay_max"] = settings["human_delay_min"]
     if "blocked_domains" in settings:
         settings["blocked_domains"] = [
             str(d).strip() for d in settings["blocked_domains"]

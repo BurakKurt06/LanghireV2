@@ -145,7 +145,11 @@ async def collect_for_title(title: str, existing_jobs: dict, profile: dict, max_
     _agent_log_start("collect", f"{title} ({plugin.display_name})" if plugin else title)
 
     llm = config.get_llm()
-    browser = BrowserSession(user_data_dir=str(BROWSER_PROFILE_DIR), chromium_sandbox=(sys.platform != "linux"))
+    browser = BrowserSession(
+        user_data_dir=str(BROWSER_PROFILE_DIR),
+        chromium_sandbox=(sys.platform != "linux"),
+        **config.build_browser_kwargs(),
+    )
 
     from urllib.parse import quote
     search_url = f"https://www.linkedin.com/jobs/search/?keywords={quote(title)}&location={quote(locations)}"
@@ -276,7 +280,11 @@ async def fetch_description_for_job(url: str, job: dict) -> str:
     """Visit a single LinkedIn job page and extract the full description."""
     refresh_credentials()
     llm = config.get_llm()
-    browser = BrowserSession(user_data_dir=str(BROWSER_PROFILE_DIR), chromium_sandbox=(sys.platform != "linux"))
+    browser = BrowserSession(
+        user_data_dir=str(BROWSER_PROFILE_DIR),
+        chromium_sandbox=(sys.platform != "linux"),
+        **config.build_browser_kwargs(),
+    )
 
     title = job.get("title", "Unknown")
     company = job.get("company", "unknown")
@@ -360,6 +368,12 @@ async def main():
     parser.add_argument("--resume", action="store_true", help="Skip titles already collected")
     parser.add_argument("--skip-descriptions", action="store_true", help="Skip description fetching phase")
     args = parser.parse_args()
+
+    # Feature switch, read fresh from settings.json (not the import-time snapshot).
+    if not config.load_runtime_settings().get("job_collection_enabled", True):
+        print("Job board collection is turned OFF in Settings.")
+        print("Turn 'Job board collection' back on in the app, or add jobs with Paste Links.")
+        return
 
     profile = load_json(CANDIDATE_PROFILE, {})
     jobs = load_jobs()

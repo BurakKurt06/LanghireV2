@@ -63,6 +63,81 @@ _PRIVATE_IP_PREFIXES = ("127.", "10.", "192.168.", "172.16.", "172.17.", "172.18
                         "172.24.", "172.25.", "172.26.", "172.27.", "172.28.",
                         "172.29.", "172.30.", "172.31.", "0.", "169.254.")
 
+def load_runtime_settings() -> dict:
+    """Read settings.json fresh from disk.
+
+    The module-level constants above snapshot settings at import time, which is
+    fine for values that cannot change mid-process. Feature switches must not
+    use that snapshot: the desktop app writes settings.json while the backend is
+    already running, so a stale read would make a toggle appear to do nothing.
+    """
+    try:
+        from core.config import load_settings
+    except ImportError:
+        from backend.core.config import load_settings
+    try:
+        return load_settings()
+    except Exception:
+        return {}
+
+
+def build_browser_kwargs() -> dict:
+    """Extra BrowserSession kwargs implied by the current settings.
+
+    Returns the stealth launch flags when stealth is enabled, and nothing at
+    all otherwise, so the default browser launch is byte-for-byte unchanged.
+    """
+    settings = load_runtime_settings()
+    if not settings.get("stealth_enabled"):
+        return {}
+    try:
+        from core.stealth import STEALTH_ARGS
+    except ImportError:
+        from backend.core.stealth import STEALTH_ARGS
+    return {"args": list(STEALTH_ARGS)}
+
+
+async def maybe_apply_stealth(browser_session) -> bool:
+    """Inject stealth patches when the setting is on. No-op otherwise.
+
+    Starts the session first because the CDP client only exists once the
+    browser is live. Any failure is swallowed: anti-detection is best-effort
+    and must never abort a run.
+    """
+    if not load_runtime_settings().get("stealth_enabled"):
+        return False
+    try:
+        from core.stealth import apply_stealth
+    except ImportError:
+        from backend.core.stealth import apply_stealth
+    try:
+        await browser_session.start()
+        ok = await apply_stealth(browser_session)
+        if ok:
+            print("    🕶️  Stealth patches injected")
+        return ok
+    except Exception as e:
+        print(f"    ⚠️  Stealth setup skipped ({type(e).__name__}: {e})")
+        return False
+
+
+async def maybe_human_delay(label: str = "") -> float:
+    """Pause for a randomised interval when human delays are enabled."""
+    settings = load_runtime_settings()
+    if not settings.get("human_delay_enabled"):
+        return 0.0
+    try:
+        from core.stealth import human_delay
+    except ImportError:
+        from backend.core.stealth import human_delay
+    lo = settings.get("human_delay_min", 5)
+    hi = settings.get("human_delay_max", 15)
+    delay = await human_delay(lo, hi)
+    if delay > 0:
+        print(f"    ⏳ Waiting {delay:.1f}s before {label or 'the next job'}")
+    return delay
+
+
 def validate_job_url(url: str) -> bool:
     """Reject URLs pointing to private/internal networks (SSRF prevention)."""
     from urllib.parse import urlparse

@@ -100,6 +100,17 @@ export interface AppSettings {
   data_dir: string;
   telemetry_enabled: boolean;
   theme?: "light" | "dark" | "system";
+  /** Job board collection (LinkedIn, Indeed, ...). Default true. */
+  job_collection_enabled?: boolean;
+  /** Anti-detection patches on the automated browser. Default false. */
+  stealth_enabled?: boolean;
+  /** Randomised pause between applications. Default false. */
+  human_delay_enabled?: boolean;
+  human_delay_min?: number;
+  human_delay_max?: number;
+  /** 2Captcha solving. Default false; the key never reaches the LLM. */
+  captcha_solver_enabled?: boolean;
+  captcha_api_key?: string;
 }
 
 // ── Job ───────────────────────────────────────────────────────────────────

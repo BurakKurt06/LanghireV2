@@ -129,7 +129,12 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
 
     llm = config.get_llm()
     # Use the shared browser profile in OS data dir (same as login endpoint)
-    browser = BrowserSession(user_data_dir=str(BROWSER_PROFILE_DIR), chromium_sandbox=(sys.platform != "linux"))
+    browser = BrowserSession(
+        user_data_dir=str(BROWSER_PROFILE_DIR),
+        chromium_sandbox=(sys.platform != "linux"),
+        **config.build_browser_kwargs(),
+    )
+    await config.maybe_apply_stealth(browser)
     mem_store = get_memory_store()
     # Count memories injected for metrics tracking
     domain = mem_store.extract_domain(url)
@@ -373,6 +378,11 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
         job_easy_apply = job.get("easy_apply", easy_apply) if job.get("easy_apply") is not None else easy_apply
         status = await apply_to_job(job, profile, qa, applied_labels, job_easy_apply, worker_id)
         stats[status] = stats.get(status, 0) + 1
+
+        # Randomised pause so applications are not evenly spaced. Off by
+        # default; only runs between jobs, never mid-application.
+        if not (cancel_flag and cancel_flag.get("cancel_requested")):
+            await config.maybe_human_delay("the next application")
 
         # On retry, put back in queue
         if status == "retry":

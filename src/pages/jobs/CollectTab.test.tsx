@@ -10,6 +10,7 @@ import {
   getProfile,
   addJob,
   addJobsBulk,
+  getSettings,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
 
@@ -28,6 +29,7 @@ vi.mock("../../lib/api", () => ({
   getProfile: vi.fn(),
   addJob: vi.fn(),
   addJobsBulk: vi.fn(),
+  getSettings: vi.fn(),
 }));
 
 const mockStart = vi.mocked(startJobCollection);
@@ -37,6 +39,7 @@ const mockGetPlugins = vi.mocked(getPlugins);
 const mockGetProfile = vi.mocked(getProfile);
 const mockAddJob = vi.mocked(addJob);
 const mockAddJobsBulk = vi.mocked(addJobsBulk);
+const mockGetSettings = vi.mocked(getSettings);
 const mockTrackEvent = vi.mocked(trackEvent);
 
 const idleStatus = {
@@ -80,6 +83,7 @@ describe("CollectTab", () => {
     mockStart.mockResolvedValue({ success: true, message: "started" } as never);
     mockStop.mockResolvedValue({ success: true } as never);
     mockAddJob.mockResolvedValue({ success: true } as never);
+    mockGetSettings.mockResolvedValue({ job_collection_enabled: true } as never);
   });
 
   afterEach(() => {
@@ -254,6 +258,36 @@ describe("CollectTab", () => {
     await user.type(screen.getByLabelText("Job links, one per line"), "https://a.example/1");
     await user.click(screen.getByRole("button", { name: /Add Links/ }));
     await waitFor(() => expect(window.alert).toHaveBeenCalledWith("backend down"));
+  });
+
+  // ── Job board collection switch ───────────────────────────────────────
+  it("disables Start and explains when collection is switched off", async () => {
+    mockGetSettings.mockResolvedValue({ job_collection_enabled: false } as never);
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    expect(await screen.findByText(/turned/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /collector\.start/ })).toBeDisabled(),
+    );
+  });
+
+  it("still allows pasting links when collection is switched off", async () => {
+    mockGetSettings.mockResolvedValue({ job_collection_enabled: false } as never);
+    mockAddJobsBulk.mockResolvedValue(bulkOk() as never);
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+
+    await user.click(screen.getByRole("button", { name: /Paste Links/ }));
+    await user.type(screen.getByLabelText("Job links, one per line"), "https://a.example/1");
+    await user.click(screen.getByRole("button", { name: /Add Links/ }));
+    await waitFor(() => expect(mockAddJobsBulk).toHaveBeenCalled());
+  });
+
+  it("leaves Start enabled when collection is on", async () => {
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await screen.findByRole("checkbox", { name: "LinkedIn" });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /collector\.start/ })).toBeEnabled(),
+    );
   });
 
   it("resumes display when a collection is already running on mount", async () => {

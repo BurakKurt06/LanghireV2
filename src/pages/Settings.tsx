@@ -19,6 +19,13 @@ export default function SettingsPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [maxFailures, setMaxFailures] = useState(8);
+  const [jobCollectionEnabled, setJobCollectionEnabled] = useState(true);
+  const [stealthEnabled, setStealthEnabled] = useState(false);
+  const [humanDelayEnabled, setHumanDelayEnabled] = useState(false);
+  const [humanDelayMin, setHumanDelayMin] = useState(5);
+  const [humanDelayMax, setHumanDelayMax] = useState(15);
+  const [captchaEnabled, setCaptchaEnabled] = useState(false);
+  const [captchaApiKey, setCaptchaApiKey] = useState("");
   const [telemetryEnabled, setTelemetryEnabled] = useState(true);
   const [theme, setThemeState] = useState<ThemeMode>(getStoredTheme());
   const [currentLanguage, setCurrentLanguage] = useState<string>(getSavedLanguage() || "");
@@ -49,6 +56,15 @@ export default function SettingsPage() {
         const sens = data.sensitive_data || { email: "", password: "" };
         setEmail(sens.email || "");
         setPassword(sens.password || "");
+        // New switches: fall back to the shipped defaults when absent, so an
+        // older settings.json keeps today's behaviour.
+        setJobCollectionEnabled(data.job_collection_enabled !== false);
+        setStealthEnabled(data.stealth_enabled === true);
+        setHumanDelayEnabled(data.human_delay_enabled === true);
+        setHumanDelayMin(data.human_delay_min ?? 5);
+        setHumanDelayMax(data.human_delay_max ?? 15);
+        setCaptchaEnabled(data.captcha_solver_enabled === true);
+        setCaptchaApiKey(data.captcha_api_key || "");
       }),
       getPlugins().then((res) => setPlugins(res.plugins || [])),
     ])
@@ -106,6 +122,13 @@ export default function SettingsPage() {
         max_failures: maxFailures,
         telemetry_enabled: telemetryEnabled,
         theme,
+        job_collection_enabled: jobCollectionEnabled,
+        stealth_enabled: stealthEnabled,
+        human_delay_enabled: humanDelayEnabled,
+        human_delay_min: humanDelayMin,
+        human_delay_max: humanDelayMax,
+        captcha_solver_enabled: captchaEnabled,
+        captcha_api_key: captchaApiKey,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -227,6 +250,160 @@ export default function SettingsPage() {
             Agent stops trying after this many consecutive failures on a single job.
           </p>
         </div>
+      </Section>
+
+      {/* Job Sources */}
+      <Section title="Job Sources">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-foreground">Job board collection</p>
+            <p className="text-[13px] text-muted-foreground mt-1">
+              Let the agent search job boards (LinkedIn, Indeed, Handshake, Intern Insider
+              and the other plugins) for listings. When off, the Collect controls are
+              disabled and the collect script exits — pasting links still works.
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label="Job board collection"
+              checked={jobCollectionEnabled}
+              onChange={(e) => setJobCollectionEnabled(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+          </label>
+        </div>
+      </Section>
+
+      {/* Anti-detection */}
+      <Section title="Anti-Detection">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-foreground">Stealth mode</p>
+            <p className="text-[13px] text-muted-foreground mt-1">
+              Hide the signals that mark the browser as automated (navigator.webdriver,
+              missing plugins, headless WebGL fingerprints) and drop the automation
+              launch flags. The browser already runs visibly, not headless.
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label="Stealth mode"
+              checked={stealthEnabled}
+              onChange={(e) => setStealthEnabled(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+          </label>
+        </div>
+
+        <div className="flex items-center justify-between mt-5 pt-5 border-t border-border">
+          <div>
+            <p className="text-sm font-semibold text-foreground">Human-like delays</p>
+            <p className="text-[13px] text-muted-foreground mt-1">
+              Wait a random amount of time between applications instead of starting the
+              next one immediately. Slows a run down by roughly the average delay per job.
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label="Human-like delays"
+              checked={humanDelayEnabled}
+              onChange={(e) => setHumanDelayEnabled(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+          </label>
+        </div>
+
+        {humanDelayEnabled && (
+          <div className="flex items-end gap-3 mt-4">
+            <div>
+              <label htmlFor="delay-min" className="block text-sm font-semibold text-foreground mb-1.5">
+                Min seconds
+              </label>
+              <input
+                id="delay-min"
+                type="number"
+                min={0}
+                max={300}
+                value={humanDelayMin}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setHumanDelayMin(Math.max(0, Math.min(300, isNaN(v) ? 5 : v)));
+                }}
+                className="input-base !w-28"
+              />
+            </div>
+            <div>
+              <label htmlFor="delay-max" className="block text-sm font-semibold text-foreground mb-1.5">
+                Max seconds
+              </label>
+              <input
+                id="delay-max"
+                type="number"
+                min={0}
+                max={300}
+                value={humanDelayMax}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setHumanDelayMax(Math.max(0, Math.min(300, isNaN(v) ? 15 : v)));
+                }}
+                className="input-base !w-28"
+              />
+            </div>
+            {humanDelayMax < humanDelayMin && (
+              <p className="text-[13px] text-destructive pb-2">Max must be at least the min.</p>
+            )}
+          </div>
+        )}
+      </Section>
+
+      {/* CAPTCHA */}
+      <Section title="CAPTCHA Solving">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-foreground">Solve CAPTCHAs with 2Captcha</p>
+            <p className="text-[13px] text-muted-foreground mt-1">
+              When a CAPTCHA appears, send it to 2Captcha (max 2 attempts per
+              application). If solving fails — or this is off — the application is
+              abandoned and marked failed, and the agent moves to the next job.
+              Your API key is never included in prompts or logs.
+            </p>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label="Solve CAPTCHAs with 2Captcha"
+              checked={captchaEnabled}
+              onChange={(e) => setCaptchaEnabled(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+          </label>
+        </div>
+        {captchaEnabled && (
+          <div className="mt-4">
+            <label htmlFor="captcha-key" className="block text-sm font-semibold text-foreground mb-1.5">
+              2Captcha API key
+            </label>
+            <input
+              id="captcha-key"
+              type="password"
+              value={captchaApiKey}
+              onChange={(e) => setCaptchaApiKey(e.target.value)}
+              placeholder="Your 2Captcha API key"
+              className="input-base"
+            />
+          </div>
+        )}
       </Section>
 
       {/* Privacy & Telemetry */}

@@ -8,6 +8,7 @@ import {
   getProfile,
   addJob,
   addJobsBulk,
+  getSettings,
   type BulkAddResult,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
@@ -48,6 +49,14 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   const [pasting, setPasting] = useState(false);
   const [pasteResult, setPasteResult] = useState<BulkAddResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Job board collection switch (Settings). Default on.
+  const [collectionEnabled, setCollectionEnabled] = useState(true);
+  useEffect(() => {
+    getSettings()
+      .then((s) => setCollectionEnabled(s.job_collection_enabled !== false))
+      .catch(() => {});
+  }, []);
 
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -354,6 +363,13 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
       )}
 
       {/* Job Collector Panel */}
+      {!collectionEnabled && (
+        <div className="info-box mb-5 text-[13px]">
+          Job board collection is turned <strong>off</strong> in Settings. Pasting and
+          uploading links still works. Turn it back on in Settings to collect from job
+          boards again.
+        </div>
+      )}
       <div className="card mb-5">
         <h3 className="section-title mb-3">{t("collector.title")}</h3>
         <p className="text-[13px] text-muted-foreground mb-4">
@@ -475,7 +491,8 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           ) : (
             <button
               onClick={handleStartCollect}
-              disabled={collectSources.length === 0}
+              disabled={collectSources.length === 0 || !collectionEnabled}
+              title={!collectionEnabled ? "Job board collection is turned off in Settings" : undefined}
               className="btn-dark disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Play className="w-4 h-4" /> {t("collector.start")}
