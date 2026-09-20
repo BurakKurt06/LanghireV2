@@ -11,6 +11,9 @@ import type { PluginConfig } from "../lib/types";
 import { LANGUAGE_NAMES, getSavedLanguage, saveLanguagePreference } from "../i18n/languageDetection";
 import { loadLanguage } from "../i18n";
 
+/** This build is English-only. Flip to true to show the language selector. */
+const SHOW_LANGUAGE_PICKER = false;
+
 export default function SettingsPage() {
   const { t } = useTranslation("settings");
   const [resumePath, setResumePath] = useState("");
@@ -159,23 +162,27 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Language */}
-      <Section title={t("language.title")}>
-        <div>
-          <label className="block text-sm font-semibold text-foreground mb-1.5">{t("language.label")}</label>
-          <select
-            value={currentLanguage}
-            onChange={(e) => handleLanguageChange(e.target.value)}
-            className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card max-w-xs"
-          >
-            <option value="">{t("language.auto")}</option>
-            {Object.entries(LANGUAGE_NAMES).map(([code, name]) => (
-              <option key={code} value={code}>{name}</option>
-            ))}
-          </select>
-          <p className="text-[13px] text-muted-foreground mt-1.5">{t("language.description")}</p>
-        </div>
-      </Section>
+      {/* Language — this build ships English only, so the picker is hidden.
+          The i18n machinery and the other locale files are left in place; set
+          SHOW_LANGUAGE_PICKER to true to bring the selector back. */}
+      {SHOW_LANGUAGE_PICKER && (
+        <Section title={t("language.title")}>
+          <div>
+            <label className="block text-sm font-semibold text-foreground mb-1.5">{t("language.label")}</label>
+            <select
+              value={currentLanguage}
+              onChange={(e) => handleLanguageChange(e.target.value)}
+              className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card max-w-xs"
+            >
+              <option value="">{t("language.auto")}</option>
+              {Object.entries(LANGUAGE_NAMES).map(([code, name]) => (
+                <option key={code} value={code}>{name}</option>
+              ))}
+            </select>
+            <p className="text-[13px] text-muted-foreground mt-1.5">{t("language.description")}</p>
+          </div>
+        </Section>
+      )}
 
       {/* Appearance / Theme */}
       <Section title={t("appearance.title", "Appearance")}>

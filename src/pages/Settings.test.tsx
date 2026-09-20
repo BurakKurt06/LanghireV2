@@ -265,4 +265,111 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(document.documentElement.classList.contains("dark")).toBe(true));
     document.documentElement.classList.remove("dark");
   });
+
+  // ── New feature switches ────────────────────────────────────────────────
+  describe("feature switches", () => {
+    const findSwitch = (name: string) =>
+      screen.getByRole("switch", { name });
+
+    it("defaults job board collection on and the rest off", async () => {
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      expect(findSwitch("Job board collection")).toBeChecked();
+      expect(findSwitch("Stealth mode")).not.toBeChecked();
+      expect(findSwitch("Human-like delays")).not.toBeChecked();
+      expect(findSwitch("Solve CAPTCHAs with 2Captcha")).not.toBeChecked();
+    });
+
+    it("reflects saved switch values from the backend", async () => {
+      mockGetSettings.mockResolvedValue({
+        ...baseSettings,
+        job_collection_enabled: false,
+        stealth_enabled: true,
+        human_delay_enabled: true,
+        captcha_solver_enabled: true,
+      } as never);
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      expect(findSwitch("Job board collection")).not.toBeChecked();
+      expect(findSwitch("Stealth mode")).toBeChecked();
+      expect(findSwitch("Human-like delays")).toBeChecked();
+      expect(findSwitch("Solve CAPTCHAs with 2Captcha")).toBeChecked();
+    });
+
+    it("persists every switch on save", async () => {
+      const user = userEvent.setup();
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+
+      await user.click(findSwitch("Job board collection"));
+      await user.click(findSwitch("Stealth mode"));
+      await user.click(screen.getByRole("button", { name: /Save Settings/ }));
+
+      await waitFor(() => expect(mockSaveSettings).toHaveBeenCalled());
+      const saved = mockSaveSettings.mock.calls.at(-1)![0];
+      expect(saved.job_collection_enabled).toBe(false);
+      expect(saved.stealth_enabled).toBe(true);
+    });
+
+    it("shows the delay window only when delays are enabled", async () => {
+      const user = userEvent.setup();
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      expect(screen.queryByLabelText("Min seconds")).not.toBeInTheDocument();
+
+      await user.click(findSwitch("Human-like delays"));
+      expect(await screen.findByLabelText("Min seconds")).toHaveValue(5);
+      expect(screen.getByLabelText("Max seconds")).toHaveValue(15);
+    });
+
+    it("warns when the delay window is inverted", async () => {
+      const user = userEvent.setup();
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      await user.click(findSwitch("Human-like delays"));
+
+      const min = await screen.findByLabelText("Min seconds");
+      await user.clear(min);
+      await user.type(min, "30");
+      expect(await screen.findByText(/Max must be at least the min/)).toBeInTheDocument();
+    });
+
+    it("shows the CAPTCHA key field only when the solver is on, and masks it", async () => {
+      const user = userEvent.setup();
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      expect(screen.queryByLabelText("2Captcha API key")).not.toBeInTheDocument();
+
+      await user.click(findSwitch("Solve CAPTCHAs with 2Captcha"));
+      const key = await screen.findByLabelText("2Captcha API key");
+      expect(key).toHaveAttribute("type", "password");
+    });
+
+    it("persists the CAPTCHA API key", async () => {
+      const user = userEvent.setup();
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      await user.click(findSwitch("Solve CAPTCHAs with 2Captcha"));
+      await user.type(await screen.findByLabelText("2Captcha API key"), "abc123");
+      await user.click(screen.getByRole("button", { name: /Save Settings/ }));
+
+      await waitFor(() => expect(mockSaveSettings).toHaveBeenCalled());
+      const saved = mockSaveSettings.mock.calls.at(-1)![0];
+      expect(saved.captcha_api_key).toBe("abc123");
+      expect(saved.captcha_solver_enabled).toBe(true);
+    });
+
+    it("keeps the account password field working", async () => {
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      const pw = screen.getByDisplayValue("secret");
+      expect(pw).toHaveAttribute("type", "password");
+    });
+
+    it("hides the language picker in this English-only build", async () => {
+      render(<SettingsPage />);
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      expect(screen.queryByText("language.title")).not.toBeInTheDocument();
+    });
+  });
 });
