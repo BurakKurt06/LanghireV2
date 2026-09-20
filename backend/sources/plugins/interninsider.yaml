@@ -1,0 +1,105 @@
+name: interninsider
+display_name: Intern Insider
+version: "1.0.0"
+author: langhirev2
+description: "Intern Insider student internship board (interninsider.me) — listings link out to each employer's own application form"
+countries: [US, CA]
+website: https://interninsider.me
+requires_login: true
+login_url: https://app.interninsider.me/signin
+
+auth_cookies:
+  - name: sb-access-token
+    domain: .interninsider.me
+
+search_url: "https://app.interninsider.me/dashboard?searchTerm={title}"
+
+filters:
+  - key: term
+    label: "Term"
+    type: select
+    options:
+      - { value: "summer", label: "Summer" }
+      - { value: "fall", label: "Fall" }
+      - { value: "winter", label: "Winter" }
+      - { value: "spring", label: "Spring" }
+    url_param: "term"
+
+  - key: posted
+    label: "Posted within"
+    type: select
+    options:
+      - { value: "1", label: "Past 24 hours" }
+      - { value: "7", label: "Past week" }
+      - { value: "30", label: "Past month" }
+    url_param: "posted"
+
+collection_prompt: |
+  FIRST — LOGIN CHECK:
+  1. Go to https://app.interninsider.me/dashboard
+     - If you see a list of internship postings → logged in ✓
+     - If you land on https://app.interninsider.me/signin → WAIT for the user to
+       log in manually. Check every 15 seconds (refresh). Wait up to 5 minutes.
+       Do NOT try to enter credentials yourself.
+
+  THEN: Navigate to this search URL:
+  {search_url}
+
+  HOW TO COLLECT JOBS — follow this exact process:
+  1. Internship cards appear in a results list. Click the first card to open its
+     detail view.
+  2. Read the browser URL bar. A posting URL looks like:
+     https://app.interninsider.me/internships/<company-slug>/<title-slug>-<uuid>
+     That full URL is the job URL.
+  3. Read the job title, company, and location from the detail view.
+  4. Output ONE @@JOB_FOUND marker in your MEMORY field for that job.
+  5. Go back to the results list, click the NEXT card, and repeat.
+  6. At the bottom of the list, scroll down to load more results.
+
+  IMPORTANT RULES:
+  - Output ONE @@JOB_FOUND marker per step. Do NOT batch them.
+  - Do NOT use extract, find_elements, or evaluate to harvest URLs. Open a card
+    and read the URL bar — this avoids hidden honeypot links.
+  - Only follow links inside the results list itself. Ignore anything in the
+    header, footer, sidebar, adverts, or "recommended" rails.
+  - easy_apply is always false: Intern Insider links out to each employer's own
+    application form.
+  - Do NOT apply to any jobs — only collect listings.
+  - Stop after collecting {max_jobs} NEW jobs and call done.
+  - After scrolling through all results, call done.
+
+  @@JOB_FOUND format (in your memory field):
+  @@JOB_FOUND: {{"title": "<job title>", "company": "<company>", "location": "<location>", "url": "<full app.interninsider.me posting URL>", "easy_apply": false}}
+
+apply_prompt: |
+  FIRST — LOGIN CHECK:
+  1. Go to https://app.interninsider.me/dashboard
+     - If you see postings → logged in ✓
+     - If you land on the sign-in page → WAIT for the user to log in manually.
+       Check every 15 seconds. Wait up to 5 minutes.
+
+  THEN: Go to {job_url}
+
+  APPLYING:
+  - Intern Insider does NOT host the application. Click "Apply Now" on the
+    posting; it resolves to the employer's own careers page or ATS.
+  - Follow through to the employer's site. Explore the landing page for an
+    "Apply", "Apply Now" or "Submit Application" button — it is often below the
+    job description, so scroll down.
+  - Some employers require 2-3 pages of navigation before the real form appears.
+  - Auto-fill all fields from the candidate profile. Upload {resume_path}.
+  - If the employer requires an account, use the account email and password from
+    the configured credentials.
+
+  OTP/VERIFICATION CODES: If a site asks for a verification code:
+  1. Choose the EMAIL option if given a choice
+  2. Open a new tab and go to https://mail.google.com
+  3. Find the most recent email with the verification code
+  4. Copy the code, switch back, and enter it
+
+  If it is a video funnel or recruitment pitch, report failure and stop.
+  If the form is broken after 3 attempts, report failure and stop.
+
+domain_patterns:
+  - pattern: "*.interninsider.me"
+    normalize_to: "interninsider.me"

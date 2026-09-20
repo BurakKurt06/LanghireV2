@@ -169,11 +169,18 @@ export async function exportJobsCsv(): Promise<string> {
   return res.text();
 }
 
-export async function startJobCollection(title?: string, maxJobs?: number, source?: string, filters?: Record<string, string>) {
+export async function startJobCollection(
+  title?: string,
+  maxJobs?: number,
+  source?: string,
+  filters?: Record<string, string>,
+  sources?: string[],
+) {
   const body: Record<string, unknown> = {};
   if (title) body.title = title;
   if (maxJobs) body.max_jobs = maxJobs;
   if (source) body.source = source;
+  if (sources && sources.length > 0) body.sources = sources;
   if (filters && Object.keys(filters).length > 0) body.filters = filters;
   return request<{ success: boolean; message: string }>("/jobs/collect", {
     method: "POST",

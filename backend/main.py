@@ -775,6 +775,11 @@ async def start_collection(body: CollectRequest):
     title = body.title
     max_jobs = body.max_jobs
     filters = body.filters or {}
+    # Sources to collect from. `sources` (list) wins; fall back to the single
+    # `source` field so older callers keep working. "linkedin" is represented as
+    # None so it uses the built-in prompt path, exactly as before.
+    selected_sources = body.sources if body.sources else [body.source or "linkedin"]
+    selected_sources = [s for s in dict.fromkeys(selected_sources) if s]
     _collection_status = {"running": True, "title": title or "all titles", "log": ["Starting collection... This may take several minutes per job title."], "collected": 0, "max_jobs": max_jobs}
 
     async def _do_collect():
@@ -798,21 +803,45 @@ async def start_collection(body: CollectRequest):
         titles = [title] if title else profile.get("target_job_titles", [])
         cred_task = asyncio.create_task(credential_refresh_loop(CREDENTIAL_REFRESH_MINUTES))
 
+        # Resolve the selected source names to plugins. LinkedIn stays on the
+        # built-in prompt (plugin=None) because it carries prompt-injection
+        # defences and duplicate-skipping that the YAML does not.
+        registry = _get_plugin_registry()
+        resolved: list[tuple[str, object | None]] = []
+        for name in selected_sources:
+            if name == "linkedin":
+                resolved.append(("LinkedIn", None))
+                continue
+            plugin = registry.get_by_name(name)
+            if plugin is None:
+                print(f"  ⚠️  Unknown source '{name}' — skipping")
+            elif not plugin.enabled:
+                print(f"  ⚠️  Source '{name}' is disabled in Settings — skipping")
+            else:
+                resolved.append((plugin.display_name, plugin))
+        if not resolved:
+            print("No valid sources selected — nothing to collect.")
+            cred_task.cancel()
+            return
+
         for i, t in enumerate(titles):
             if _collection_status.get("cancel_requested"):
                 print("🛑 Stop requested — halting collection")
                 break
-            print(f"\n{'='*60}")
-            print(f"[{i+1}/{len(titles)}] Collecting: {t}")
-            print(f"{'='*60}")
-            try:
-                found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters)
-                jobs = read_jobs()
-                # Don't increment collected here — it's already updated by the stdout/log handler
-                # parsing "total this title: N" and "N jobs collected" from agent output
-                print(f"  Found {len(found)} new jobs (total: {len(jobs)})")
-            except Exception as e:
-                print(f"  Error: {e}")
+            for label, plugin in resolved:
+                if _collection_status.get("cancel_requested"):
+                    break
+                print(f"\n{'='*60}")
+                print(f"[{i+1}/{len(titles)}] Collecting: {t} — from {label}")
+                print(f"{'='*60}")
+                try:
+                    found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters, plugin=plugin)
+                    jobs = read_jobs()
+                    # Don't increment collected here — it's already updated by the stdout/log handler
+                    # parsing "total this title: N" and "N jobs collected" from agent output
+                    print(f"  Found {len(found)} new jobs (total: {len(jobs)})")
+                except Exception as e:
+                    print(f"  Error: {e}")
 
         # Phase 2: Fetch descriptions for collected jobs
         if not _collection_status.get("cancel_requested"):

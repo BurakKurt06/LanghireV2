@@ -64,11 +64,16 @@ class PluginConfig:
     file_path: str = ""
 
     def render_collection_prompt(self, titles: list[str], locations: list[str], max_jobs: int, filters: dict | None = None) -> str:
+        from urllib.parse import quote_plus
+
         title = titles[0] if titles else ""
         location = locations[0] if locations else ""
+        # Values interpolated into the search URL must be percent-encoded, or a
+        # multi-word title ("Software Engineer") produces a URL with raw spaces.
+        # The prompt body below deliberately keeps the human-readable values.
         search_url = self.search_url.format(
-            title=title, titles=", ".join(titles),
-            location=location, locations=", ".join(locations),
+            title=quote_plus(title), titles=quote_plus(", ".join(titles)),
+            location=quote_plus(location), locations=quote_plus(", ".join(locations)),
             max_jobs=max_jobs,
         )
         # Append filter URL params
@@ -77,11 +82,11 @@ class PluginConfig:
             for f in self.filters:
                 value = filters.get(f.key, "")
                 if value and f.url_param:
-                    filter_params.append(f"{f.url_param}={value}")
+                    filter_params.append(f"{f.url_param}={quote_plus(str(value))}")
         else:
             for f in self.filters:
                 if f.default and f.url_param:
-                    filter_params.append(f"{f.url_param}={f.default}")
+                    filter_params.append(f"{f.url_param}={quote_plus(str(f.default))}")
         if filter_params:
             sep = "&" if "?" in search_url else "?"
             search_url += sep + "&".join(filter_params)

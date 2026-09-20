@@ -7,6 +7,11 @@ class CollectRequest(BaseModel):
     title: Optional[str] = None
     max_jobs: int = Field(default=0, ge=0, le=500)
     source: str = Field(default="linkedin", description="Plugin name to collect from")
+    sources: Optional[list[str]] = Field(
+        default=None,
+        max_length=20,
+        description="Plugin names to collect from, in order. Falls back to `source` when omitted.",
+    )
     filters: dict = Field(default_factory=dict, description="Plugin-specific filter key-value pairs")
 
 

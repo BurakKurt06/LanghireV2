@@ -28,6 +28,23 @@ def test_collect_request_custom():
     assert r.filters == {"remote": True}
 
 
+def test_collect_request_sources_defaults_to_none():
+    """Omitting `sources` leaves it None so the single `source` field is used."""
+    assert models.CollectRequest().sources is None
+
+
+def test_collect_request_accepts_multiple_sources():
+    """Multi-source collection: several plugin names, order preserved."""
+    r = models.CollectRequest(sources=["linkedin", "handshake", "interninsider"])
+    assert r.sources == ["linkedin", "handshake", "interninsider"]
+
+
+def test_collect_request_rejects_absurdly_long_source_list():
+    """The source list is capped so a caller cannot queue unbounded work."""
+    with pytest.raises(ValidationError):
+        models.CollectRequest(sources=[f"plugin{i}" for i in range(21)])
+
+
 def test_collect_request_filters_default_factory_is_independent():
     """Each instance gets its own filters dict (no shared mutable default)."""
     a = models.CollectRequest()

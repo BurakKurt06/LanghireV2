@@ -88,14 +88,14 @@ describe("CollectTab", () => {
     expect(screen.getByText("collector.title")).toBeInTheDocument();
     await waitFor(() => expect(mockGetProfile).toHaveBeenCalled());
     // >1 source → source selector buttons render.
-    expect(await screen.findByRole("button", { name: "LinkedIn" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Indeed" })).toBeInTheDocument();
+    expect(await screen.findByRole("checkbox", { name: "LinkedIn" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Indeed" })).toBeInTheDocument();
   });
 
   it("opens the confirm dialog and starts collection on confirm", async () => {
     const user = userEvent.setup();
     render(<CollectTab onJobsChanged={onJobsChanged} />);
-    await screen.findByRole("button", { name: "LinkedIn" });
+    await screen.findByRole("checkbox", { name: "LinkedIn" });
 
     await user.type(screen.getByPlaceholderText("collector.jobTitlePlaceholder"), "Engineer");
     await user.click(screen.getByRole("button", { name: /collector\.start/ }));
@@ -105,7 +105,7 @@ describe("CollectTab", () => {
     await user.click(confirm);
 
     await waitFor(() =>
-      expect(mockStart).toHaveBeenCalledWith("Engineer", 20, "linkedin", {}),
+      expect(mockStart).toHaveBeenCalledWith("Engineer", 20, "linkedin", {}, ["linkedin"]),
     );
     expect(mockTrackEvent).toHaveBeenCalledWith(
       "collection_started",
@@ -117,7 +117,7 @@ describe("CollectTab", () => {
     mockStart.mockRejectedValue(new Error("no login"));
     const user = userEvent.setup();
     render(<CollectTab onJobsChanged={onJobsChanged} />);
-    await screen.findByRole("button", { name: "LinkedIn" });
+    await screen.findByRole("checkbox", { name: "LinkedIn" });
 
     await user.click(screen.getByRole("button", { name: /collector\.start/ }));
     await user.click(await screen.findByRole("button", { name: "Got it, Start" }));
@@ -125,12 +125,56 @@ describe("CollectTab", () => {
     await waitFor(() => expect(window.alert).toHaveBeenCalledWith("no login"));
   });
 
-  it("switches the active source", async () => {
+  it("selects LinkedIn by default", async () => {
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    const linkedin = await screen.findByRole("checkbox", { name: "LinkedIn" });
+    expect(linkedin).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("checkbox", { name: "Indeed" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+  });
+
+  it("adds a second source without deselecting the first", async () => {
     const user = userEvent.setup();
     render(<CollectTab onJobsChanged={onJobsChanged} />);
-    const indeed = await screen.findByRole("button", { name: "Indeed" });
+    const indeed = await screen.findByRole("checkbox", { name: "Indeed" });
     await user.click(indeed);
-    await waitFor(() => expect(indeed.className).toContain("border-primary"));
+    await waitFor(() => expect(indeed).toHaveAttribute("aria-checked", "true"));
+    // Multi-select: picking Indeed must not turn LinkedIn off.
+    expect(screen.getByRole("checkbox", { name: "LinkedIn" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("deselects a source when clicked again", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    const linkedin = await screen.findByRole("checkbox", { name: "LinkedIn" });
+    await user.click(linkedin);
+    await waitFor(() => expect(linkedin).toHaveAttribute("aria-checked", "false"));
+  });
+
+  it("disables Start when no source is selected", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    const linkedin = await screen.findByRole("checkbox", { name: "LinkedIn" });
+    await user.click(linkedin); // the only selected source, now off
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /start/i })).toBeDisabled(),
+    );
+  });
+
+  it("sends every selected source to the backend", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(await screen.findByRole("checkbox", { name: "Indeed" }));
+    await user.click(screen.getByRole("button", { name: /collector\.start/ }));
+    await user.click(await screen.findByRole("button", { name: "Got it, Start" }));
+    await waitFor(() => expect(mockStart).toHaveBeenCalled());
+    // 5th argument is the full source list, in selection order.
+    expect(mockStart.mock.calls[0][4]).toEqual(["linkedin", "indeed"]);
   });
 
   it("resumes display when a collection is already running on mount", async () => {
@@ -158,7 +202,7 @@ describe("CollectTab", () => {
   it("adds a job manually via the add-job form", async () => {
     const user = userEvent.setup();
     render(<CollectTab onJobsChanged={onJobsChanged} />);
-    await screen.findByRole("button", { name: "LinkedIn" });
+    await screen.findByRole("checkbox", { name: "LinkedIn" });
 
     await user.click(screen.getByRole("button", { name: /Add Job/ }));
     await user.type(
@@ -181,6 +225,6 @@ describe("CollectTab", () => {
     mockGetProfile.mockRejectedValue(new Error("no profile"));
     render(<CollectTab onJobsChanged={onJobsChanged} />);
     await waitFor(() => expect(mockGetPlugins).toHaveBeenCalled());
-    expect(await screen.findByRole("button", { name: "LinkedIn" })).toBeInTheDocument();
+    expect(await screen.findByRole("checkbox", { name: "LinkedIn" })).toBeInTheDocument();
   });
 });

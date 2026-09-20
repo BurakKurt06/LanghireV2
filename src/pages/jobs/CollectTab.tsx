@@ -26,7 +26,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   const [collecting, setCollecting] = useState(false);
   const [collectTitle, setCollectTitle] = useState("");
   const [collectMaxJobs, setCollectMaxJobs] = useState<number | "">(20);
-  const [collectSource, setCollectSource] = useState("linkedin");
+  const [collectSources, setCollectSources] = useState<string[]>(["linkedin"]);
   const [availableSources, setAvailableSources] = useState<PluginConfig[]>([]);
   const [collectLog, setCollectLog] = useState<string[]>([]);
   const [collected, setCollected] = useState(0);
@@ -42,7 +42,21 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
 
   const logRef = useRef<HTMLDivElement>(null);
 
-  const selectedPlugin = availableSources.find((s) => s.name === collectSource);
+  // Filters are plugin-specific, so they are only offered when a single source
+  // is selected — applying LinkedIn's filter params to Handshake would be wrong.
+  const selectedPlugin =
+    collectSources.length === 1
+      ? availableSources.find((s) => s.name === collectSources[0])
+      : undefined;
+
+  const toggleSource = (name: string) => {
+    setCollectSources((prev) => {
+      const next = prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name];
+      // Changing the source set invalidates plugin-specific filters.
+      setCollectFilters({});
+      return next;
+    });
+  };
 
   // Load available plugins/sources
   useEffect(() => {
@@ -121,8 +135,9 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
       const res = await startJobCollection(
         collectTitle || undefined,
         collectMaxJobs ? Number(collectMaxJobs) : undefined,
-        collectSource,
-        collectFilters
+        collectSources[0],
+        collectFilters,
+        collectSources
       );
       if (res.success) {
         setCollecting(true);
@@ -130,7 +145,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
         trackEvent("collection_started", {
           title: collectTitle || "all",
           max_jobs: collectMaxJobs || "unlimited",
-          source: collectSource,
+          source: collectSources.join(","),
         });
       } else {
         alert(res.message);
@@ -243,28 +258,42 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           className="info-box mb-4"
           dangerouslySetInnerHTML={{ __html: t("collector.loginInfo") }}
         />
-        {/* Source selector */}
-        {availableSources.length > 1 && (
+        {/* Source selector — multi-select; each title is collected from every
+            checked source in turn. */}
+        {availableSources.length > 0 && (
           <div className="mb-4">
             <label className="block text-sm font-semibold text-foreground mb-1.5">
               {t("collector.sourcePlatform")}
             </label>
-            <div className="flex gap-2 flex-wrap">
-              {availableSources.map((source) => (
-                <button
-                  key={source.name}
-                  onClick={() => setCollectSource(source.name)}
-                  disabled={collecting}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-                    collectSource === source.name
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-card text-foreground hover:border-primary/50"
-                  }`}
-                >
-                  {source.display_name}
-                </button>
-              ))}
+            <div className="flex gap-2 flex-wrap" role="group" aria-label="Job sources">
+              {availableSources.map((source) => {
+                const checked = collectSources.includes(source.name);
+                return (
+                  <button
+                    key={source.name}
+                    role="checkbox"
+                    aria-checked={checked}
+                    onClick={() => toggleSource(source.name)}
+                    disabled={collecting}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors disabled:opacity-50 ${
+                      checked
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border bg-card text-foreground hover:border-primary/50"
+                    }`}
+                  >
+                    {checked && <span aria-hidden="true">✓ </span>}
+                    {source.display_name}
+                  </button>
+                );
+              })}
             </div>
+            <p className="text-[12px] text-muted-foreground mt-1.5">
+              {collectSources.length === 0
+                ? "Pick at least one source."
+                : collectSources.length === 1
+                  ? "Each job title is collected from this source."
+                  : `Each job title is collected from all ${collectSources.length} sources, one after another. Source-specific filters are hidden while more than one is selected.`}
+            </p>
           </div>
         )}
         {/* Dynamic filters from selected plugin */}
@@ -339,7 +368,11 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
               <Square className="w-4 h-4" /> {t("collector.stop")}
             </button>
           ) : (
-            <button onClick={handleStartCollect} className="btn-dark">
+            <button
+              onClick={handleStartCollect}
+              disabled={collectSources.length === 0}
+              className="btn-dark disabled:opacity-50 disabled:cursor-not-allowed"
+            >
               <Play className="w-4 h-4" /> {t("collector.start")}
             </button>
           )}

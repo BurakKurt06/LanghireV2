@@ -1,0 +1,104 @@
+name: handshake
+display_name: Handshake
+version: "1.0.0"
+author: langhirev2
+description: "Handshake student job board — one domain for every university; school SSO is only the login path"
+countries: [ALL]
+website: https://app.joinhandshake.com
+requires_login: true
+login_url: https://app.joinhandshake.com/access
+
+auth_cookies:
+  - name: hss
+    domain: .joinhandshake.com
+
+search_url: "https://app.joinhandshake.com/stu/postings?query={title}&location={location}"
+
+filters:
+  - key: job_type
+    label: "Job type"
+    type: select
+    options:
+      - { value: "Internship", label: "Internship" }
+      - { value: "Job", label: "Full-time job" }
+      - { value: "On Campus Student Employment", label: "On-campus" }
+    url_param: "job.jobType"
+    default: "Internship"
+
+  - key: date_posted
+    label: "Posted within"
+    type: select
+    options:
+      - { value: "1", label: "Past 24 hours" }
+      - { value: "7", label: "Past week" }
+      - { value: "30", label: "Past month" }
+    url_param: "job.datePosted"
+    default: "7"
+
+collection_prompt: |
+  FIRST — LOGIN CHECK:
+  1. Go to https://app.joinhandshake.com/stu/postings
+     - If you see a list of job postings → logged in ✓
+     - If you land on https://app.joinhandshake.com/access or any school
+       single-sign-on page → WAIT for the user to log in manually. They will
+       sign in through their university. Check every 15 seconds (refresh).
+       Wait up to 5 minutes. Do NOT try to enter credentials yourself.
+  2. Once postings are visible, continue.
+
+  THEN: Navigate to this pre-filtered search URL:
+  {search_url}
+  Do NOT re-search or change the filters. Results are ready.
+
+  HOW TO COLLECT JOBS — follow this exact process:
+  1. Job cards appear in a list. Click the first card; details open in a panel
+     on the right (or as a full page).
+  2. After clicking, read the browser URL bar. It contains the posting id:
+     https://app.joinhandshake.com/stu/jobs/<JOB_ID>
+     That full URL is the job URL.
+  3. Read the job title, employer name, and location from the details panel.
+  4. Output ONE @@JOB_FOUND marker in your MEMORY field for that job.
+  5. Click the NEXT card in the list and repeat.
+  6. At the bottom of the list, scroll down (or click the next page) to load more.
+
+  IMPORTANT RULES:
+  - Output ONE @@JOB_FOUND marker per step. Do NOT batch them.
+  - Do NOT use extract, find_elements, or evaluate to harvest URLs. Click a card
+    and read the URL bar — this avoids hidden honeypot links.
+  - easy_apply is false for every Handshake posting: applications are completed
+    on Handshake or on the employer's own site, never via LinkedIn Easy Apply.
+  - Do NOT apply to any jobs — only collect listings.
+  - Stop after collecting {max_jobs} NEW jobs and call done.
+  - After scrolling through all results, call done.
+
+  @@JOB_FOUND format (in your memory field):
+  @@JOB_FOUND: {{"title": "<job title>", "company": "<employer>", "location": "<location>", "url": "https://app.joinhandshake.com/stu/jobs/<JOB_ID>", "easy_apply": false}}
+
+apply_prompt: |
+  FIRST — LOGIN CHECK:
+  1. Go to https://app.joinhandshake.com/stu/postings
+     - If you see postings → logged in ✓
+     - If you land on the login or school SSO page → WAIT for the user to log in
+       manually. Check every 15 seconds. Wait up to 5 minutes.
+
+  THEN: Go to {job_url}
+
+  APPLYING:
+  - Click "Apply" on the posting.
+  - Some postings apply inside Handshake with a document picker: attach the
+    resume at {resume_path} and answer any questions shown.
+  - Other postings say "Apply externally" and open the employer's own site. In
+    that case follow through to the employer form, explore the landing page for
+    an "Apply"/"Submit Application" button, and complete the form there.
+  - Auto-fill all fields from the candidate profile. Upload {resume_path}.
+
+  OTP/VERIFICATION CODES: If a site asks for a verification code:
+  1. Choose the EMAIL option if given a choice
+  2. Open a new tab and go to https://mail.google.com
+  3. Find the most recent email with the verification code
+  4. Copy the code, switch back, and enter it
+
+  If the form is broken after 3 attempts, report failure and stop.
+
+domain_patterns:
+  - pattern: "*.joinhandshake.com"
+    normalize_to: "joinhandshake.com"
