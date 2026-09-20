@@ -33,6 +33,7 @@ try:
     from memory import extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
     from memory.metrics import MetricsStore
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
+    import core.captcha as _captcha
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import (
@@ -46,6 +47,7 @@ except ImportError:
     from backend.memory import extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
     from backend.memory.metrics import MetricsStore
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
+    import backend.core.captcha as _captcha
 
 # Lock for thread-safe QA file writes
 _qa_lock = asyncio.Lock()
@@ -184,15 +186,31 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         "5. This is NOT a blocker — always attempt to retrieve the code from Gmail before giving up"
     )
 
+    has_password = bool(agent_sensitive_data.get("password", "").strip())
+
+    # When a password is configured it is the one account password for every
+    # site — the agent must never invent its own.
+    configured_password_note = (
+        "\n\nACCOUNT CREDENTIALS: A password is configured in Settings.\n"
+        "- To LOG IN to any site, use <secret>account_email</secret> and <secret>password</secret>.\n"
+        "- To CREATE an account on any site, use <secret>account_email</secret> and "
+        "<secret>password</secret> as the new password. Do NOT generate or invent a password.\n"
+        "- If the site rejects that password for its complexity rules, append characters to it "
+        "rather than replacing it, and report what you used.\n"
+    ) if has_password else ""
+
     if easy_apply:
         apply_instructions = (
             f"{login_preamble}"
             f"THEN: Go to {url} on LinkedIn. Click Easy Apply and complete the application. "
-            f"Use resume at {resume_path}. Auto-fill all fields from candidate profile."
+            f"Use resume at {resume_path}. Auto-fill all fields from candidate profile.\n\n"
+            f"EMAIL USAGE:\n"
+            f"- For APPLICATION FORM fields (contact email, email address, etc.): use <secret>email</secret>\n"
+            f"- For LOGGING IN or CREATING ACCOUNTS: use <secret>account_email</secret> and <secret>password</secret>\n"
+            f"{configured_password_note}"
             f"{otp_instructions}"
         )
     else:
-        has_password = bool(agent_sensitive_data.get("password", "").strip())
         password_note = ""
         if not has_password:
             password_note = (
@@ -221,7 +239,11 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             f"EMAIL USAGE:\n"
             f"- For APPLICATION FORM fields (contact email, email address, etc.): use <secret>email</secret>\n"
             f"- For LOGGING IN or CREATING ACCOUNTS on external ATS sites: use <secret>account_email</secret> and <secret>password</secret>\n"
+            f"{configured_password_note}"
             f"{password_note}"
+            f"SAFE LINK TARGETING — only interact with links and buttons a human could actually see "
+            f"in the job listing or the application form itself. Ignore anything hidden, zero-sized, "
+            f"positioned off-screen, or marked aria-hidden: those are honeypot traps used to detect bots.\n\n"
             f"If it's a video funnel or recruitment pitch, report failure and stop. "
             f"If the external form is broken after 3 attempts, report failure and stop.\n\n"
             f"BLOCKED SITES — if redirected to any of these, immediately call done with success=false: {', '.join(BLOCKED_DOMAINS)}"
@@ -233,11 +255,23 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     MAX_STEPS = 70
     _step_count = {"n": 0}
 
-    def _on_step_with_limit(browser_state, agent_output, step_num):
+    async def _on_step_with_limit(browser_state, agent_output, step_num):
         _agent_on_step(browser_state, agent_output, step_num)
         _step_count["n"] += 1
         if _step_count["n"] >= MAX_STEPS:
             raise Exception(f"Reached maximum of {MAX_STEPS} steps — stopping to avoid wasting tokens")
+
+        # CAPTCHA handling runs as code on every step, not as prompt text.
+        # captcha.handle() solves when the solver is on, and raises
+        # CaptchaUnsolved when a blocking challenge cannot be dealt with, which
+        # abandons this application and lets the worker move to the next job.
+        try:
+            await _captcha.handle(browser, config.load_runtime_settings())
+        except _captcha.CaptchaUnsolved:
+            raise
+        except Exception:
+            # Detection problems must never break an otherwise-fine run.
+            pass
 
     agent = Agent(
         task=(
@@ -346,6 +380,12 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             await save_job_status(url, "failed", error_msg[:2000])
             print(f"  ❌ [W{worker_id}] Failed: {title} at {company} — {error_msg[:100]}")
             return "failed"
+
+    except _captcha.CaptchaUnsolved as e:
+        # Abandon this application and move on — never pause or wait.
+        await save_job_status(url, "failed", f"CAPTCHA could not be solved ({e.challenge_type}): {e.reason}")
+        print(f"  🧩 [W{worker_id}] Abandoned (CAPTCHA): {title} at {company} — {e.reason}")
+        return "failed"
 
     except Exception as e:
         error_str = str(e)
