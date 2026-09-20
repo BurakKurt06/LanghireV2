@@ -335,6 +335,71 @@ class TestJobs:
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "missing_field"
 
+    # ── Bulk add (pasted links / uploaded file) ──────────────────────────
+    def test_bulk_add_accepts_a_pasted_block(self, auth_client):
+        text = "https://jobs.example.com/a\nhttps://jobs.example.com/b"
+        resp = auth_client.post("/jobs/add-bulk", json={"text": text})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["added"] == 2
+        assert auth_client.get("/jobs/stats").json()["pending"] == 2
+
+    def test_bulk_add_accepts_a_url_list(self, auth_client):
+        resp = auth_client.post(
+            "/jobs/add-bulk",
+            json={"urls": ["https://jobs.example.com/a", "https://jobs.example.com/b"]},
+        )
+        assert resp.json()["added"] == 2
+
+    def test_bulk_add_dedupes_within_the_same_paste(self, auth_client):
+        text = "https://jobs.example.com/a\nhttps://jobs.example.com/a"
+        body = auth_client.post("/jobs/add-bulk", json={"text": text}).json()
+        assert body["added"] == 1
+        assert body["skipped_duplicate"] == 1
+
+    def test_bulk_add_skips_urls_already_in_the_queue(self, auth_client):
+        url = "https://jobs.example.com/a"
+        auth_client.post("/jobs/add", json={"url": url})
+        body = auth_client.post("/jobs/add-bulk", json={"text": url}).json()
+        assert body["added"] == 0
+        assert body["skipped_duplicate"] == 1
+
+    def test_bulk_add_skips_invalid_and_internal_urls(self, auth_client):
+        """Junk lines and SSRF-style internal hosts are rejected, not fatal."""
+        text = "\n".join([
+            "https://jobs.example.com/good",
+            "not-a-url",
+            "http://127.0.0.1/admin",
+            "http://192.168.1.5/internal",
+            "ftp://files.example.com/x",
+        ])
+        body = auth_client.post("/jobs/add-bulk", json={"text": text}).json()
+        assert body["added"] == 1
+        assert body["skipped_invalid"] == 4
+
+    def test_bulk_add_ignores_blank_lines_and_decorations(self, auth_client):
+        """Pasted lists often carry bullets, quotes and trailing commas."""
+        text = '\n- https://jobs.example.com/a\n\n  "https://jobs.example.com/b",\n\t• https://jobs.example.com/c\n'
+        body = auth_client.post("/jobs/add-bulk", json={"text": text}).json()
+        assert body["added"] == 3
+
+    def test_bulk_added_jobs_are_external_and_pending(self, auth_client):
+        """Pasted links must flow into the External/All apply modes."""
+        auth_client.post("/jobs/add-bulk", json={"text": "https://jobs.example.com/a"})
+        job = auth_client.get("/jobs").json()[0]
+        assert job["status"] == "pending"
+        assert job["easy_apply"] is False
+        assert job["source"] == "pasted"
+
+    def test_bulk_add_empty_input_is_a_no_op(self, auth_client):
+        body = auth_client.post("/jobs/add-bulk", json={"text": "   \n\n  "}).json()
+        assert body["added"] == 0
+        assert body["total_submitted"] == 0
+
+    def test_bulk_add_reports_invalid_samples_for_the_ui(self, auth_client):
+        body = auth_client.post("/jobs/add-bulk", json={"text": "nonsense-line"}).json()
+        assert body["invalid_samples"] == ["nonsense-line"]
+
     def test_export_jobs_csv_empty(self, auth_client):
         """Export on an empty data dir returns a CSV with only the header row."""
         resp = auth_client.get("/jobs/export")

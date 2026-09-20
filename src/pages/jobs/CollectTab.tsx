@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Play, Square, Terminal, Loader2, Plus } from "lucide-react";
+import { Play, Square, Terminal, Loader2, Plus, ClipboardList, Upload } from "lucide-react";
 import {
   startJobCollection,
   stopJobCollection,
@@ -7,6 +7,8 @@ import {
   getPlugins,
   getProfile,
   addJob,
+  addJobsBulk,
+  type BulkAddResult,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
 import type { PluginConfig } from "../../lib/types";
@@ -39,6 +41,13 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   const [addJobTitle, setAddJobTitle] = useState("");
   const [addJobCompany, setAddJobCompany] = useState("");
   const [addingJob, setAddingJob] = useState(false);
+
+  // Bulk paste / file upload state
+  const [showPasteForm, setShowPasteForm] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasting, setPasting] = useState(false);
+  const [pasteResult, setPasteResult] = useState<BulkAddResult | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -185,6 +194,34 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
     }
   };
 
+  const submitPastedLinks = async (text: string) => {
+    if (!text.trim()) return;
+    setPasting(true);
+    setPasteResult(null);
+    try {
+      const res = await addJobsBulk(text);
+      setPasteResult(res);
+      if (res.added > 0) {
+        setPasteText("");
+        onJobsChanged();
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Failed to add links");
+    } finally {
+      setPasting(false);
+    }
+  };
+
+  const handleFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    setPasteText(text);
+    await submitPastedLinks(text);
+    // Allow re-picking the same file straight after.
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
   return (
     <div>
       {/* Action buttons */}
@@ -195,7 +232,75 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
         >
           <Plus className="w-4 h-4" /> Add Job
         </button>
+        <button
+          onClick={() => setShowPasteForm(!showPasteForm)}
+          className="btn-secondary"
+        >
+          <ClipboardList className="w-4 h-4" /> Paste Links
+        </button>
       </div>
+
+      {/* Paste / upload many links */}
+      {showPasteForm && (
+        <div className="card mb-5">
+          <h3 className="section-title mb-3">Paste or upload job links</h3>
+          <p className="text-[13px] text-muted-foreground mb-3">
+            One URL per line. Duplicates and invalid links are skipped. These are
+            treated as external applications, so they run in the External and All
+            apply modes.
+          </p>
+          <textarea
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            placeholder={"https://careers.example.com/job/123\nhttps://boards.greenhouse.io/acme/jobs/456"}
+            rows={8}
+            className="input-base resize-y font-mono text-[12px]"
+            aria-label="Job links, one per line"
+          />
+          <div className="flex items-center gap-2 mt-3">
+            <button
+              onClick={() => submitPastedLinks(pasteText)}
+              disabled={pasting || !pasteText.trim()}
+              className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {pasting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+              Add Links
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={pasting}
+              className="btn-secondary"
+            >
+              <Upload className="w-4 h-4" /> Upload File
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,.csv,.text,text/plain,text/csv"
+              onChange={handleFilePicked}
+              className="hidden"
+              data-testid="bulk-file-input"
+            />
+            <button type="button" onClick={() => setShowPasteForm(false)} className="btn-secondary">
+              Close
+            </button>
+          </div>
+          {pasteResult && (
+            <div className="info-box mt-3 text-[13px]">
+              Added <strong>{pasteResult.added}</strong>
+              {pasteResult.skipped_duplicate > 0 && <> · skipped {pasteResult.skipped_duplicate} duplicate{pasteResult.skipped_duplicate === 1 ? "" : "s"}</>}
+              {pasteResult.skipped_invalid > 0 && <> · skipped {pasteResult.skipped_invalid} invalid</>}
+              {pasteResult.invalid_samples.length > 0 && (
+                <div className="mt-1.5 text-muted-foreground">
+                  Rejected: {pasteResult.invalid_samples.slice(0, 3).join(", ")}
+                  {pasteResult.skipped_invalid > 3 ? ` +${pasteResult.skipped_invalid - 3} more` : ""}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Add Job Form */}
       {showAddJobForm && (

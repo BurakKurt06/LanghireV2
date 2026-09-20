@@ -23,6 +23,17 @@ class ApplyRequest(BaseModel):
     job_urls: Optional[list[str]] = Field(default=None, description="Specific job URLs to apply to (batch apply)")
 
 
+class AddJobsBulkRequest(BaseModel):
+    """Bulk-add job URLs from a pasted block or an uploaded file.
+
+    Either field may be supplied; `text` is split on newlines. Both are capped
+    so a stray large file cannot queue unbounded work.
+    """
+    urls: Optional[list[str]] = Field(default=None, max_length=1000)
+    text: Optional[str] = Field(default=None, max_length=200_000)
+    source: str = Field(default="pasted", max_length=40)
+
+
 class CollectFilters(BaseModel):
     filters: dict = Field(default_factory=dict, description="Plugin-specific filter key-value pairs")
 

@@ -20,9 +20,9 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 try:
-    from models import CollectRequest, ApplyRequest, DecayRequest, CleanupRequest
+    from models import CollectRequest, ApplyRequest, DecayRequest, CleanupRequest, AddJobsBulkRequest
 except ImportError:
-    from backend.models import CollectRequest, ApplyRequest, DecayRequest, CleanupRequest
+    from backend.models import CollectRequest, ApplyRequest, DecayRequest, CleanupRequest, AddJobsBulkRequest
 
 from core.config import get_data_dir, load_settings, save_settings, load_profile, save_profile
 from core.config import load_llm_settings, save_llm_settings
@@ -1177,6 +1177,81 @@ async def add_job_manually(body: dict):
     }
     write_jobs(jobs)
     return {"success": True, "url": url}
+
+
+@app.post("/jobs/add-bulk")
+async def add_jobs_bulk(body: AddJobsBulkRequest):
+    """Add many job URLs at once, from a pasted block or an uploaded file.
+
+    Accepts either a list of URLs or one raw text blob with one URL per line.
+    Blank lines and anything that is not a valid external URL are skipped and
+    reported back rather than failing the whole batch.
+    """
+    from datetime import datetime, timezone
+    from core.shared_config import read_jobs, write_jobs, validate_job_url
+
+    # Accept both shapes: a list, and/or a pasted/uploaded text blob.
+    raw_lines: list[str] = []
+    if body.urls:
+        raw_lines.extend(body.urls)
+    if body.text:
+        raw_lines.extend(body.text.splitlines())
+
+    # Strip whitespace and common list decorations (bullets, quotes, commas).
+    candidates: list[str] = []
+    for line in raw_lines:
+        cleaned = (line or "").strip().strip('"\'').lstrip("-*•\t ").rstrip(",;").strip()
+        if cleaned:
+            candidates.append(cleaned)
+
+    jobs = read_jobs()
+    now = datetime.now(timezone.utc).isoformat()
+
+    added: list[str] = []
+    skipped_invalid: list[str] = []
+    skipped_duplicate = 0
+    seen_in_batch: set[str] = set()
+
+    for url in candidates:
+        if url in seen_in_batch:
+            skipped_duplicate += 1
+            continue
+        seen_in_batch.add(url)
+        if not validate_job_url(url):
+            # Keep a short sample so the UI can show what was rejected.
+            if len(skipped_invalid) < 10:
+                skipped_invalid.append(url[:120])
+            continue
+        if url in jobs:
+            skipped_duplicate += 1
+            continue
+        jobs[url] = {
+            "url": url,
+            "title": "Pasted Link",
+            "company": "",
+            "location": "",
+            # Pasted links are external applications by definition, so they flow
+            # into the External and All apply modes.
+            "easy_apply": False,
+            "status": "pending",
+            "source": body.source or "pasted",
+            "collected_at": now,
+            "applied_at": None,
+            "error": None,
+        }
+        added.append(url)
+
+    if added:
+        write_jobs(jobs)
+
+    return {
+        "success": True,
+        "added": len(added),
+        "skipped_duplicate": skipped_duplicate,
+        "skipped_invalid": len(skipped_invalid),
+        "invalid_samples": skipped_invalid,
+        "total_submitted": len(candidates),
+    }
 
 
 @app.delete("/jobs")

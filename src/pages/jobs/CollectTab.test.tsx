@@ -9,6 +9,7 @@ import {
   getPlugins,
   getProfile,
   addJob,
+  addJobsBulk,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
 
@@ -26,6 +27,7 @@ vi.mock("../../lib/api", () => ({
   getPlugins: vi.fn(),
   getProfile: vi.fn(),
   addJob: vi.fn(),
+  addJobsBulk: vi.fn(),
 }));
 
 const mockStart = vi.mocked(startJobCollection);
@@ -34,6 +36,7 @@ const mockStatus = vi.mocked(getCollectionStatus);
 const mockGetPlugins = vi.mocked(getPlugins);
 const mockGetProfile = vi.mocked(getProfile);
 const mockAddJob = vi.mocked(addJob);
+const mockAddJobsBulk = vi.mocked(addJobsBulk);
 const mockTrackEvent = vi.mocked(trackEvent);
 
 const idleStatus = {
@@ -175,6 +178,82 @@ describe("CollectTab", () => {
     await waitFor(() => expect(mockStart).toHaveBeenCalled());
     // 5th argument is the full source list, in selection order.
     expect(mockStart.mock.calls[0][4]).toEqual(["linkedin", "indeed"]);
+  });
+
+  // ── Bulk paste / file upload ──────────────────────────────────────────
+  const bulkOk = (over = {}) => ({
+    success: true,
+    added: 2,
+    skipped_duplicate: 0,
+    skipped_invalid: 0,
+    invalid_samples: [],
+    total_submitted: 2,
+    ...over,
+  });
+
+  it("sends pasted links to the bulk endpoint", async () => {
+    mockAddJobsBulk.mockResolvedValue(bulkOk() as never);
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+
+    await user.click(screen.getByRole("button", { name: /Paste Links/ }));
+    const box = screen.getByLabelText("Job links, one per line");
+    await user.type(box, "https://a.example/1{Enter}https://b.example/2");
+    await user.click(screen.getByRole("button", { name: /Add Links/ }));
+
+    await waitFor(() => expect(mockAddJobsBulk).toHaveBeenCalled());
+    expect(mockAddJobsBulk.mock.calls[0][0]).toContain("https://a.example/1");
+    expect(onJobsChanged).toHaveBeenCalled();
+  });
+
+  it("reports added and skipped counts back to the user", async () => {
+    mockAddJobsBulk.mockResolvedValue(
+      bulkOk({ added: 3, skipped_duplicate: 2, skipped_invalid: 1, invalid_samples: ["junk"], total_submitted: 6 }) as never,
+    );
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+
+    await user.click(screen.getByRole("button", { name: /Paste Links/ }));
+    await user.type(screen.getByLabelText("Job links, one per line"), "https://a.example/1");
+    await user.click(screen.getByRole("button", { name: /Add Links/ }));
+
+    expect(await screen.findByText(/skipped 2 duplicates/)).toBeInTheDocument();
+    expect(screen.getByText(/skipped 1 invalid/)).toBeInTheDocument();
+    expect(screen.getByText(/junk/)).toBeInTheDocument();
+  });
+
+  it("disables Add Links until something is typed", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(screen.getByRole("button", { name: /Paste Links/ }));
+    expect(screen.getByRole("button", { name: /Add Links/ })).toBeDisabled();
+  });
+
+  it("uploads a file of links and submits its contents", async () => {
+    mockAddJobsBulk.mockResolvedValue(bulkOk() as never);
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(screen.getByRole("button", { name: /Paste Links/ }));
+
+    const file = new File(
+      ["https://a.example/1\nhttps://b.example/2\n"],
+      "jobs.txt",
+      { type: "text/plain" },
+    );
+    await user.upload(screen.getByTestId("bulk-file-input") as HTMLInputElement, file);
+
+    await waitFor(() => expect(mockAddJobsBulk).toHaveBeenCalled());
+    expect(mockAddJobsBulk.mock.calls[0][0]).toContain("https://b.example/2");
+  });
+
+  it("alerts when the bulk add fails", async () => {
+    mockAddJobsBulk.mockRejectedValue(new Error("backend down"));
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(screen.getByRole("button", { name: /Paste Links/ }));
+    await user.type(screen.getByLabelText("Job links, one per line"), "https://a.example/1");
+    await user.click(screen.getByRole("button", { name: /Add Links/ }));
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith("backend down"));
   });
 
   it("resumes display when a collection is already running on mount", async () => {

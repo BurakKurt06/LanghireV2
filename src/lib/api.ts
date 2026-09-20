@@ -202,6 +202,23 @@ export async function addJob(url: string, title?: string, company?: string, sour
   });
 }
 
+export interface BulkAddResult {
+  success: boolean;
+  added: number;
+  skipped_duplicate: number;
+  skipped_invalid: number;
+  invalid_samples: string[];
+  total_submitted: number;
+}
+
+/** Add many job URLs at once, from a pasted block or the contents of a file. */
+export async function addJobsBulk(text: string) {
+  return request<BulkAddResult>("/jobs/add-bulk", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+}
+
 export async function deleteJobs(urls: string[]) {
   return request<{ success: boolean; deleted: number }>("/jobs", {
     method: "DELETE",
