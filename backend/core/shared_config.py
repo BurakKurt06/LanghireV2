@@ -138,6 +138,19 @@ async def maybe_human_delay(label: str = "") -> float:
     return delay
 
 
+async def worker_stagger(default_seconds: float = 5.0) -> float:
+    """Space out browser launches when several workers start at once.
+
+    Uses the randomised human-delay window when that switch is on, so there is
+    a single delay system rather than two competing settings. Falls back to the
+    previous fixed pause otherwise, keeping default behaviour unchanged.
+    """
+    if load_runtime_settings().get("human_delay_enabled"):
+        return await maybe_human_delay("the next worker")
+    await asyncio.sleep(default_seconds)
+    return default_seconds
+
+
 def validate_job_url(url: str) -> bool:
     """Reject URLs pointing to private/internal networks (SSRF prevention)."""
     from urllib.parse import urlparse

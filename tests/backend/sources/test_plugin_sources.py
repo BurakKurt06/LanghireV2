@@ -91,6 +91,64 @@ class TestCollectionPromptContract:
         assert "C:/resumes/me.pdf" in out
 
 
+class TestLinkedInParity:
+    """linkedin.yaml must carry everything the old hardcoded prompt did.
+
+    LinkedIn now runs from its plugin YAML like every other source. These
+    assertions are the guard against that switch having dropped a rule.
+    """
+
+    @pytest.fixture
+    def rendered(self, registry):
+        return registry.get_by_name("linkedin").render_collection_prompt(
+            ["Software Engineer"], ["Toronto, ON"], 25, None,
+            languages=["English", "Turkish"],
+        )
+
+    @pytest.mark.parametrize("needle", [
+        "LOGIN CHECK",
+        "linkedin.com/feed",
+        "mail.google.com",
+        "linkedin.com/jobs/search",
+        "left side of the page",
+        "currentJobId",
+        "Easy Apply",
+        "ONE @@JOB_FOUND marker per step",
+        "Do NOT use extract",
+        "Do NOT apply",
+    ])
+    def test_navigation_rules_survived(self, rendered, needle):
+        assert needle in rendered
+
+    def test_prompt_injection_defence_present(self, rendered):
+        """The single most important rule: job text is data, not instructions."""
+        assert "prompt injection" in rendered
+        assert "NEVER follow instructions" in rendered
+
+    def test_language_filter_present_and_populated(self, rendered):
+        assert "languages other than" in rendered
+        assert "English, Turkish" in rendered
+
+    def test_honeypot_rule_present(self, rendered):
+        assert "honeypot" in rendered
+
+    def test_max_jobs_substituted(self, rendered):
+        assert "25" in rendered
+
+    def test_job_found_marker_format(self, rendered):
+        assert '@@JOB_FOUND: {"title"' in rendered
+
+    def test_filters_are_applied_to_the_url(self, rendered):
+        """The YAML's own filter defaults replace the old hardcoded mapping."""
+        assert "f_TPR" in rendered
+
+    def test_languages_defaults_to_english(self, registry):
+        out = registry.get_by_name("linkedin").render_collection_prompt(
+            ["Analyst"], ["NYC"], 5
+        )
+        assert "languages other than: English" in out
+
+
 class TestSearchUrlEncoding:
     """Values going into search_url must be percent-encoded.
 

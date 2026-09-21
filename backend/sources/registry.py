@@ -63,7 +63,14 @@ class PluginConfig:
     enabled: bool = True
     file_path: str = ""
 
-    def render_collection_prompt(self, titles: list[str], locations: list[str], max_jobs: int, filters: dict | None = None) -> str:
+    def render_collection_prompt(
+        self,
+        titles: list[str],
+        locations: list[str],
+        max_jobs: int,
+        filters: dict | None = None,
+        languages: list[str] | None = None,
+    ) -> str:
         from urllib.parse import quote_plus
 
         title = titles[0] if titles else ""
@@ -96,6 +103,7 @@ class PluginConfig:
             title=title, titles=", ".join(titles),
             location=location, locations=", ".join(locations),
             max_jobs=max_jobs,
+            languages=", ".join(languages) if languages else "English",
         )
 
     def render_apply_prompt(

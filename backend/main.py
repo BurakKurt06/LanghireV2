@@ -812,15 +812,11 @@ async def start_collection(body: CollectRequest):
         titles = [title] if title else profile.get("target_job_titles", [])
         cred_task = asyncio.create_task(credential_refresh_loop(CREDENTIAL_REFRESH_MINUTES))
 
-        # Resolve the selected source names to plugins. LinkedIn stays on the
-        # built-in prompt (plugin=None) because it carries prompt-injection
-        # defences and duplicate-skipping that the YAML does not.
+        # Resolve the selected source names to plugins. Every source, LinkedIn
+        # included, now runs from its plugin YAML.
         registry = _get_plugin_registry()
         resolved: list[tuple[str, object | None]] = []
         for name in selected_sources:
-            if name == "linkedin":
-                resolved.append(("LinkedIn", None))
-                continue
             plugin = registry.get_by_name(name)
             if plugin is None:
                 print(f"  ⚠️  Unknown source '{name}' — skipping")
@@ -837,9 +833,13 @@ async def start_collection(body: CollectRequest):
             if _collection_status.get("cancel_requested"):
                 print("🛑 Stop requested — halting collection")
                 break
-            for label, plugin in resolved:
+            for si, (label, plugin) in enumerate(resolved):
                 if _collection_status.get("cancel_requested"):
                     break
+                # Randomised pause between sources/titles when delays are on.
+                if i > 0 or si > 0:
+                    from core.shared_config import maybe_human_delay
+                    await maybe_human_delay("the next source")
                 print(f"\n{'='*60}")
                 print(f"[{i+1}/{len(titles)}] Collecting: {t} — from {label}")
                 print(f"{'='*60}")
@@ -1025,7 +1025,8 @@ async def start_applying(body: ApplyRequest):
         tasks = []
         for i in range(num_workers):
             if i > 0:
-                await asyncio.sleep(5)
+                from core.shared_config import worker_stagger
+                await worker_stagger()
             tasks.append(asyncio.create_task(
                 apply_jobs.worker(f"W{i+1}", i+1, queue, profile, qa, applied_labels, worker_easy_apply, stats, cancel_flag=_apply_status)
             ))

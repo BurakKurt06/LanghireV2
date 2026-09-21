@@ -66,7 +66,6 @@ const baseSettings = {
   sensitive_data: { email: "me@example.com", password: "secret" },
   max_failures: 8,
   data_dir: "/data",
-  stagger_delay: 5,
   telemetry_enabled: true,
 };
 

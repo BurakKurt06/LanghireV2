@@ -146,14 +146,13 @@ def test_load_settings_defaults(data_dir):
     """Default app settings include sane defaults and the data dir."""
     s = config.load_settings()
     assert s["max_failures"] == 8
-    assert s["stagger_delay"] == 5
     assert s["telemetry_enabled"] is True
     assert s["data_dir"] == str(data_dir)
 
 
 def test_save_settings_roundtrip(data_dir):
     """A saved settings dict reads back with the clamped values."""
-    config.save_settings({"resume_path": "/x.pdf", "max_failures": 8, "stagger_delay": 5})
+    config.save_settings({"resume_path": "/x.pdf", "max_failures": 8})
     loaded = config.load_settings()
     assert loaded["resume_path"] == "/x.pdf"
 
@@ -172,10 +171,10 @@ def test_save_settings_clamps_max_failures(data_dir, given, expected):
     "given, expected",
     [(-5, 0), (0, 0), (5, 5), (300, 300), (301, 300), ("42", 42)],
 )
-def test_save_settings_clamps_stagger_delay(data_dir, given, expected):
-    """stagger_delay is clamped to [0, 300] and coerced to int."""
-    config.save_settings({"stagger_delay": given})
-    assert config.load_settings()["stagger_delay"] == expected
+def test_save_settings_clamps_human_delay(data_dir, given, expected):
+    """The human-delay bounds are clamped to [0, 300] and coerced to int."""
+    config.save_settings({"human_delay_min": given})
+    assert config.load_settings()["human_delay_min"] == expected
 
 
 def test_save_settings_cleans_blocked_domains(data_dir):

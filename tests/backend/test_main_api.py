@@ -200,11 +200,11 @@ class TestAppSettings:
         assert loaded["blocked_domains"] == ["spam.com"]
 
     def test_settings_clamps_out_of_range_values(self, auth_client):
-        """max_failures / stagger_delay are clamped to safe bounds on save."""
-        auth_client.put("/settings", json={"max_failures": 9999, "stagger_delay": -5})
+        """max_failures / human-delay bounds are clamped to safe bounds on save."""
+        auth_client.put("/settings", json={"max_failures": 9999, "human_delay_min": -5})
         loaded = auth_client.get("/settings").json()
         assert loaded["max_failures"] == 50  # clamped to upper bound
-        assert loaded["stagger_delay"] == 0  # clamped to lower bound
+        assert loaded["human_delay_min"] == 0  # clamped to lower bound
 
     def test_settings_strips_blank_blocked_domains(self, auth_client):
         auth_client.put("/settings", json={"blocked_domains": ["  ", "real.com", ""]})

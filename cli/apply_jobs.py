@@ -479,7 +479,7 @@ async def main():
     workers = []
     for i in range(num_workers):
         if i > 0:
-            await asyncio.sleep(5)  # stagger browser launches
+            await config.worker_stagger()  # stagger browser launches
         workers.append(
             asyncio.create_task(worker(f"W{i+1}", i+1, queue, profile, qa, applied_labels, args.easy_apply, stats))
         )

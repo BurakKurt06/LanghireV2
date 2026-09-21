@@ -175,6 +175,46 @@ class TestHumanDelay:
         assert 0.01 <= delay <= 0.02
 
 
+class TestWorkerStagger:
+    """Worker launches are spaced out by the one delay system."""
+
+    async def test_uses_the_fixed_pause_when_delays_are_off(self, monkeypatch):
+        monkeypatch.setattr(
+            shared_config, "load_runtime_settings", lambda: {"human_delay_enabled": False}
+        )
+        slept = {}
+
+        async def fake_sleep(s):
+            slept["for"] = s
+
+        monkeypatch.setattr(shared_config.asyncio, "sleep", fake_sleep)
+        out = await shared_config.worker_stagger(default_seconds=5)
+        assert out == 5
+        assert slept["for"] == 5
+
+    async def test_uses_the_randomised_window_when_delays_are_on(self, monkeypatch):
+        monkeypatch.setattr(
+            shared_config,
+            "load_runtime_settings",
+            lambda: {"human_delay_enabled": True, "human_delay_min": 0.01, "human_delay_max": 0.02},
+        )
+        out = await shared_config.worker_stagger(default_seconds=5)
+        assert 0.01 <= out <= 0.02
+
+
+class TestStaggerDelayRemoved:
+    """The dead `stagger_delay` setting is gone; one delay system remains."""
+
+    def test_not_in_defaults(self, data_dir):
+        assert "stagger_delay" not in load_settings()
+
+    def test_human_delay_settings_are_the_replacement(self, data_dir):
+        s = load_settings()
+        assert "human_delay_enabled" in s
+        assert "human_delay_min" in s
+        assert "human_delay_max" in s
+
+
 # ── Stealth gating ──────────────────────────────────────────────────────────
 class TestMaybeApplyStealth:
     async def test_skipped_when_disabled(self, monkeypatch):

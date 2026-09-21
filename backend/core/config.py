@@ -104,7 +104,6 @@ def load_settings() -> dict:
         "blocked_domains": [],
         "sensitive_data": {"email": "", "password": ""},
         "max_failures": 8,
-        "stagger_delay": 5,
         "data_dir": str(get_data_dir()),
         "telemetry_enabled": True,
         "theme": "system",
@@ -125,8 +124,6 @@ def load_settings() -> dict:
 def save_settings(settings: dict):
     if "max_failures" in settings:
         settings["max_failures"] = max(1, min(int(settings["max_failures"]), 50))
-    if "stagger_delay" in settings:
-        settings["stagger_delay"] = max(0, min(int(settings["stagger_delay"]), 300))
     if "human_delay_min" in settings:
         settings["human_delay_min"] = max(0, min(int(settings["human_delay_min"]), 300))
     if "human_delay_max" in settings:

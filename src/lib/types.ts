@@ -96,7 +96,6 @@ export interface AppSettings {
     password: string;
   };
   max_failures: number;
-  stagger_delay: number;
   data_dir: string;
   telemetry_enabled: boolean;
   theme?: "light" | "dark" | "system";
