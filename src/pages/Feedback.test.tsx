@@ -8,7 +8,7 @@ vi.mock("react-i18next", () => ({
 
 import Feedback from "./Feedback";
 
-const EMAIL = "xyz@gmail.com";
+const EMAIL = "t1467635@gmail.com";
 
 describe("Feedback", () => {
   it("renders the page heading and subtitle", () => {

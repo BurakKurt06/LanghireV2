@@ -2,7 +2,7 @@ import { Mail } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 // Where feedback should be sent. Change this one line to use a different address.
-const FEEDBACK_EMAIL = "xyz@gmail.com";
+const FEEDBACK_EMAIL = "t1467635@gmail.com";
 
 export default function Feedback() {
   const { t } = useTranslation("feedback");
