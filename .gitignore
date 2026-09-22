@@ -18,14 +18,18 @@ src-tauri/target/
 src-tauri/gen/
 
 # ── User Data (sensitive / personal) ──────────────────────────────────────
-candidate_profile.json
-qa_repository.json
-jobs.json
-applied_jobs.json
-memory_store.db
-memory_store.db-wal
-memory_store.db-shm
-memory_export.json
+# Anchored with a leading slash so they match only these runtime files at the
+# repo root. Unanchored, `jobs.json` also matched src/locales/*/jobs.json and
+# silently kept all 13 translation files out of the repo, which broke a fresh
+# clone: src/i18n/index.ts statically imports ../locales/en/jobs.json.
+/candidate_profile.json
+/qa_repository.json
+/jobs.json
+/applied_jobs.json
+/memory_store.db
+/memory_store.db-wal
+/memory_store.db-shm
+/memory_export.json
 
 # Browser profiles (large, user-specific cookies/sessions)
 browser_profile/
