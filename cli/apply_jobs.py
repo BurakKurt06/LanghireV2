@@ -166,16 +166,35 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     if not agent_sensitive_data["email"]:
         agent_sensitive_data["email"] = agent_sensitive_data["account_email"]
 
-    login_preamble = (
-        f"FIRST — LOGIN CHECK:\n"
-        f"1. Go to https://www.linkedin.com/feed/ to check if you're logged into LinkedIn.\n"
-        f"   - If you see the feed/home page → logged in ✓\n"
-        f"   - If you see a login page → WAIT for user to log in manually. Check every 15 seconds (refresh). Wait up to 5 minutes.\n"
-        f"2. Open a new tab and go to https://mail.google.com/mail/u/0/#inbox to check Gmail.\n"
-        f"   - If you see the Gmail inbox (list of emails) → logged in ✓\n"
-        f"   - If you see a Google sign-in page or redirect → WAIT for user to log in manually. Check every 15 seconds. Wait up to 5 minutes.\n"
-        f"3. Close the Gmail tab and switch back to LinkedIn.\n\n"
-    )
+    # Jobs no longer come only from LinkedIn: pasted links, Handshake and Intern
+    # Insider all land here. Telling the agent a greenhouse.io URL is "on
+    # LinkedIn" sends it to the wrong site, so the wording follows the URL.
+    from urllib.parse import urlparse as _urlparse
+    _host = (_urlparse(url).hostname or "").lower()
+    is_linkedin = _host.endswith("linkedin.com")
+
+    if is_linkedin:
+        login_preamble = (
+            f"FIRST — LOGIN CHECK:\n"
+            f"1. Go to https://www.linkedin.com/feed/ to check if you're logged into LinkedIn.\n"
+            f"   - If you see the feed/home page → logged in ✓\n"
+            f"   - If you see a login page → WAIT for user to log in manually. Check every 15 seconds (refresh). Wait up to 5 minutes.\n"
+            f"2. Open a new tab and go to https://mail.google.com/mail/u/0/#inbox to check Gmail.\n"
+            f"   - If you see the Gmail inbox (list of emails) → logged in ✓\n"
+            f"   - If you see a Google sign-in page or redirect → WAIT for user to log in manually. Check every 15 seconds. Wait up to 5 minutes.\n"
+            f"3. Close the Gmail tab and switch back to LinkedIn.\n\n"
+        )
+    else:
+        # Not a LinkedIn posting: skip the LinkedIn check entirely (it would
+        # only waste steps) but still make sure Gmail is reachable for OTPs.
+        login_preamble = (
+            f"FIRST — LOGIN CHECK:\n"
+            f"1. Open https://mail.google.com/mail/u/0/#inbox to check Gmail is signed in.\n"
+            f"   - If you see the inbox → logged in ✓\n"
+            f"   - If you see a Google sign-in page → WAIT for user to log in manually. Check every 15 seconds. Wait up to 5 minutes.\n"
+            f"   Gmail is needed only to read verification codes later.\n"
+            f"2. Close the Gmail tab.\n\n"
+        )
 
     otp_instructions = (
         "\n\nOTP/VERIFICATION CODES: If ANY site asks for a verification code, OTP, or 2FA token:\n"
@@ -224,9 +243,20 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
                 "5. If nothing works after 3 attempts, report failure and move to the next job\n"
             )
 
+        # A LinkedIn posting needs the extra hop through its Apply button; a
+        # pasted link or a Handshake/Intern Insider posting is already on (or one
+        # click from) the employer's own form.
+        opening = (
+            f"THEN: Go to {url} on LinkedIn. Click Apply and follow through to the "
+            f"external application page. "
+            if is_linkedin else
+            f"THEN: Go to {url}. This is a job posting; it is NOT on LinkedIn, so do "
+            f"not go to LinkedIn. Find the application form on this site, following "
+            f"an 'Apply' button through to the employer's own form if needed. "
+        )
         apply_instructions = (
             f"{login_preamble}"
-            f"THEN: Go to {url} on LinkedIn. Click Apply and follow through to the external application page. "
+            f"{opening}"
             f"Use resume at {resume_path}. Auto-fill all fields from candidate profile.\n\n"
             f"NAVIGATING EXTERNAL SITES:\n"
             f"- The LinkedIn 'Apply' button often opens a company careers page, NOT the application form directly.\n"
@@ -254,6 +284,10 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
 
     MAX_STEPS = 70
     _step_count = {"n": 0}
+    _agent_ref = {"agent": None}
+    # Set when a blocking CAPTCHA cannot be solved, so the run can be ended and
+    # reported accurately after agent.run() returns.
+    _captcha_failure = {"error": None}
 
     async def _on_step_with_limit(browser_state, agent_output, step_num):
         _agent_on_step(browser_state, agent_output, step_num)
@@ -262,13 +296,21 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             raise Exception(f"Reached maximum of {MAX_STEPS} steps — stopping to avoid wasting tokens")
 
         # CAPTCHA handling runs as code on every step, not as prompt text.
-        # captcha.handle() solves when the solver is on, and raises
-        # CaptchaUnsolved when a blocking challenge cannot be dealt with, which
-        # abandons this application and lets the worker move to the next job.
+        # captcha.handle() solves when the solver is on and raises
+        # CaptchaUnsolved when a blocking challenge cannot be dealt with.
+        #
+        # We must NOT let that exception escape: browser-use catches everything
+        # raised from a step callback in Agent.step() and routes it to
+        # _handle_step_error(), which only counts a failure and carries on. The
+        # run would then burn up to max_failures more LLM steps and finish with
+        # a generic error. Calling agent.stop() ends the run promptly instead,
+        # and the stored error gives an accurate reason afterwards.
         try:
             await _captcha.handle(browser, config.load_runtime_settings())
-        except _captcha.CaptchaUnsolved:
-            raise
+        except _captcha.CaptchaUnsolved as e:
+            _captcha_failure["error"] = e
+            if _agent_ref["agent"]:
+                _agent_ref["agent"].stop()
         except Exception:
             # Detection problems must never break an otherwise-fine run.
             pass
@@ -301,9 +343,20 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         register_new_step_callback=_on_step_with_limit,
         register_done_callback=_agent_on_done,
     )
+    _agent_ref["agent"] = agent
 
     try:
         result = await agent.run()
+
+        # A blocking CAPTCHA we could not solve ends the application here,
+        # regardless of what the agent reported, so the next job can start.
+        if _captcha_failure["error"] is not None:
+            e = _captcha_failure["error"]
+            await save_job_status(
+                url, "failed", f"CAPTCHA could not be solved ({e.challenge_type}): {e.reason}"
+            )
+            print(f"  🧩 [W{worker_id}] Abandoned (CAPTCHA): {title} at {company} — {e.reason}")
+            return "failed"
 
         # Extract Q&A from history
         _, new_questions = extract_from_history(result)

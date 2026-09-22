@@ -189,6 +189,60 @@ def _inject_js(challenge: Challenge, token: str) -> str:
     else:
         field = ""
 
+    if challenge.type == IMAGE_CAPTCHA:
+        # An image CAPTCHA answer is typed into a text box, not written to a
+        # hidden token element. Find the most likely input: one whose name/id
+        # mentions captcha, else the text input nearest the captcha image.
+        return f"""
+(() => {{
+  const answer = '{safe}';
+  const visible = (el) => {{
+    if (!el) return false;
+    const s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }};
+  const inputs = Array.from(
+    document.querySelectorAll('input[type="text"], input:not([type]), input[type="tel"]')
+  ).filter(visible);
+  if (!inputs.length) return false;
+
+  let target = inputs.find((i) =>
+    ((i.name || '') + ' ' + (i.id || '') + ' ' + (i.className || '') +
+     ' ' + (i.placeholder || '') + ' ' + (i.getAttribute('aria-label') || ''))
+      .toLowerCase().includes('captcha')
+  );
+
+  if (!target) {{
+    // Fall back to the visible text input closest to the CAPTCHA image.
+    const img = Array.from(document.querySelectorAll('img')).find((i) => {{
+      const hay = ((i.src || '') + ' ' + (i.id || '') + ' ' + (i.className || '') +
+                   ' ' + (i.alt || '')).toLowerCase();
+      return hay.includes('captcha') && visible(i);
+    }});
+    if (img) {{
+      const ir = img.getBoundingClientRect();
+      let best = Infinity;
+      for (const i of inputs) {{
+        const r = i.getBoundingClientRect();
+        const d = Math.hypot(r.left - ir.left, r.top - ir.top);
+        if (d < best) {{ best = d; target = i; }}
+      }}
+    }}
+  }}
+
+  if (!target) return false;
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype, 'value'
+  ).set;
+  setter.call(target, answer);            // works with React-controlled inputs
+  target.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  target.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return true;
+}})();
+"""
+
     if not field:
         return ""
 
@@ -263,7 +317,12 @@ def _solve_sync(api_key: str, challenge: Challenge) -> str:
     elif challenge.type == TURNSTILE:
         res = solver.turnstile(sitekey=challenge.sitekey, url=challenge.page_url)
     elif challenge.type == IMAGE_CAPTCHA:
-        res = solver.normal(challenge.image_b64)
+        # The detector hands back the <img> src, which is either a data: URI or
+        # a normal URL. 2Captcha wants raw base64 for the former.
+        src = challenge.image_b64
+        if src.startswith("data:"):
+            src = src.split(",", 1)[-1]
+        res = solver.normal(src)
     else:
         raise ValueError(f"unsupported challenge type: {challenge.type}")
     return (res or {}).get("code", "")

@@ -206,6 +206,45 @@ class TestAppSettings:
         assert loaded["max_failures"] == 50  # clamped to upper bound
         assert loaded["human_delay_min"] == 0  # clamped to lower bound
 
+    def test_partial_update_does_not_wipe_other_settings(self, auth_client):
+        """A partial PUT is a patch, not a replace.
+
+        save_settings() rewrites the file wholesale, so without merging, the
+        theme button (which sends only {"theme"}) destroyed every other key -
+        including the account password and the 2Captcha API key.
+        """
+        auth_client.put("/settings", json={
+            "resume_path": "/r.pdf",
+            "sensitive_data": {"email": "me@example.com", "password": "pw"},
+            "captcha_api_key": "key-123",
+            "blocked_domains": ["spam.com"],
+        })
+        # Now send only the theme, exactly as the theme buttons do.
+        auth_client.put("/settings", json={"theme": "dark"})
+
+        loaded = auth_client.get("/settings").json()
+        assert loaded["theme"] == "dark"
+        assert loaded["resume_path"] == "/r.pdf"
+        assert loaded["sensitive_data"]["password"] == "pw"
+        assert loaded["captcha_api_key"] == "key-123"
+        assert loaded["blocked_domains"] == ["spam.com"]
+
+    def test_partial_update_still_replaces_a_supplied_list(self, auth_client):
+        """Merging is per key, so a supplied list replaces rather than appends."""
+        auth_client.put("/settings", json={"blocked_domains": ["a.com", "b.com"]})
+        auth_client.put("/settings", json={"blocked_domains": ["a.com"]})
+        assert auth_client.get("/settings").json()["blocked_domains"] == ["a.com"]
+
+    def test_switches_survive_an_unrelated_partial_update(self, auth_client):
+        auth_client.put("/settings", json={
+            "job_collection_enabled": False, "stealth_enabled": True,
+        })
+        auth_client.put("/settings", json={"max_failures": 12})
+        loaded = auth_client.get("/settings").json()
+        assert loaded["job_collection_enabled"] is False
+        assert loaded["stealth_enabled"] is True
+        assert loaded["max_failures"] == 12
+
     def test_settings_strips_blank_blocked_domains(self, auth_client):
         auth_client.put("/settings", json={"blocked_domains": ["  ", "real.com", ""]})
         loaded = auth_client.get("/settings").json()

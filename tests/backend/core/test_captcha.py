@@ -112,8 +112,25 @@ class TestInjection:
         js = captcha._inject_js(Challenge(type=kind, sitekey="k"), "tok")
         assert field in js
 
-    def test_image_captcha_has_no_injection_script(self):
-        assert captcha._inject_js(Challenge(type=IMAGE_CAPTCHA), "tok") == ""
+    def test_image_captcha_types_the_answer_into_an_input(self):
+        """An image answer is typed into a text box, not written to a token field."""
+        js = captcha._inject_js(Challenge(type=IMAGE_CAPTCHA), "AB12")
+        assert js != ""
+        assert "AB12" in js
+        assert "input" in js
+        # Must use the native setter so React-controlled inputs register it.
+        assert "HTMLInputElement.prototype" in js
+
+    def test_image_injection_prefers_a_captcha_named_input(self):
+        js = captcha._inject_js(Challenge(type=IMAGE_CAPTCHA), "AB12")
+        assert "captcha" in js.lower()
+
+    def test_image_injection_skips_hidden_inputs(self):
+        js = captcha._inject_js(Challenge(type=IMAGE_CAPTCHA), "AB12")
+        assert "display" in js and "visibility" in js
+
+    def test_unknown_type_has_no_injection_script(self):
+        assert captcha._inject_js(Challenge(type="something_else"), "tok") == ""
 
     def test_token_is_escaped(self):
         """A token containing a quote must not break out of the JS string."""
@@ -122,8 +139,48 @@ class TestInjection:
 
     async def test_inject_returns_false_for_unsupported_type(self, monkeypatch):
         stub_evaluate(monkeypatch, None)
-        ok = await captcha.inject_token(FakeSession(), Challenge(type=IMAGE_CAPTCHA), "t")
+        ok = await captcha.inject_token(FakeSession(), Challenge(type="something_else"), "t")
         assert ok is False
+
+
+class TestImageCaptchaSource:
+    """2Captcha wants raw base64 for a data: URI, and a URL otherwise."""
+
+    def test_data_uri_prefix_is_stripped(self, monkeypatch):
+        captured = {}
+
+        class FakeSolver:
+            def __init__(self, key): pass
+            def normal(self, src):
+                captured["src"] = src
+                return {"code": "AB12"}
+
+        import sys, types
+        mod = types.ModuleType("twocaptcha")
+        mod.TwoCaptcha = FakeSolver
+        monkeypatch.setitem(sys.modules, "twocaptcha", mod)
+
+        ch = Challenge(type=IMAGE_CAPTCHA, image_b64="data:image/png;base64,IMGDATA")
+        assert captcha._solve_sync(API_KEY, ch) == "AB12"
+        assert captured["src"] == "IMGDATA"
+
+    def test_plain_url_is_passed_through(self, monkeypatch):
+        captured = {}
+
+        class FakeSolver:
+            def __init__(self, key): pass
+            def normal(self, src):
+                captured["src"] = src
+                return {"code": "CD34"}
+
+        import sys, types
+        mod = types.ModuleType("twocaptcha")
+        mod.TwoCaptcha = FakeSolver
+        monkeypatch.setitem(sys.modules, "twocaptcha", mod)
+
+        ch = Challenge(type=IMAGE_CAPTCHA, image_b64="https://x.test/c.png")
+        assert captcha._solve_sync(API_KEY, ch) == "CD34"
+        assert captured["src"] == "https://x.test/c.png"
 
 
 # ── Solving ─────────────────────────────────────────────────────────────────

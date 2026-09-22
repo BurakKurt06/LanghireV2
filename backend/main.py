@@ -561,7 +561,18 @@ async def get_settings():
 
 @app.put("/settings")
 async def update_settings(settings: dict):
-    save_settings(settings)
+    """Update app settings.
+
+    Merged into what is already stored rather than replacing it. save_settings()
+    rewrites settings.json wholesale, so a partial PUT used to wipe every key it
+    did not mention — clicking a theme button (which sends only {"theme"}) would
+    silently destroy the resume path, blocked domains, the account email and
+    password and the 2Captcha key. Keys present in the request still win, so
+    sending a full list (e.g. blocked_domains) replaces it as before.
+    """
+    merged = load_settings()
+    merged.update(settings)
+    save_settings(merged)
     return {"success": True}
 
 
@@ -785,8 +796,8 @@ async def start_collection(body: CollectRequest):
     max_jobs = body.max_jobs
     filters = body.filters or {}
     # Sources to collect from. `sources` (list) wins; fall back to the single
-    # `source` field so older callers keep working. "linkedin" is represented as
-    # None so it uses the built-in prompt path, exactly as before.
+    # `source` field so older callers keep working. Duplicates are dropped and
+    # order is preserved.
     selected_sources = body.sources if body.sources else [body.source or "linkedin"]
     selected_sources = [s for s in dict.fromkeys(selected_sources) if s]
     _collection_status = {"running": True, "title": title or "all titles", "log": ["Starting collection... This may take several minutes per job title."], "collected": 0, "max_jobs": max_jobs}

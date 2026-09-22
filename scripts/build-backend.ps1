@@ -48,6 +48,7 @@ uv run python -m PyInstaller `
   --hidden-import pydantic_settings `
   --hidden-import psutil `
   --hidden-import yaml `
+  --hidden-import twocaptcha `
   --collect-all browser_use `
   --collect-all playwright `
   --clean `
