@@ -68,12 +68,13 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
       : undefined;
 
   const toggleSource = (name: string) => {
-    setCollectSources((prev) => {
-      const next = prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name];
-      // Changing the source set invalidates plugin-specific filters.
-      setCollectFilters({});
-      return next;
-    });
+    setCollectSources((prev) =>
+      prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name],
+    );
+    // Changing the source set invalidates plugin-specific filters. Kept outside
+    // the updater above: updater functions must be pure, and React may run them
+    // twice in StrictMode.
+    setCollectFilters({});
   };
 
   // Load available plugins/sources
@@ -221,9 +222,22 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
     }
   };
 
+  // The backend caps the pasted text at 200k characters. Check here too so an
+  // oversized file fails with a clear message instead of an opaque 422 after
+  // being read into memory and uploaded.
+  const MAX_UPLOAD_BYTES = 200_000;
+
   const handleFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > MAX_UPLOAD_BYTES) {
+      alert(
+        `That file is ${Math.round(file.size / 1024)} KB, over the ${MAX_UPLOAD_BYTES / 1000} KB limit. ` +
+          `Split it up — one job URL per line is only ~60 bytes, so this holds a few thousand links.`,
+      );
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
     const text = await file.text();
     setPasteText(text);
     await submitPastedLinks(text);

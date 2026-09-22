@@ -250,6 +250,19 @@ describe("CollectTab", () => {
     expect(mockAddJobsBulk.mock.calls[0][0]).toContain("https://b.example/2");
   });
 
+  it("rejects an oversized file without uploading it", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(screen.getByRole("button", { name: /Paste Links/ }));
+
+    // 300 KB, over the 200 KB cap the backend enforces.
+    const big = new File(["x".repeat(300_000)], "huge.txt", { type: "text/plain" });
+    await user.upload(screen.getByTestId("bulk-file-input") as HTMLInputElement, big);
+
+    await waitFor(() => expect(window.alert).toHaveBeenCalled());
+    expect(mockAddJobsBulk).not.toHaveBeenCalled();
+  });
+
   it("alerts when the bulk add fails", async () => {
     mockAddJobsBulk.mockRejectedValue(new Error("backend down"));
     const user = userEvent.setup();
