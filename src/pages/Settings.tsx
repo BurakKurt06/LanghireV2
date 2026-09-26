@@ -1,18 +1,13 @@
 import { useState, useEffect } from "react";
 import { Save, FolderOpen, X, Upload, Trash2, Sun, Moon, Monitor } from "lucide-react";
-import { getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin } from "../lib/api";
+import { getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin, getBrowsers } from "../lib/api";
 import { setTelemetryEnabled as setAnalyticsTelemetry } from "../lib/analytics";
 import { getStoredTheme, setTheme, type ThemeMode } from "../lib/theme";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
-import { PageHeader, LoadingSpinner, Section } from "../components/ui";
+import { PageHeader, LoadingSpinner, Section, PasswordInput } from "../components/ui";
 import TagInput from "../components/ui/TagInput";
-import type { PluginConfig } from "../lib/types";
-import { LANGUAGE_NAMES, getSavedLanguage, saveLanguagePreference } from "../i18n/languageDetection";
-import { loadLanguage } from "../i18n";
-
-/** This build is English-only. Flip to true to show the language selector. */
-const SHOW_LANGUAGE_PICKER = false;
+import type { PluginConfig, InstalledBrowser } from "../lib/types";
 
 export default function SettingsPage() {
   const { t } = useTranslation("settings");
@@ -31,17 +26,13 @@ export default function SettingsPage() {
   const [captchaApiKey, setCaptchaApiKey] = useState("");
   const [telemetryEnabled, setTelemetryEnabled] = useState(true);
   const [theme, setThemeState] = useState<ThemeMode>(getStoredTheme());
-  const [currentLanguage, setCurrentLanguage] = useState<string>(getSavedLanguage() || "");
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [plugins, setPlugins] = useState<PluginConfig[]>([]);
-
-  const handleLanguageChange = async (lang: string) => {
-    setCurrentLanguage(lang);
-    saveLanguagePreference(lang);
-    await loadLanguage(lang || "en");
-  };
+  const [browser, setBrowser] = useState("");
+  const [browserPath, setBrowserPath] = useState("");
+  const [browsers, setBrowsers] = useState<InstalledBrowser[]>([]);
 
   useEffect(() => {
     Promise.all([
@@ -68,8 +59,11 @@ export default function SettingsPage() {
         setHumanDelayMax(data.human_delay_max ?? 15);
         setCaptchaEnabled(data.captcha_solver_enabled === true);
         setCaptchaApiKey(data.captcha_api_key || "");
+        setBrowser(data.browser || "");
+        setBrowserPath(data.browser_path || "");
       }),
       getPlugins().then((res) => setPlugins(res.plugins || [])),
+      getBrowsers().then((res) => setBrowsers(res.browsers || [])).catch(() => {}),
     ])
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -132,6 +126,8 @@ export default function SettingsPage() {
         human_delay_max: humanDelayMax,
         captcha_solver_enabled: captchaEnabled,
         captcha_api_key: captchaApiKey,
+        browser,
+        browser_path: browserPath,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -160,28 +156,6 @@ export default function SettingsPage() {
           {saveError}
           <button onClick={() => setSaveError(null)} className="text-destructive hover:text-destructive/80"><X className="w-4 h-4" /></button>
         </div>
-      )}
-
-      {/* Language — this build ships English only, so the picker is hidden.
-          The i18n machinery and the other locale files are left in place; set
-          SHOW_LANGUAGE_PICKER to true to bring the selector back. */}
-      {SHOW_LANGUAGE_PICKER && (
-        <Section title={t("language.title")}>
-          <div>
-            <label className="block text-sm font-semibold text-foreground mb-1.5">{t("language.label")}</label>
-            <select
-              value={currentLanguage}
-              onChange={(e) => handleLanguageChange(e.target.value)}
-              className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card max-w-xs"
-            >
-              <option value="">{t("language.auto")}</option>
-              {Object.entries(LANGUAGE_NAMES).map(([code, name]) => (
-                <option key={code} value={code}>{name}</option>
-              ))}
-            </select>
-            <p className="text-[13px] text-muted-foreground mt-1.5">{t("language.description")}</p>
-          </div>
-        </Section>
       )}
 
       {/* Appearance / Theme */}
@@ -238,9 +212,49 @@ export default function SettingsPage() {
           </div>
           <div>
             <label className="block text-sm font-semibold text-foreground mb-1.5">Password</label>
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            <PasswordInput value={password} onChange={(e) => setPassword(e.target.value)}
               className="input-base" />
           </div>
+        </div>
+      </Section>
+
+      {/* Browser */}
+      <Section title="Browser">
+        <div>
+          <label htmlFor="browser-choice" className="block text-sm font-semibold text-foreground mb-1.5">
+            Browser the agent uses
+          </label>
+          <select
+            id="browser-choice"
+            value={browser}
+            onChange={(e) => setBrowser(e.target.value)}
+            className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card max-w-sm"
+          >
+            <option value="">Automatic (Chrome if installed)</option>
+            {browsers.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}{b.is_default ? " (your default browser)" : ""}
+              </option>
+            ))}
+            {/* Keep a saved choice visible even if that browser is no longer found. */}
+            {browser && browser !== "custom" && !browsers.some((b) => b.id === browser) && (
+              <option value={browser}>{browser} (not found, using Automatic)</option>
+            )}
+            <option value="custom">Other Chromium browser (enter path)…</option>
+          </select>
+          {browser === "custom" && (
+            <input
+              value={browserPath}
+              onChange={(e) => setBrowserPath(e.target.value)}
+              placeholder="C:\Program Files\...\browser.exe"
+              className="input-base font-mono mt-2"
+            />
+          )}
+          <p className="text-[13px] text-muted-foreground mt-1.5">
+            Only Chromium-based browsers (Chrome, Edge, Brave, Vivaldi…) can be automated. The agent opens its own
+            window with a separate profile for each browser, not your everyday one, so log in to LinkedIn again
+            after switching.
+          </p>
         </div>
       </Section>
 
@@ -401,9 +415,8 @@ export default function SettingsPage() {
             <label htmlFor="captcha-key" className="block text-sm font-semibold text-foreground mb-1.5">
               2Captcha API key
             </label>
-            <input
+            <PasswordInput
               id="captcha-key"
-              type="password"
               value={captchaApiKey}
               onChange={(e) => setCaptchaApiKey(e.target.value)}
               placeholder="Your 2Captcha API key"

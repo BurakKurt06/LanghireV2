@@ -81,20 +81,45 @@ def load_runtime_settings() -> dict:
         return {}
 
 
+def selected_browser(settings: dict | None = None) -> tuple[str | None, Path]:
+    """(executable or None for automatic, automation profile dir) for the browser picked in Settings."""
+    try:
+        from core.browsers import resolve_browser
+    except ImportError:
+        from backend.core.browsers import resolve_browser
+    if settings is None:
+        settings = load_runtime_settings()
+    return resolve_browser(settings, BROWSER_PROFILE_DIR)
+
+
 def build_browser_kwargs() -> dict:
     """Extra BrowserSession kwargs implied by the current settings.
 
-    Returns the stealth launch flags when stealth is enabled, and nothing at
-    all otherwise, so the default browser launch is byte-for-byte unchanged.
+    Always drops browser-use's --extensions-on-chrome-urls default: it only
+    lets its extensions run on chrome:// pages, and Chrome shows an
+    "unsupported command-line flag" warning bar for it. Adds the stealth
+    launch flags when stealth is enabled.
     """
     settings = load_runtime_settings()
+    executable, profile_dir = selected_browser(settings)
+    kwargs: dict = {
+        "ignore_default_args": list(IGNORED_CHROME_DEFAULT_ARGS),
+        "user_data_dir": str(profile_dir),
+    }
+    if executable:
+        kwargs["executable_path"] = executable
     if not settings.get("stealth_enabled"):
-        return {}
+        return kwargs
     try:
         from core.stealth import STEALTH_ARGS
     except ImportError:
         from backend.core.stealth import STEALTH_ARGS
-    return {"args": list(STEALTH_ARGS)}
+    kwargs["args"] = list(STEALTH_ARGS)
+    return kwargs
+
+
+# browser-use default Chrome flags we don't launch with (see build_browser_kwargs).
+IGNORED_CHROME_DEFAULT_ARGS = ["--extensions-on-chrome-urls"]
 
 
 async def maybe_apply_stealth(browser_session) -> bool:
@@ -258,6 +283,27 @@ def get_llm() -> ChatAWSBedrock:
     return ChatAWSBedrock(model=MODEL_ID, session=session)
 
 
+def get_fallback_llm():
+    """Backup LLM for agents to switch to on provider errors. The backend overrides this."""
+    return None
+
+
+def _describe_work_mode(mode: str) -> str:
+    """Spell out 'any' so the agent picks whatever option a form offers."""
+    if (mode or "").lower() == "any":
+        return "Any (open to remote, hybrid, or on-site)"
+    return mode
+
+
+def _describe_education(edu: dict) -> str:
+    """'B.S. in Computer Science from MIT (2027)', skipping empty parts."""
+    degree = edu.get("degree", "")
+    major = edu.get("major", "")
+    if major:
+        degree = f"{degree} in {major}" if degree else major
+    return f"{degree} from {edu.get('school', '')} ({edu.get('graduation', '')})"
+
+
 def normalize_question(q: str) -> str:
     return re.sub(r"[^\w\s]", "", q.lower()).strip()
 
@@ -288,9 +334,9 @@ def build_memory_context(
         f"Email: {profile['email']}, Phone: {profile.get('phone_country_code', '')}{profile['phone']}",
         f"Location: {profile['address']['city']}, {profile['address']['state']} {profile['address']['zip']} {profile['address'].get('country', '')}".strip(),
         f"Work Authorization: {profile['work_authorization']}, Visa Sponsorship Needed: {profile['visa_sponsorship_needed']}",
-        f"Willing to Relocate: {profile['willing_to_relocate']}, Preferred Work Mode: {profile['preferred_work_mode']}",
+        f"Willing to Relocate: {profile['willing_to_relocate']}, Preferred Work Mode: {_describe_work_mode(profile['preferred_work_mode'])}",
         f"Years of Experience: {profile['years_of_experience']}",
-        f"Education: {profile['education']['degree']} from {profile['education']['school']} ({profile['education']['graduation']})",
+        f"Education: {_describe_education(profile['education'])}",
         f"Current Role: {profile['current_role']}",
         f"Target Locations: {', '.join(profile['target_locations'])}",
         f"Languages: {', '.join(profile['languages'])}",

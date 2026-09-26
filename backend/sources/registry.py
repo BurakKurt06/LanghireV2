@@ -150,7 +150,8 @@ def _format_profile(profile: dict) -> str:
         parts.append(f"Experience: {profile['years_of_experience']} years")
     edu = profile.get("education", {})
     if edu.get("degree"):
-        parts.append(f"Education: {edu['degree']} from {edu.get('school', '')} ({edu.get('graduation', '')})")
+        major = f" in {edu['major']}" if edu.get("major") else ""
+        parts.append(f"Education: {edu['degree']}{major} from {edu.get('school', '')} ({edu.get('graduation', '')})")
     if profile.get("skills"):
         parts.append(f"Skills: {', '.join(profile['skills'])}")
     sal = profile.get("salary_expectation", {})

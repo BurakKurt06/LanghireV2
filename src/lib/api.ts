@@ -135,6 +135,10 @@ export async function getSettings() {
   return request<AppSettings>("/settings");
 }
 
+export async function getBrowsers() {
+  return request<{ browsers: import("./types").InstalledBrowser[] }>("/browsers");
+}
+
 export async function saveSettings(settings: Partial<AppSettings>) {
   return request<{ success: boolean }>("/settings", {
     method: "PUT",

@@ -9,6 +9,7 @@ export interface Address {
 
 export interface Education {
   degree: string;
+  major?: string; // absent in profiles saved before the field existed
   school: string;
   graduation: string;
 }
@@ -17,7 +18,7 @@ export interface SalaryExpectation {
   min: number;
   max: number;
   currency: string;
-  period: "annual" | "monthly";
+  period: "annual" | "monthly" | "hourly";
 }
 
 export interface CandidateProfile {
@@ -110,6 +111,18 @@ export interface AppSettings {
   /** 2Captcha solving. Default false; the key never reaches the LLM. */
   captcha_solver_enabled?: boolean;
   captcha_api_key?: string;
+  /** Browser the agent drives: "" = automatic, a detected id, or "custom". */
+  browser?: string;
+  /** Executable used when browser is "custom". */
+  browser_path?: string;
+}
+
+/** A Chromium-based browser found on this machine (GET /browsers). */
+export interface InstalledBrowser {
+  id: string;
+  name: string;
+  path: string;
+  is_default: boolean;
 }
 
 // ── Job ───────────────────────────────────────────────────────────────────

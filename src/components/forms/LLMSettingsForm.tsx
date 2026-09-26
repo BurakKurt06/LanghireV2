@@ -4,6 +4,7 @@ import { getLLMSettings, saveLLMSettings, testLLMConnection, fetchOllamaModels }
 import { trackEvent } from "../../lib/analytics";
 import type { LLMProvider, LLMSettings } from "../../lib/types";
 import { useTranslation } from "react-i18next";
+import PasswordInput from "../ui/PasswordInput";
 
 const PROVIDERS: { id: LLMProvider; nameKey: string; descKey: string }[] = [
   { id: "openrouter", nameKey: "providers.openrouter.name", descKey: "providers.openrouter.description" },
@@ -15,9 +16,23 @@ const PROVIDERS: { id: LLMProvider; nameKey: string; descKey: string }[] = [
   { id: "openai_compatible", nameKey: "providers.openai_compatible.name", descKey: "providers.openai_compatible.description" },
 ];
 
-const OPENAI_MODELS = ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"];
-const ANTHROPIC_MODELS = ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-5"];
-const GEMINI_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"];
+// The *_MODELS lists below are offline fallbacks. Once an API key is entered,
+// each provider's live model list replaces them (see useLiveModels).
+const OPENAI_MODELS = ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4", "gpt-5-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4o"];
+const ANTHROPIC_MODELS = ["claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5", "claude-opus-5-5", "claude-sonnet-4-6", "claude-sonnet-4-5"];
+const GEMINI_MODELS = [
+  "gemini-3-flash-preview",
+  "gemini-3.8-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3.1-pro-preview",
+  "gemini-3-pro-preview",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+];
+// Chat-capable models only: drop embedding, speech, image, realtime and dated snapshots.
+const GEMINI_EXCLUDE = /embedding|tts|image|audio|live|aqa|learnlm|gemma|transcribe|robotics|computer-use|customtools/i;
+const OPENAI_EXCLUDE = /audio|realtime|tts|transcribe|image|search|instruct|embedding|moderation|codex|3\.5|-\d{4}-\d{2}-\d{2}$|-\d{4}$/i;
 const OPENROUTER_FALLBACK_MODELS = [
   "qwen/qwen3.6-plus",
   "bytedance-seed/seed-2.0-lite",
@@ -37,16 +52,16 @@ const OPENROUTER_FALLBACK_MODELS = [
 ];
 const BEDROCK_MODELS = [
   "us.anthropic.claude-sonnet-4-6",
-  "us.anthropic.claude-haiku-4-6",
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0",
   "anthropic.claude-3-5-sonnet-20241022-v2:0",
   "anthropic.claude-3-haiku-20240307-v1:0",
 ];
 
 const defaultSettings: LLMSettings = {
   provider: "openrouter",
-  openai: { api_key: "", model: "gpt-4o" },
-  anthropic: { api_key: "", model: "claude-sonnet-4-5" },
-  gemini: { api_key: "", model: "gemini-2.5-pro" },
+  openai: { api_key: "", model: "gpt-5.4-mini" },
+  anthropic: { api_key: "", model: "claude-sonnet-5" },
+  gemini: { api_key: "", model: "gemini-3-flash-preview" },
   bedrock: { access_key: "", secret_key: "", region: "us-west-2", model: "us.anthropic.claude-sonnet-4-6", auth_mode: "profile", profile_name: "default" },
   ollama: { base_url: "http://localhost:11434", model: "" },
   openrouter: { api_key: "", model: "qwen/qwen3.6-plus" },
@@ -54,6 +69,132 @@ const defaultSettings: LLMSettings = {
 };
 
 const OR_CUSTOM = "__custom__";
+
+const byNewest = (a: string, b: string) => b.localeCompare(a, undefined, { numeric: true });
+
+async function getJson(url: string, headers: Record<string, string>) {
+  const res = await fetch(url, { headers });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// Keys always travel in headers, never in the URL.
+async function loadOpenAIModels(key: string): Promise<string[]> {
+  const data = await getJson("https://api.openai.com/v1/models", { Authorization: `Bearer ${key}` });
+  return (data.data || [])
+    .map((m: { id: string }) => m.id)
+    .filter((id: string) => /^(gpt-|o\d|chatgpt-)/.test(id) && !OPENAI_EXCLUDE.test(id))
+    .sort(byNewest);
+}
+
+async function loadAnthropicModels(key: string): Promise<string[]> {
+  const data = await getJson("https://api.anthropic.com/v1/models?limit=1000", {
+    "x-api-key": key,
+    "anthropic-version": "2023-06-01",
+    "anthropic-dangerous-direct-browser-access": "true",
+  });
+  // The API already returns newest first.
+  return (data.data || []).map((m: { id: string }) => m.id);
+}
+
+async function loadGeminiModels(key: string): Promise<string[]> {
+  const data = await getJson("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", {
+    "x-goog-api-key": key,
+  });
+  return (data.models || [])
+    .filter((m: { name: string; supportedGenerationMethods?: string[] }) =>
+      m.name.startsWith("models/gemini") &&
+      m.supportedGenerationMethods?.includes("generateContent") &&
+      !GEMINI_EXCLUDE.test(m.name)
+    )
+    .map((m: { name: string }) => m.name.replace(/^models\//, ""))
+    .sort(byNewest);
+}
+
+async function loadCompatibleModels(baseUrl: string, key: string): Promise<string[]> {
+  const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
+  const data = await getJson(`${baseUrl.replace(/\/+$/, "")}/models`, headers);
+  return (data.data || []).map((m: { id: string }) => m.id).sort();
+}
+
+/** Fetch a provider's model list (debounced) whenever `trigger` changes. */
+function useLiveModels(enabled: boolean, trigger: string, load: () => Promise<string[]>) {
+  const [models, setModels] = useState<string[]>([]);
+  const [fetching, setFetching] = useState(false);
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  });
+
+  useEffect(() => {
+    setModels([]);
+    if (!enabled) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setFetching(true);
+      try {
+        const ids = await loadRef.current();
+        if (!cancelled && ids.length > 0) setModels(ids);
+      } catch { /* offline, bad key or blocked: keep the fallback list */ }
+      finally { if (!cancelled) setFetching(false); }
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); setFetching(false); };
+  }, [enabled, trigger]);
+
+  return { models, fetching };
+}
+
+interface ModelPickerProps {
+  value: string;
+  options: string[];
+  onChange: (model: string) => void;
+  customLabel: string;
+  placeholder?: string;
+}
+
+/** Model dropdown with a "Custom model ID…" escape hatch; a plain input when there is no list. */
+function ModelPicker({ value, options, onChange, customLabel, placeholder }: ModelPickerProps) {
+  const [custom, setCustom] = useState(false);
+  const optionsKey = options.join("\n");
+
+  // Start in custom mode when the saved model isn't in the list.
+  useEffect(() => {
+    if (value && !options.includes(value)) setCustom(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value, optionsKey]);
+
+  if (options.length === 0) {
+    return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="input-base" />;
+  }
+
+  return (
+    <>
+      <select
+        value={custom ? OR_CUSTOM : value}
+        onChange={(e) => {
+          if (e.target.value === OR_CUSTOM) {
+            setCustom(true);
+          } else {
+            setCustom(false);
+            onChange(e.target.value);
+          }
+        }}
+        className="input-base"
+      >
+        {options.map((m) => <option key={m} value={m}>{m}</option>)}
+        <option value={OR_CUSTOM}>{customLabel}</option>
+      </select>
+      {custom && (
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder ?? options[0]}
+          className="input-base font-mono mt-2"
+        />
+      )}
+    </>
+  );
+}
 
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   openai: "OpenAI",
@@ -150,6 +291,20 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
       .catch(() => {})
       .finally(() => setOpenrouterFetching(false));
   }, [settings.provider, openrouterModels.length]);
+
+  const openaiKey = settings.openai?.api_key?.trim() || "";
+  const openaiLive = useLiveModels(settings.provider === "openai" && !!openaiKey, openaiKey, () => loadOpenAIModels(openaiKey));
+  const anthropicKey = settings.anthropic?.api_key?.trim() || "";
+  const anthropicLive = useLiveModels(settings.provider === "anthropic" && !!anthropicKey, anthropicKey, () => loadAnthropicModels(anthropicKey));
+  const geminiKey = settings.gemini?.api_key?.trim() || "";
+  const geminiLive = useLiveModels(settings.provider === "gemini" && !!geminiKey, geminiKey, () => loadGeminiModels(geminiKey));
+  const compatBase = settings.openai_compatible?.base_url?.trim() || "";
+  const compatKey = settings.openai_compatible?.api_key?.trim() || "";
+  const compatLive = useLiveModels(
+    settings.provider === "openai_compatible" && /^https?:\/\//.test(compatBase),
+    `${compatBase}\n${compatKey}`,
+    () => loadCompatibleModels(compatBase, compatKey),
+  );
 
   // Start in "custom" mode when the saved model isn't in the known list/fallback.
   useEffect(() => {
@@ -387,13 +542,19 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <input type="password" value={settings.openai?.api_key || ""} onChange={(e) => updateOpenAI("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
+              <PasswordInput value={settings.openai?.api_key || ""} onChange={(e) => updateOpenAI("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.model")}</label>
-              <select value={settings.openai?.model || "gpt-4o"} onChange={(e) => updateOpenAI("model", e.target.value)} className="input-base">
-                {OPENAI_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
+              <label className="block text-sm font-semibold text-foreground mb-1.5">
+                {t("labels.model")}
+                {openaiLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
+              </label>
+              <ModelPicker
+                value={settings.openai?.model ?? "gpt-5.4-mini"}
+                options={openaiLive.models.length > 0 ? openaiLive.models : OPENAI_MODELS}
+                onChange={(m) => updateOpenAI("model", m)}
+                customLabel={t("openrouter.customOption")}
+              />
             </div>
           </div>
         )}
@@ -402,13 +563,19 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <input type="password" value={settings.anthropic?.api_key || ""} onChange={(e) => updateAnthropic("api_key", e.target.value)} placeholder="sk-ant-..." className="input-base font-mono" />
+              <PasswordInput value={settings.anthropic?.api_key || ""} onChange={(e) => updateAnthropic("api_key", e.target.value)} placeholder="sk-ant-..." className="input-base font-mono" />
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.model")}</label>
-<select value={settings.anthropic?.model || "claude-sonnet-4-5"} onChange={(e) => updateAnthropic("model", e.target.value)} className="input-base">
-                {ANTHROPIC_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
+              <label className="block text-sm font-semibold text-foreground mb-1.5">
+                {t("labels.model")}
+                {anthropicLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
+              </label>
+              <ModelPicker
+                value={settings.anthropic?.model ?? "claude-sonnet-5"}
+                options={anthropicLive.models.length > 0 ? anthropicLive.models : ANTHROPIC_MODELS}
+                onChange={(m) => updateAnthropic("model", m)}
+                customLabel={t("openrouter.customOption")}
+              />
             </div>
           </div>
         )}
@@ -417,13 +584,19 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <input type="password" value={settings.gemini?.api_key || ""} onChange={(e) => updateGemini("api_key", e.target.value)} placeholder="AIza..." className="input-base font-mono" />
+              <PasswordInput value={settings.gemini?.api_key || ""} onChange={(e) => updateGemini("api_key", e.target.value)} placeholder="AIza..." className="input-base font-mono" />
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.model")}</label>
-              <select value={settings.gemini?.model || "gemini-2.5-pro"} onChange={(e) => updateGemini("model", e.target.value)} className="input-base">
-                {GEMINI_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
+              <label className="block text-sm font-semibold text-foreground mb-1.5">
+                {t("labels.model")}
+                {geminiLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
+              </label>
+              <ModelPicker
+                value={settings.gemini?.model ?? "gemini-3-flash-preview"}
+                options={geminiLive.models.length > 0 ? geminiLive.models : GEMINI_MODELS}
+                onChange={(m) => updateGemini("model", m)}
+                customLabel={t("openrouter.customOption")}
+              />
             </div>
           </div>
         )}
@@ -446,11 +619,11 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.accessKey")}</label>
-                  <input type="password" value={settings.bedrock?.access_key || ""} onChange={(e) => updateBedrock("access_key", e.target.value)} placeholder="AKIA..." className="input-base font-mono" />
+                  <PasswordInput value={settings.bedrock?.access_key || ""} onChange={(e) => updateBedrock("access_key", e.target.value)} placeholder="AKIA..." className="input-base font-mono" />
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.secretKey")}</label>
-                  <input type="password" value={settings.bedrock?.secret_key || ""} onChange={(e) => updateBedrock("secret_key", e.target.value)} className="input-base font-mono" />
+                  <PasswordInput value={settings.bedrock?.secret_key || ""} onChange={(e) => updateBedrock("secret_key", e.target.value)} className="input-base font-mono" />
                 </div>
               </div>
             )}
@@ -460,9 +633,13 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
             </div>
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.model")}</label>
-              <select value={settings.bedrock?.model || ""} onChange={(e) => updateBedrock("model", e.target.value)} className="input-base">
-                {BEDROCK_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
+              {/* No live list: Bedrock's model listing needs signed AWS requests. */}
+              <ModelPicker
+                value={settings.bedrock?.model ?? BEDROCK_MODELS[0]}
+                options={BEDROCK_MODELS}
+                onChange={(m) => updateBedrock("model", m)}
+                customLabel={t("openrouter.customOption")}
+              />
             </div>
           </div>
         )}
@@ -500,7 +677,7 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <input type="password" value={settings.openrouter?.api_key || ""} onChange={(e) => updateOpenRouter("api_key", e.target.value)} placeholder="sk-or-v1-..." className="input-base font-mono" />
+              <PasswordInput value={settings.openrouter?.api_key || ""} onChange={(e) => updateOpenRouter("api_key", e.target.value)} placeholder="sk-or-v1-..." className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">
                 {t("openrouter.keyHint")}{" "}
                 <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">openrouter.ai/keys</a>
@@ -574,12 +751,21 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
             </div>
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")} <span className="text-muted-foreground font-normal">({t("openaiCompatible.optional")})</span></label>
-              <input type="password" value={settings.openai_compatible?.api_key || ""} onChange={(e) => updateOpenAICompatible("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
+              <PasswordInput value={settings.openai_compatible?.api_key || ""} onChange={(e) => updateOpenAICompatible("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">{t("openaiCompatible.apiKeyHint")}</p>
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.model")}</label>
-              <input value={settings.openai_compatible?.model || ""} onChange={(e) => updateOpenAICompatible("model", e.target.value)} placeholder="meta-llama/Llama-3-70b-chat-hf" className="input-base" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5">
+                {t("labels.model")}
+                {compatLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
+              </label>
+              <ModelPicker
+                value={settings.openai_compatible?.model || ""}
+                options={compatLive.models}
+                onChange={(m) => updateOpenAICompatible("model", m)}
+                customLabel={t("openrouter.customOption")}
+                placeholder="meta-llama/Llama-3-70b-chat-hf"
+              />
               <p className="text-xs text-muted-foreground mt-1">{t("openaiCompatible.modelHint")}</p>
             </div>
           </div>

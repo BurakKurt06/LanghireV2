@@ -189,3 +189,19 @@ def test_save_settings_without_optional_keys(data_dir):
     """Saving a minimal dict does not require the clamp/clean keys."""
     config.save_settings({"resume_path": "/r.pdf"})
     assert config.load_settings()["resume_path"] == "/r.pdf"
+
+
+# ── Profile text for the agent: "any" work mode and education major ──────────
+
+def test_describe_work_mode_any_is_spelled_out():
+    from core import shared_config
+    assert "remote, hybrid, or on-site" in shared_config._describe_work_mode("any")
+    assert shared_config._describe_work_mode("hybrid") == "hybrid"
+
+
+def test_describe_education_includes_major_and_tolerates_old_profiles():
+    from core import shared_config
+    edu = {"degree": "B.S.", "major": "Computer Science", "school": "MIT", "graduation": "2027"}
+    assert shared_config._describe_education(edu) == "B.S. in Computer Science from MIT (2027)"
+    old = {"degree": "B.S.", "school": "MIT", "graduation": "2027"}  # saved before "major" existed
+    assert shared_config._describe_education(old) == "B.S. from MIT (2027)"

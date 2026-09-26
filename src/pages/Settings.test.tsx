@@ -9,6 +9,7 @@ import {
   togglePlugin,
   removePlugin,
   importPlugin,
+  getBrowsers,
 } from "../lib/api";
 import { setTelemetryEnabled } from "../lib/analytics";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -37,11 +38,6 @@ vi.mock("../lib/analytics", () => ({
   setTelemetryEnabled: vi.fn(),
 }));
 
-// loadLanguage performs dynamic i18n resource loading — stub it out.
-vi.mock("../i18n", () => ({
-  loadLanguage: vi.fn(async () => {}),
-}));
-
 vi.mock("../lib/api", () => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
@@ -49,6 +45,7 @@ vi.mock("../lib/api", () => ({
   togglePlugin: vi.fn(),
   removePlugin: vi.fn(),
   importPlugin: vi.fn(),
+  getBrowsers: vi.fn(),
 }));
 
 const mockGetSettings = vi.mocked(getSettings);
@@ -57,6 +54,7 @@ const mockGetPlugins = vi.mocked(getPlugins);
 const mockTogglePlugin = vi.mocked(togglePlugin);
 const mockRemovePlugin = vi.mocked(removePlugin);
 const mockImportPlugin = vi.mocked(importPlugin);
+const mockGetBrowsers = vi.mocked(getBrowsers);
 const mockSetTelemetry = vi.mocked(setTelemetryEnabled);
 const mockOpenDialog = vi.mocked(openDialog);
 
@@ -108,6 +106,39 @@ describe("SettingsPage", () => {
       plugin: { name: "new", display_name: "New" },
     } as never);
     mockOpenDialog.mockResolvedValue(null as never);
+    mockGetBrowsers.mockResolvedValue({
+      browsers: [
+        { id: "chrome", name: "Google Chrome", path: "C:/chrome.exe", is_default: false },
+        { id: "msedge", name: "Microsoft Edge", path: "C:/msedge.exe", is_default: true },
+      ],
+    } as never);
+  });
+
+  it("lists installed browsers, marks the default, and saves the choice", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    const select = await screen.findByLabelText("Browser the agent uses");
+    expect(within(select).getByRole("option", { name: "Microsoft Edge (your default browser)" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "Google Chrome" })).toBeInTheDocument();
+
+    await user.selectOptions(select, "msedge");
+    await user.click(screen.getByRole("button", { name: /Save Settings/ }));
+    await waitFor(() =>
+      expect(mockSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ browser: "msedge" })),
+    );
+  });
+
+  it("custom browser choice reveals a path input that is saved", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    await user.selectOptions(await screen.findByLabelText("Browser the agent uses"), "custom");
+    await user.type(screen.getByPlaceholderText(/browser\.exe/), "D:/Opera/opera.exe");
+    await user.click(screen.getByRole("button", { name: /Save Settings/ }));
+    await waitFor(() =>
+      expect(mockSaveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ browser: "custom", browser_path: "D:/Opera/opera.exe" }),
+      ),
+    );
   });
 
   it("shows a loading spinner before settings load", () => {

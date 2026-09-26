@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Briefcase,
   Search,
@@ -163,8 +163,14 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       });
   };
 
+  // Pollers below call the latest fetchJobs, so they always see the current search.
+  const fetchJobsRef = useRef(fetchJobs);
   useEffect(() => {
-    fetchJobs();
+    fetchJobsRef.current = fetchJobs;
+  });
+
+  useEffect(() => {
+    fetchJobsRef.current();
   }, [statusFilter]);
 
   // Poll apply status for single apply
@@ -176,7 +182,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         const s = await getApplyStatus();
         if (active && !s.running) {
           setApplyingUrl(null);
-          fetchJobs(true);
+          fetchJobsRef.current(true);
           onJobsChanged();
         }
       } catch {
@@ -197,7 +203,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       if (!active) return;
       try {
         const s = await getApplyStatus();
-        fetchJobs(true);
+        fetchJobsRef.current(true);
         if (!s.running) {
           setBatchApplying(false);
           onJobsChanged();
@@ -647,10 +653,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                           {job.location || "—"}
                         </p>
                         {job.error && (
-                          <p
-                            className="text-[13px] text-destructive mt-1 truncate"
-                            title={job.error}
-                          >
+                          <p className="text-[13px] text-destructive mt-1 whitespace-pre-wrap break-words select-text">
                             {t("jobItem.error", { error: job.error })}
                           </p>
                         )}

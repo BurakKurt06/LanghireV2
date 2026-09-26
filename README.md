@@ -21,9 +21,9 @@ and fill in applications. It is a **personal fork**, not a distribution:
   the app were deliberately left intact.
 - **Not connected to upstream.** There is no `origin` remote and no merge path
   configured. Picking up a future upstream change means doing it by hand.
-- **English only.** The language picker is hidden behind `SHOW_LANGUAGE_PICKER`
-  in `src/pages/Settings.tsx`; the i18n machinery and other locale files are
-  still present, so flipping that constant brings the selector back.
+- **English only.** The other 12 languages, the language picker and the
+  translated READMEs were removed. UI strings still live in
+  `src/locales/en/*.json` and are read through `t()`.
 
 ## Install
 

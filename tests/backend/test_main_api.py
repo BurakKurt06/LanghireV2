@@ -810,3 +810,102 @@ class TestNotFound:
         body = resp.json()
         assert body["success"] is False
         assert body["models"] == []
+
+
+# ── Sidecar lifecycle helpers (Windows orphan / stale-port fixes) ────────────
+
+class _FakeProc:
+    def __init__(self, pid, name, cmdline=(), ppid=1, parent=None):
+        self.pid, self._name, self._cmdline, self._ppid, self._parent = pid, name, list(cmdline), ppid, parent
+        self.killed = False
+
+    def name(self):
+        return self._name
+
+    def cmdline(self):
+        return self._cmdline
+
+    def ppid(self):
+        return self._ppid
+
+    def parent(self):
+        return self._parent
+
+    def kill(self):
+        self.killed = True
+
+
+@pytest.mark.parametrize(
+    "name,cmdline,expected",
+    [
+        ("langhirev2-backend-x86_64-pc-windows-msvc.exe", [], True),
+        ("python.exe", ["python", "backend/main.py", "8743"], True),
+        ("python.exe", ["python", "some_other_server.py"], False),
+        ("nginx.exe", [], False),
+    ],
+)
+def test_is_backend_process(name, cmdline, expected):
+    assert main._is_backend_process(_FakeProc(10, name, cmdline)) is expected
+
+
+def test_watched_parent_skips_pyinstaller_bootloader(monkeypatch):
+    """Frozen one-file build: watch the Tauri app, not our same-named bootloader."""
+    import psutil
+    procs = {
+        None: _FakeProc(300, "langhirev2-backend.exe", ppid=200),  # us
+        200: _FakeProc(200, "langhirev2-backend.exe", ppid=100),   # bootloader
+    }
+    monkeypatch.setattr(main.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(main.os, "getppid", lambda: 200)
+    monkeypatch.setattr(psutil, "Process", lambda pid=None: procs[pid])
+    assert main._watched_parent_pid() == 100
+
+
+def test_watched_parent_unfrozen_is_direct_parent(monkeypatch):
+    monkeypatch.setattr(main.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(main.os, "getppid", lambda: 4242)
+    assert main._watched_parent_pid() == 4242
+
+
+def test_kill_stale_backend_only_kills_backends(monkeypatch):
+    import psutil
+    from types import SimpleNamespace as NS
+    boot = _FakeProc(50, "langhirev2-backend.exe")
+    stale = _FakeProc(51, "langhirev2-backend.exe", parent=boot)
+    other = _FakeProc(60, "someserver.exe")
+    me = _FakeProc(99, "langhirev2-backend.exe", ppid=98)
+    table = {51: stale, 60: other, None: me}
+    conns = [
+        NS(laddr=NS(port=8743), status=psutil.CONN_LISTEN, pid=51),
+        NS(laddr=NS(port=8743), status=psutil.CONN_LISTEN, pid=60),
+        NS(laddr=NS(port=9999), status=psutil.CONN_LISTEN, pid=61),
+    ]
+    monkeypatch.setattr(psutil, "net_connections", lambda kind: conns)
+    monkeypatch.setattr(psutil, "Process", lambda pid=None: table[pid])
+    monkeypatch.setattr(psutil, "wait_procs", lambda procs, timeout: ([], []))
+    main._kill_stale_backend(8743)
+    assert stale.killed and boot.killed
+    assert not other.killed
+
+
+def test_kill_browser_processes_matches_windows_profile_paths(monkeypatch):
+    """Chrome launched with a backslash Windows profile path must still be stopped."""
+    import psutil
+
+    class P:
+        def __init__(self, pid, cmdline):
+            self.pid, self.info, self.terminated = pid, {"pid": pid, "name": "chrome.exe", "cmdline": cmdline}, False
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            pass
+
+    ours = P(1, ["chrome.exe", r"--user-data-dir=C:\Users\x\AppData\Roaming\LangHireV2\browser_profile"])
+    unrelated = P(2, ["chrome.exe", r"--user-data-dir=C:\Users\x\AppData\Local\Google\Chrome\User Data"])
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: [ours, unrelated])
+    monkeypatch.setattr(psutil, "wait_procs", lambda procs, timeout: (procs, []))
+    main._kill_browser_processes()
+    assert ours.terminated
+    assert not unrelated.terminated

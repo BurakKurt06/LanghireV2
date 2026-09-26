@@ -13,13 +13,6 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-// ── language helpers (side-effecty; stub to no-ops) ─────────────────────────
-vi.mock("../i18n", () => ({ loadLanguage: vi.fn() }));
-vi.mock("../i18n/languageDetection", () => ({
-  getLanguageFromCountry: vi.fn(() => "en"),
-  getSavedLanguage: vi.fn(() => null),
-}));
-
 vi.mock("../lib/api", () => ({
   getProfile: vi.fn(),
   saveProfile: vi.fn(),

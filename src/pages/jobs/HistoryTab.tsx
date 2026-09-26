@@ -147,7 +147,6 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
     const onExport = () => { void handleExport(); };
     window.addEventListener("langhire:export", onExport);
     return () => window.removeEventListener("langhire:export", onExport);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleExport = async () => {
@@ -351,7 +350,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
                               </p>
                               {(row.job.error ||
                                 row.metric?.error_message) && (
-                                <p className="text-xs text-red-600 mt-0.5">
+                                <p className="text-xs text-red-600 mt-0.5 whitespace-pre-wrap break-words select-text">
                                   {row.job.error || row.metric?.error_message}
                                 </p>
                               )}

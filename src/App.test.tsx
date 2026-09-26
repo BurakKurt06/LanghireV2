@@ -13,7 +13,6 @@ vi.mock("react-i18next", () => ({
     i18n: { changeLanguage: vi.fn(), dir: () => "ltr", language: "en" },
   }),
 }));
-vi.mock("./i18n/useDirection", () => ({ useDirection: vi.fn() }));
 
 // ── perf / analytics ─────────────────────────────────────────────────────────
 vi.mock("./lib/perf", () => ({

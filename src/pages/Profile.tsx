@@ -4,8 +4,6 @@ import { getProfile, saveProfile, getCountries } from "../lib/api";
 import type { CandidateProfile, CountryConfig } from "../lib/types";
 import { PageHeader, LoadingSpinner, Section } from "../components/ui";
 import TagInputShared from "../components/ui/TagInput";
-import { getLanguageFromCountry, getSavedLanguage } from "../i18n/languageDetection";
-import { loadLanguage } from "../i18n";
 import { useTranslation } from "react-i18next";
 
 const defaultProfile: CandidateProfile = {
@@ -20,7 +18,7 @@ const defaultProfile: CandidateProfile = {
   willing_to_relocate: false,
   preferred_work_mode: "hybrid",
   years_of_experience: 0,
-  education: { degree: "", school: "", graduation: "" },
+  education: { degree: "", major: "", school: "", graduation: "" },
   current_role: "",
   target_job_titles: [],
   target_locations: [],
@@ -77,10 +75,6 @@ export default function Profile() {
       },
     }));
     setSaved(false);
-    if (!getSavedLanguage()) {
-      const lang = getLanguageFromCountry(code);
-      loadLanguage(lang);
-    }
   };
 
   const update = (field: string, value: unknown) => {
@@ -248,6 +242,7 @@ export default function Profile() {
               <option value="remote">{t("work.remote")}</option>
               <option value="hybrid">{t("work.hybrid")}</option>
               <option value="onsite">{t("work.onsite")}</option>
+              <option value="any">{t("work.any")}</option>
             </select>
           </div>
           <Checkbox label={t("work.visaSponsorship")} checked={profile.visa_sponsorship_needed} onChange={(v) => update("visa_sponsorship_needed", v)} />
@@ -275,6 +270,7 @@ export default function Profile() {
       <Section title={t("education.title")}>
         <div className="grid grid-cols-2 gap-4">
           <Input label={t("education.degree")} value={profile.education.degree} onChange={(v) => updateNested("education", "degree", v)} />
+          <Input label={t("education.major")} value={profile.education.major ?? ""} onChange={(v) => updateNested("education", "major", v)} />
           <Input label={t("education.school")} value={profile.education.school} onChange={(v) => updateNested("education", "school", v)} />
           <Input label={t("education.graduation")} value={profile.education.graduation} onChange={(v) => updateNested("education", "graduation", v)} />
         </div>
@@ -295,6 +291,7 @@ export default function Profile() {
             >
               <option value="annual">{t("salary.annual")}</option>
               <option value="monthly">{t("salary.monthly")}</option>
+              <option value="hourly">{t("salary.hourly")}</option>
             </select>
           </div>
         </div>

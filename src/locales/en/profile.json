@@ -38,6 +38,7 @@
     "remote": "Remote",
     "hybrid": "Hybrid",
     "onsite": "On-site",
+    "any": "Any",
     "visaSponsorship": "Visa Sponsorship Needed",
     "willingToRelocate": "Willing to Relocate",
     "yearsOfExperience": "Years of Experience",
@@ -47,6 +48,7 @@
   "education": {
     "title": "Education",
     "degree": "Degree",
+    "major": "Major",
     "school": "School",
     "graduation": "Graduation"
   },
@@ -57,7 +59,8 @@
     "currency": "Currency",
     "period": "Period",
     "annual": "Annual",
-    "monthly": "Monthly"
+    "monthly": "Monthly",
+    "hourly": "Hourly"
   },
   "coverLetter": {
     "title": "Cover Letter",

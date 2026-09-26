@@ -18,7 +18,7 @@
     },
     "gemini": {
       "name": "Google Gemini",
-      "description": "Gemini 2.5 Pro / Flash via Google AI Studio API key"
+      "description": "Gemini Flash / Pro via Google AI Studio API key"
     },
     "bedrock": {
       "name": "AWS Bedrock",

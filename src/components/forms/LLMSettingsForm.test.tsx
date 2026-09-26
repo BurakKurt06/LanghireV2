@@ -308,6 +308,7 @@ describe("LLMSettingsForm", () => {
       // API key password field appears.
       expect(await screen.findByPlaceholderText("AIza...")).toBeInTheDocument();
       // Model select offers the Gemini models.
+      expect(screen.getByRole("option", { name: "gemini-3-flash-preview" })).toBeInTheDocument();
       expect(screen.getByRole("option", { name: "gemini-2.5-pro" })).toBeInTheDocument();
       expect(screen.getByRole("option", { name: "gemini-2.5-flash" })).toBeInTheDocument();
       // Switching provider immediate-saves with provider=gemini.
@@ -352,6 +353,59 @@ describe("LLMSettingsForm", () => {
       expect(
         screen.getByPlaceholderText("meta-llama/Llama-3-70b-chat-hf"),
       ).toBeInTheDocument();
+    });
+
+    it("gemini: a saved key loads the live model list, key sent as a header", async () => {
+      const fetchMock = vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          models: [
+            { name: "models/gemini-9-flash", supportedGenerationMethods: ["generateContent"] },
+            { name: "models/gemini-9-flash-tts", supportedGenerationMethods: ["generateContent"] },
+            { name: "models/text-embedding-9", supportedGenerationMethods: ["embedContent"] },
+          ],
+        }),
+      }));
+      vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+      mockGetLLMSettings.mockResolvedValue({
+        ...structuredClone(baseSettings),
+        provider: "gemini",
+        gemini: { api_key: "AIza-live", model: "gemini-9-flash" },
+      } as never);
+
+      render(<LLMSettingsForm />);
+
+      expect(await screen.findByRole("option", { name: "gemini-9-flash" })).toBeInTheDocument();
+      // TTS and embedding models are filtered out.
+      expect(screen.queryByRole("option", { name: "gemini-9-flash-tts" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("option", { name: "text-embedding-9" })).not.toBeInTheDocument();
+      const call = (fetchMock.mock.calls as unknown as [string, RequestInit][]).find(([u]) => u.includes("generativelanguage"));
+      expect(call).toBeDefined();
+      const [url, init] = call!;
+      expect(url).not.toContain("AIza-live");
+      expect(init.headers).toEqual({ "x-goog-api-key": "AIza-live" });
+    });
+
+    it("anthropic: the custom option reveals a text input for any model ID", async () => {
+      const user = userEvent.setup();
+      render(<LLMSettingsForm />);
+      await screen.findByText("selectProvider");
+
+      await user.click(screen.getByRole("radio", { name: /providers\.anthropic/ }));
+      const select = await screen.findByDisplayValue("claude-sonnet-4-5");
+      await user.selectOptions(select, "__custom__");
+      const input = await waitFor(() => {
+        const el = screen.getAllByDisplayValue("claude-sonnet-4-5").find((e) => e.tagName === "INPUT");
+        if (!el) throw new Error("custom input not shown");
+        return el;
+      });
+      await user.clear(input);
+      await user.type(input, "claude-next");
+      await waitFor(() =>
+        expect(mockSaveLLMSettings).toHaveBeenCalledWith(
+          expect.objectContaining({ anthropic: expect.objectContaining({ model: "claude-next" }) }),
+        ),
+      );
     });
   });
 });

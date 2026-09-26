@@ -32,12 +32,6 @@
     "builtin": "Built-in",
     "importPlugin": "Import Plugin"
   },
-  "language": {
-    "title": "Language",
-    "label": "Interface Language",
-    "auto": "Auto (from country)",
-    "description": "Choose the language for the application interface. Set to 'Auto' to match your selected country."
-  },
   "appearance": {
     "title": "Appearance",
     "theme": "Theme",

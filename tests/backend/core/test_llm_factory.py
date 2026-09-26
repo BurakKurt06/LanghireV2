@@ -83,14 +83,14 @@ def test_create_llm_openai_defaults_when_missing():
     """A bare openai settings dict falls back to provider defaults."""
     llm = llm_factory.create_llm({"provider": "openai"})
     assert isinstance(llm, ChatOpenAI)
-    assert llm.model == "gpt-4o"
+    assert llm.model == "gpt-5.4-mini"
 
 
 def test_create_llm_default_provider_is_openai():
     """No provider key defaults to the openai branch."""
     llm = llm_factory.create_llm({})
     assert isinstance(llm, ChatOpenAI)
-    assert llm.model == "gpt-4o"
+    assert llm.model == "gpt-5.4-mini"
 
 
 def test_create_llm_anthropic():
@@ -106,7 +106,26 @@ def test_create_llm_anthropic_default_model():
     """anthropic with empty sub-config uses the default model."""
     llm = llm_factory.create_llm({"provider": "anthropic"})
     assert isinstance(llm, ChatAnthropic)
-    assert llm.model == "claude-sonnet-4-5"
+    assert llm.model == "claude-sonnet-5"
+    assert llm.thinking == {"type": "adaptive"}
+
+
+def test_create_llm_anthropic_older_model_keeps_forced_tool_choice():
+    """Pre-5 Claude models get no thinking config, so browser-use keeps forcing its tool."""
+    llm = llm_factory.create_llm(
+        {"provider": "anthropic", "anthropic": {"api_key": "k", "model": "claude-haiku-4-5"}}
+    )
+    assert llm.thinking is None
+
+
+@pytest.mark.parametrize("model", ["claude-sonnet-5", "claude-opus-5", "claude-opus-5-5"])
+def test_create_llm_anthropic_gen5_uses_adaptive_thinking(model):
+    """Claude 5+ models think by default and reject a forced tool_choice."""
+    llm = llm_factory.create_llm(
+        {"provider": "anthropic", "anthropic": {"api_key": "k", "model": model}}
+    )
+    assert llm.thinking == {"type": "adaptive"}
+    assert llm._requires_auto_tool_choice()
 
 
 def test_create_llm_ollama():
@@ -147,7 +166,7 @@ def test_create_llm_gemini_default_model():
     """gemini with empty sub-config uses the default model."""
     llm = llm_factory.create_llm({"provider": "gemini"})
     assert isinstance(llm, ChatGoogle)
-    assert llm.model == "gemini-2.5-pro"
+    assert llm.model == "gemini-3-flash-preview"
 
 
 def test_create_llm_openrouter():
@@ -384,3 +403,113 @@ async def test_test_connection_generic_error_passthrough():
 
     with pytest.raises(RuntimeError, match="totally unexpected boom"):
         await llm_factory.test_connection(_FakeLLM(bad))
+
+
+# ── _friendly_llm_error ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "message,code,expected",
+    [
+        ("Your api key is invalid", 401, "Invalid API key"),
+        ("Too many requests", 429, "Rate limit"),
+        (
+            "404 NOT_FOUND. This model models/gemini-2.5-flash is no longer available to new users.",
+            None,
+            "isn't available for your API key",
+        ),
+        ("503 UNAVAILABLE. This model is currently experiencing high demand.", None, "overloaded"),
+        ("Overloaded", 529, "overloaded"),
+        ("Name resolution failed", None, "Cannot reach the API"),
+        ("Something odd", 500, "Something odd"),
+    ],
+)
+def test_friendly_llm_error_maps_common_failures(message, code, expected):
+    assert expected in llm_factory._friendly_llm_error(message, code)
+
+
+# ── create_fallback_llm ──────────────────────────────────────────────────────
+
+def test_fallback_llm_gemini_picks_a_different_model():
+    llm = llm_factory.create_fallback_llm(
+        {"provider": "gemini", "gemini": {"api_key": "k", "model": "gemini-3-flash-preview"}}
+    )
+    assert isinstance(llm, ChatGoogle)
+    assert llm.model == "gemini-flash-latest"
+    assert llm.api_key == "k"
+
+
+def test_fallback_llm_gemini_other_primary_uses_first_backup():
+    llm = llm_factory.create_fallback_llm(
+        {"provider": "gemini", "gemini": {"api_key": "k", "model": "gemini-3.8-flash"}}
+    )
+    assert llm.model == "gemini-3-flash-preview"
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "openrouter", "ollama"])
+def test_fallback_llm_none_for_other_providers(provider):
+    assert llm_factory.create_fallback_llm({"provider": provider}) is None
+
+
+def test_shared_config_default_fallback_is_none():
+    from core import shared_config
+    assert shared_config.get_fallback_llm() is None
+
+
+# ── ainvoke_with_fallback / completion_text ──────────────────────────────────
+
+class _SeqLLM:
+    def __init__(self, model, outcome):
+        self.model, self.outcome, self.calls = model, outcome, 0
+
+    async def ainvoke(self, messages, **kwargs):
+        self.calls += 1
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+def _gemini(model="gemini-3.8-flash"):
+    return {"provider": "gemini", "gemini": {"api_key": "k", "model": model}}
+
+
+def test_ainvoke_with_fallback_moves_to_next_model_on_503(monkeypatch):
+    busy = ModelProviderError(message="503 UNAVAILABLE high demand", status_code=503)
+    built = {}
+
+    def fake_create(settings):
+        m = settings["gemini"]["model"]
+        built[m] = _SeqLLM(m, busy if m == "gemini-3-flash-preview" else f"ok from {m}")
+        return built[m]
+
+    monkeypatch.setattr(llm_factory, "create_llm", fake_create)
+    primary = _SeqLLM("gemini-3.8-flash", busy)
+    out = asyncio.run(llm_factory.ainvoke_with_fallback(primary, _gemini(), ["hi"]))
+    # 3.8 busy -> 3-flash-preview busy -> flash-latest answers
+    assert out == "ok from gemini-flash-latest"
+    assert primary.calls == 1 and built["gemini-3-flash-preview"].calls == 1
+
+
+def test_ainvoke_with_fallback_does_not_mask_real_errors(monkeypatch):
+    monkeypatch.setattr(llm_factory, "create_llm", lambda s: pytest.fail("should not try a backup"))
+    bad_key = ModelProviderError(message="API key not valid", status_code=400)
+    with pytest.raises(ModelProviderError):
+        asyncio.run(llm_factory.ainvoke_with_fallback(_SeqLLM("x", bad_key), _gemini(), ["hi"]))
+
+
+def test_ainvoke_with_fallback_raises_last_error_when_all_busy(monkeypatch):
+    busy = ModelProviderError(message="503", status_code=503)
+    monkeypatch.setattr(llm_factory, "create_llm", lambda s: _SeqLLM("b", busy))
+    with pytest.raises(ModelProviderError):
+        asyncio.run(llm_factory.ainvoke_with_fallback(_SeqLLM("a", busy), _gemini(), ["hi"]))
+
+
+def test_ainvoke_with_fallback_no_backups_for_other_providers(monkeypatch):
+    busy = ModelProviderError(message="503", status_code=503)
+    monkeypatch.setattr(llm_factory, "create_llm", lambda s: pytest.fail("no backups for openai"))
+    with pytest.raises(ModelProviderError):
+        asyncio.run(llm_factory.ainvoke_with_fallback(_SeqLLM("a", busy), {"provider": "openai"}, ["hi"]))
+
+
+def test_completion_text_reads_completion_not_repr():
+    from browser_use.llm.views import ChatInvokeCompletion
+    assert llm_factory.completion_text(ChatInvokeCompletion(completion="Dear Hiring Manager", usage=None)) == "Dear Hiring Manager"

@@ -1,7 +1,7 @@
 import i18n from 'i18next';
 import { initReactI18next } from 'react-i18next';
-import { getSavedLanguage } from './languageDetection';
 
+// English only. UI strings still live in locale files so components keep using t().
 import commonEn from '../locales/en/common.json';
 import dashboardEn from '../locales/en/dashboard.json';
 import settingsEn from '../locales/en/settings.json';
@@ -38,7 +38,7 @@ i18n
   .use(initReactI18next)
   .init({
     resources,
-    lng: getSavedLanguage() || 'en',
+    lng: 'en',
     fallbackLng: 'en',
     defaultNS: 'common',
     ns: ['common', 'dashboard', 'settings', 'jobs', 'apply', 'memory', 'qa', 'logs', 'feedback', 'profile', 'llm', 'wizard', 'guide'],
@@ -49,38 +49,5 @@ i18n
       useSuspense: false,
     },
   });
-
-const ALL_NAMESPACES = ['common', 'dashboard', 'settings', 'jobs', 'apply', 'memory', 'qa', 'logs', 'feedback', 'profile', 'llm', 'wizard', 'guide'];
-
-export async function loadLanguage(lang: string): Promise<void> {
-  if (lang === 'en' || !lang) {
-    await i18n.changeLanguage('en');
-    return;
-  }
-
-  const loadPromises = ALL_NAMESPACES.map(async (ns) => {
-    if (i18n.hasResourceBundle(lang, ns)) return;
-    try {
-      const module = await import(`../locales/${lang}/${ns}.json`);
-      i18n.addResourceBundle(lang, ns, module.default, true, true);
-    } catch {
-      // Namespace not available for this language — English fallback will be used
-    }
-  });
-
-  await Promise.all(loadPromises);
-  await i18n.changeLanguage(lang);
-}
-
-export async function loadNamespace(lang: string, ns: string): Promise<void> {
-  if (lang === 'en' || i18n.hasResourceBundle(lang, ns)) return;
-
-  try {
-    const module = await import(`../locales/${lang}/${ns}.json`);
-    i18n.addResourceBundle(lang, ns, module.default, true, true);
-  } catch {
-    // Fallback to English
-  }
-}
 
 export default i18n;

@@ -172,9 +172,77 @@ app.add_middleware(
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
+def _watched_parent_pid() -> int:
+    """PID of the app that launched us.
+
+    A PyInstaller one-file build runs as two processes: a bootloader, then the
+    real interpreter as its child, both from the same exe. Our direct parent is
+    then the bootloader, which lives exactly as long as we do, so watching it
+    never fires. Skip over it to the Tauri app.
+    """
+    parent_pid = os.getppid()
+    if getattr(sys, "frozen", False):
+        try:
+            import psutil
+            parent = psutil.Process(parent_pid)
+            if parent.name().lower() == psutil.Process().name().lower():
+                grandparent = parent.ppid()
+                if grandparent > 1:
+                    return grandparent
+        except Exception:
+            pass
+    return parent_pid
+
+
+def _is_backend_process(proc) -> bool:
+    """True only for LangHire backend processes, never anything else on the port."""
+    try:
+        name = proc.name().lower()
+        if "langhirev2-backend" in name:
+            return True
+        cmdline = " ".join(proc.cmdline()).lower()
+        return "python" in name and "main.py" in cmdline and "backend" in cmdline
+    except Exception:
+        return False
+
+
+def _kill_stale_backend(port: int) -> None:
+    """Stop a leftover LangHire backend still holding our port (e.g. after an upgrade)."""
+    import psutil
+    me = psutil.Process()
+    mine = {me.pid, me.ppid()}
+    victims = {}
+    for conn in psutil.net_connections(kind="tcp"):
+        if conn.laddr and conn.laddr.port == port and conn.status == psutil.CONN_LISTEN and conn.pid:
+            if conn.pid in mine:
+                continue
+            try:
+                proc = psutil.Process(conn.pid)
+            except psutil.NoSuchProcess:
+                continue
+            if not _is_backend_process(proc):
+                _log.warning(f"Port {port} is held by PID {conn.pid} ({proc.name()}), not a LangHire backend; leaving it")
+                continue
+            victims[proc.pid] = proc
+            # Take its one-file bootloader too, so nothing respawns or lingers.
+            try:
+                parent = proc.parent()
+                if parent and parent.pid not in mine and _is_backend_process(parent):
+                    victims[parent.pid] = parent
+            except psutil.NoSuchProcess:
+                pass
+    for proc in victims.values():
+        _log.info(f"Killing stale backend on port {port}: PID {proc.pid}")
+        try:
+            proc.kill()
+        except psutil.NoSuchProcess:
+            pass
+    psutil.wait_procs(list(victims.values()), timeout=5)
+
+
 def _start_parent_watchdog():
     """Exit if the parent process (Tauri app) dies — prevents orphaned sidecar."""
-    parent_pid = os.getppid()
+    parent_pid = _watched_parent_pid()
     if parent_pid <= 1:
         _log.info(f"Parent watchdog skipped (ppid={parent_pid}, already orphaned or init)")
         return
@@ -559,6 +627,13 @@ async def list_ollama_models(body: dict):
 async def get_settings():
     return load_settings()
 
+
+@app.get("/browsers")
+async def list_browsers():
+    """Chromium-based browsers installed on this machine, for the browser picker."""
+    from core.browsers import detect_browsers
+    return {"browsers": detect_browsers()}
+
 @app.put("/settings")
 async def update_settings(settings: dict):
     """Update app settings.
@@ -710,7 +785,8 @@ def _kill_browser_processes():
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 cmdline = proc.info.get("cmdline") or []
-                if any(target in arg for arg in cmdline):
+                # Normalise Windows paths (backslashes, any case) before matching.
+                if any(target in arg.replace("\\", "/").lower() for arg in cmdline):
                     procs_to_kill.append(proc)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
@@ -811,8 +887,9 @@ async def start_collection(body: CollectRequest):
         # Override config.get_llm with the user's UI-configured LLM
         llm_settings = load_llm_settings()
         if llm_settings.get("provider"):
-            from core.llm_factory import create_llm
+            from core.llm_factory import create_llm, create_fallback_llm
             _config.get_llm = lambda: create_llm(llm_settings)
+            _config.get_fallback_llm = lambda: create_fallback_llm(llm_settings)
             print(f"🤖 Using {llm_settings['provider']} LLM from settings")
 
         # Load profile from the app data dir (set via UI), not the project root
@@ -968,8 +1045,9 @@ async def start_applying(body: ApplyRequest):
         # Override config.get_llm with the user's UI-configured LLM
         llm_settings = load_llm_settings()
         if llm_settings.get("provider"):
-            from core.llm_factory import create_llm
+            from core.llm_factory import create_llm, create_fallback_llm
             _config.get_llm = lambda: create_llm(llm_settings)
+            _config.get_fallback_llm = lambda: create_fallback_llm(llm_settings)
             print(f"🤖 Using {llm_settings['provider']} LLM from settings")
 
         jobs = load_json(JOBS_FILE, {})
@@ -1298,10 +1376,16 @@ async def delete_jobs(body: dict):
 _login_browser_process = None  # track the login browser subprocess
 
 def _get_browser_profile_dir() -> str:
-    """Get the shared browser profile directory. Migrates from old per-worker profiles if needed."""
+    """Automation profile dir for the browser picked in Settings (the same one the agents use).
+
+    For the original shared profile, migrates from old per-worker profiles if needed.
+    """
+    from core.browsers import resolve_browser
     data_dir = get_data_dir()
-    profile = data_dir / "browser_profile"
+    _, profile = resolve_browser(load_settings(), data_dir / "browser_profile")
     profile.mkdir(parents=True, exist_ok=True)
+    if profile != data_dir / "browser_profile":
+        return str(profile)
 
     # Auto-migrate: if shared profile has no cookies but an old one does, copy it
     if not (profile / "Default" / "Cookies").exists():
@@ -1327,11 +1411,15 @@ async def auth_status():
     """Check if LinkedIn and Gmail sessions are valid by inspecting cookies."""
     import sqlite3
     profile_dir = _get_browser_profile_dir()
-    cookies_db = Path(profile_dir) / "Default" / "Cookies"
+    # Chromium 96+ keeps cookies in Default/Network/Cookies; older builds in Default/Cookies.
+    cookies_db = next(
+        (p for p in (Path(profile_dir) / "Default" / "Network" / "Cookies", Path(profile_dir) / "Default" / "Cookies") if p.exists()),
+        None,
+    )
 
     result = {"linkedin": {"logged_in": False}, "gmail": {"logged_in": False}}
 
-    if not cookies_db.exists():
+    if cookies_db is None:
         return result
 
     try:
@@ -1392,8 +1480,12 @@ async def auth_login(service: str):
             from playwright.sync_api import sync_playwright
             with sync_playwright() as p:
                 _log.info("Playwright started, launching persistent context...")
-                # Find actual Chromium binary (critical for frozen/PyInstaller builds)
-                chromium_path = _find_playwright_chromium()
+                # Log in with the same browser the agents will use, so the cookies
+                # land in its profile. Automatic mode keeps Playwright's Chromium
+                # (critical for frozen/PyInstaller builds).
+                from core.browsers import resolve_browser
+                chosen, _ = resolve_browser(load_settings(), get_data_dir() / "browser_profile")
+                chromium_path = chosen or _find_playwright_chromium()
                 launch_args = ["--no-first-run", "--no-default-browser-check"]
                 if sys.platform == "linux":
                     launch_args.append("--no-sandbox")
@@ -1563,7 +1655,7 @@ async def parse_resume_to_profile():
   "willing_to_relocate": false,
   "preferred_work_mode": "hybrid",
   "years_of_experience": 0,
-  "education": {{"degree": "Degree Name", "school": "University Name", "graduation": "Year or Date"}},
+  "education": {{"degree": "Degree Name", "major": "Field of Study", "school": "University Name", "graduation": "Year or Date"}},
   "current_role": "Current or Most Recent Job Title",
   "target_job_titles": ["Job Title 1", "Job Title 2"],
   "target_locations": ["City, State"],
@@ -1587,8 +1679,9 @@ RESUME TEXT:
 
     try:
         from browser_use.llm.messages import UserMessage
-        response = await llm.ainvoke([UserMessage(content=prompt)])
-        response_text = response.completion if hasattr(response, 'completion') else (response.content if hasattr(response, 'content') else str(response))
+        from core.llm_factory import ainvoke_with_fallback, completion_text
+        response = await ainvoke_with_fallback(llm, llm_settings, [UserMessage(content=prompt)])
+        response_text = completion_text(response)
 
         # Parse JSON from response
         match = _re.search(r"\{.*\}", response_text, _re.DOTALL)
@@ -1658,7 +1751,8 @@ RESUME TEXT:
     except json.JSONDecodeError:
         return {"success": False, "message": "LLM returned invalid JSON. Try again."}
     except Exception as e:
-        return {"success": False, "message": f"LLM parsing failed: {e}"}
+        from core.llm_factory import _friendly_llm_error
+        return {"success": False, "message": f"LLM parsing failed: {_friendly_llm_error(str(e), getattr(e, 'status_code', None))}"}
 
 
 # ── Setup Status ──────────────────────────────────────────────────────────
@@ -1870,9 +1964,10 @@ async def smart_squash_qa():
     )
     try:
         from browser_use.llm.messages import UserMessage
-        response = await llm.ainvoke([UserMessage(content=prompt)])
+        from core.llm_factory import ainvoke_with_fallback, completion_text
+        response = await ainvoke_with_fallback(llm, llm_settings, [UserMessage(content=prompt)])
         import json as _json
-        text = response.completion if hasattr(response, "completion") else (response.content if hasattr(response, "content") else str(response))
+        text = completion_text(response)
         # Extract JSON from response
         import re as _re_mod
         match = _re_mod.search(r"\[.*\]", text, _re_mod.DOTALL)
@@ -2043,12 +2138,13 @@ async def generate_cover_letter(body: dict):
     try:
         from core.llm_factory import create_llm
         from browser_use.llm.messages import UserMessage
+        from core.llm_factory import ainvoke_with_fallback, completion_text, _friendly_llm_error
         llm = create_llm(llm_settings)
-        response = await llm.ainvoke([UserMessage(content=prompt)])
-        text = response.content if hasattr(response, "content") else str(response)
+        response = await ainvoke_with_fallback(llm, llm_settings, [UserMessage(content=prompt)])
+        text = completion_text(response)
         return {"success": True, "cover_letter": text.strip()}
     except Exception as e:
-        return _api_error("llm_error", f"Cover letter generation failed: {str(e)}", 500)
+        return _api_error("llm_error", f"Cover letter generation failed: {_friendly_llm_error(str(e), getattr(e, 'status_code', None))}", 500)
 
 
 # ── Countries & Plugins ───────────────────────────────────────────────────
@@ -2191,17 +2287,21 @@ if __name__ == "__main__":
         _log.error(f"Port {port} already in use: {e}. Killing stale process...")
         sock.close()
         try:
-            import subprocess as _sp
-            result = _sp.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, timeout=5)
-            if result.stdout.strip():
-                for pid in result.stdout.strip().split("\n"):
-                    _log.info(f"Killing stale process on port {port}: PID {pid}")
-                    try:
-                        os.kill(int(pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                import time
-                time.sleep(1)
+            if sys.platform == "win32":
+                # lsof and SIGKILL don't exist on Windows.
+                _kill_stale_backend(port)
+            else:
+                import subprocess as _sp
+                result = _sp.run(["lsof", "-ti", f":{port}"], capture_output=True, text=True, timeout=5)
+                if result.stdout.strip():
+                    for pid in result.stdout.strip().split("\n"):
+                        _log.info(f"Killing stale process on port {port}: PID {pid}")
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    import time
+                    time.sleep(1)
         except Exception as kill_err:
             _log.warning(f"Could not kill stale process: {kill_err}")
 

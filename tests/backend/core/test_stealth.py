@@ -76,7 +76,18 @@ class TestSettingsPersistence:
 class TestStealthLaunchArgs:
     def test_no_extra_args_when_stealth_off(self, data_dir, monkeypatch):
         monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {"stealth_enabled": False})
-        assert shared_config.build_browser_kwargs() == {}
+        # Only the always-on removal of the flag Chrome warns about.
+        kwargs = shared_config.build_browser_kwargs()
+        assert kwargs["ignore_default_args"] == ["--extensions-on-chrome-urls"]
+        assert "args" not in kwargs
+
+    def test_launch_args_have_no_chrome_warning_flag(self, data_dir, monkeypatch):
+        """Chrome shows an 'unsupported command-line flag' bar for --extensions-on-chrome-urls."""
+        from browser_use.browser.profile import BrowserProfile
+        for stealth in (False, True):
+            monkeypatch.setattr(shared_config, "load_runtime_settings", lambda s=stealth: {"stealth_enabled": s})
+            args = BrowserProfile(**shared_config.build_browser_kwargs()).get_args()
+            assert "--extensions-on-chrome-urls" not in args
 
     def test_args_added_when_stealth_on(self, data_dir, monkeypatch):
         monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {"stealth_enabled": True})

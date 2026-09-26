@@ -6,7 +6,6 @@ import SetupWizard from "./components/SetupWizard";
 import { getSetupStatus, getSettings } from "./lib/api";
 import { initAnalytics, trackPageView } from "./lib/analytics";
 import { trackStartupComplete, markStart, measureAndTrack } from "./lib/perf";
-import { useDirection } from "./i18n/useDirection";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { Wand2, Loader2 } from "lucide-react";
 
@@ -31,7 +30,6 @@ function PageLoader() {
 }
 
 export default function App() {
-  useDirection();
   useKeyboardShortcuts();
   const [showWizard, setShowWizard] = useState(false);
   const [wizardChecked, setWizardChecked] = useState(false);

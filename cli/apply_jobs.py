@@ -132,7 +132,6 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     llm = config.get_llm()
     # Use the shared browser profile in OS data dir (same as login endpoint)
     browser = BrowserSession(
-        user_data_dir=str(BROWSER_PROFILE_DIR),
         chromium_sandbox=(sys.platform != "linux"),
         **config.build_browser_kwargs(),
     )
@@ -329,6 +328,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             f"For each form question: @@QUESTION: {{\"question\": \"...\", \"answer\": \"...\", \"type\": \"...\"}}"
         ),
         llm=llm,
+        fallback_llm=config.get_fallback_llm(),
         use_vision=True,
         llm_call_timeout=300,  # 5 minutes per step
         max_failures=10,

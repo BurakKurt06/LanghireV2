@@ -58,7 +58,7 @@ def load_profile() -> dict:
         "willing_to_relocate": False,
         "preferred_work_mode": "hybrid",
         "years_of_experience": 0,
-        "education": {"degree": "", "school": "", "graduation": ""},
+        "education": {"degree": "", "major": "", "school": "", "graduation": ""},
         "current_role": "",
         "target_job_titles": [],
         "target_locations": [],
@@ -83,10 +83,10 @@ def save_profile(profile: dict):
 def load_llm_settings() -> dict:
     return _load_json(get_data_dir() / "llm_settings.json", {
         "provider": "openrouter",
-        "openai": {"api_key": "", "model": "gpt-4o"},
-        "anthropic": {"api_key": "", "model": "claude-sonnet-4-5"},
+        "openai": {"api_key": "", "model": "gpt-5.4-mini"},
+        "anthropic": {"api_key": "", "model": "claude-sonnet-5"},
         "bedrock": {"access_key": "", "secret_key": "", "region": "us-west-2", "model": "us.anthropic.claude-sonnet-4-6"},
-        "gemini": {"api_key": "", "model": "gemini-2.5-pro"},
+        "gemini": {"api_key": "", "model": "gemini-3-flash-preview"},
         "ollama": {"base_url": "http://localhost:11434", "model": ""},
         "openrouter": {"api_key": "", "model": "qwen/qwen3.6-plus"},
     })

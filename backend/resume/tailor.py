@@ -13,10 +13,10 @@ import fitz  # pymupdf
 
 try:
     from core.config import get_data_dir, load_settings, load_llm_settings
-    from core.llm_factory import create_llm
+    from core.llm_factory import create_llm, ainvoke_with_fallback, completion_text
 except ImportError:
     from backend.core.config import get_data_dir, load_settings, load_llm_settings
-    from backend.core.llm_factory import create_llm
+    from backend.core.llm_factory import create_llm, ainvoke_with_fallback, completion_text
 
 
 def _get_tailored_dir() -> Path:
@@ -183,13 +183,8 @@ async def _generate_tailored_text(
     )
 
     from browser_use.llm.messages import UserMessage
-    response = await llm.ainvoke([UserMessage(content=prompt)])
-    if hasattr(response, "completion"):
-        text = response.completion
-    elif hasattr(response, "content") and isinstance(response.content, str):
-        text = response.content
-    else:
-        text = str(response)
+    response = await ainvoke_with_fallback(llm, llm_settings, [UserMessage(content=prompt)])
+    text = completion_text(response)
 
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
@@ -553,7 +548,8 @@ async def tailor_resume(
         try:
             edu = profile.get("education", {})
             if edu.get("degree"):
-                education_text = f"{edu.get('school', '')} | {edu['degree']}\nGraduation: {edu.get('graduation', '')}"
+                major = f" in {edu['major']}" if edu.get("major") else ""
+                education_text = f"{edu.get('school', '')} | {edu['degree']}{major}\nGraduation: {edu.get('graduation', '')}"
         except Exception:
             pass
 

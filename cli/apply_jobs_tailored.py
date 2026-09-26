@@ -60,6 +60,7 @@ async def fetch_job_description(job: dict, worker_id: int) -> str:
             f"Do NOT apply. Just read and extract the description, then call done."
         ),
         llm=llm,
+        fallback_llm=config.get_fallback_llm(),
         use_vision=True,
         browser_session=browser,
         max_failures=5,
