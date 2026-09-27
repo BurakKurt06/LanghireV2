@@ -619,6 +619,44 @@ class TestSetup:
         assert auth_client.get("/setup/status").json()["llm"] is False
 
 
+    def test_setup_status_chatgpt_needs_a_sign_in(self, auth_client):
+        from core import chatgpt_auth
+        auth_client.put("/settings/llm", json={"provider": "chatgpt", "chatgpt": {"model": "gpt-6-luna"}})
+        assert auth_client.get("/setup/status").json()["llm"] is False
+        chatgpt_auth._save({"access_token": "a.e30.s", "refresh_token": "r"})
+        assert auth_client.get("/setup/status").json()["llm"] is True
+
+
+class TestChatGPTEndpoints:
+    def test_status_when_signed_out(self, auth_client):
+        body = auth_client.get("/chatgpt/status").json()
+        assert body["signed_in"] is False and body["pending"] is False
+
+    def test_models_when_signed_out_is_a_soft_failure(self, auth_client):
+        body = auth_client.get("/chatgpt/models").json()
+        assert body["success"] is False and body["models"] == []
+        assert "Not signed in" in body["message"]
+
+    def test_login_returns_the_url_without_a_real_browser(self, auth_client, monkeypatch):
+        from core import chatgpt_auth
+        monkeypatch.setattr(chatgpt_auth, "start_login", lambda: "https://auth.openai.com/oauth/authorize?x=1")
+        assert auth_client.post("/chatgpt/login").json() == {"url": "https://auth.openai.com/oauth/authorize?x=1", "error": ""}
+
+    def test_login_reports_busy_ports(self, auth_client, monkeypatch):
+        from core import chatgpt_auth
+
+        def busy():
+            raise RuntimeError("ports 1455 and 1457 are in use")
+
+        monkeypatch.setattr(chatgpt_auth, "start_login", busy)
+        assert "in use" in auth_client.post("/chatgpt/login").json()["error"]
+
+    def test_logout(self, auth_client):
+        from core import chatgpt_auth
+        chatgpt_auth._save({"access_token": "a.e30.s", "refresh_token": "r"})
+        assert auth_client.post("/chatgpt/logout").json()["signed_in"] is False
+
+
 # ── Status endpoints for the long-running workers (no work triggered) ─────────
 class TestWorkerStatus:
     def test_collection_status_idle(self, auth_client):

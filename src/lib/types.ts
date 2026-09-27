@@ -49,10 +49,16 @@ export interface CandidateProfile {
 }
 
 // ── LLM Settings ──────────────────────────────────────────────────────────
-export type LLMProvider = "openai" | "anthropic" | "gemini" | "bedrock" | "ollama" | "openrouter" | "openai_compatible";
+export type LLMProvider = "chatgpt" | "openai" | "anthropic" | "gemini" | "bedrock" | "ollama" | "openrouter" | "openai_compatible";
 
 export interface LLMSettings {
   provider: LLMProvider;
+  /** A ChatGPT Plus/Pro plan via "Sign in with ChatGPT" (the sign-in itself is stored by the backend). */
+  chatgpt?: {
+    model: string;
+    /** "" = the model's default. */
+    reasoning_effort?: string;
+  };
   openai?: {
     api_key: string;
     model: string;
@@ -86,6 +92,24 @@ export interface LLMSettings {
     api_key: string;
     model: string;
   };
+}
+
+export interface ChatGPTStatus {
+  signed_in: boolean;
+  email: string;
+  plan: string;
+  /** A sign-in is waiting for the browser. */
+  pending: boolean;
+  error: string;
+  /** The sign-in page, while pending. */
+  url: string;
+}
+
+export interface ChatGPTModel {
+  id: string;
+  name: string;
+  efforts: string[];
+  default_effort: string;
 }
 
 // ── App Settings ──────────────────────────────────────────────────────────

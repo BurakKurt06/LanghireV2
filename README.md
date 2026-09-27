@@ -40,6 +40,13 @@ On first launch the app downloads Chromium (~150 MB) automatically.
 
 1. **LLM API key** — required; nothing works without it. OpenRouter is the
    default provider; OpenAI, Anthropic, Gemini, Ollama and Bedrock also work.
+
+   A **ChatGPT Plus/Pro plan** works without an API key: pick "ChatGPT plan" and
+   click Sign in with ChatGPT. It uses the same sign-in and backend as OpenAI's
+   Codex app, so each AI step counts toward the plan's Codex usage limit instead
+   of being billed per token. That backend isn't a published API and could
+   change. The sign-in is stored in `chatgpt_auth.json` in the app data folder,
+   separate from the Codex CLI's own login.
 2. **Resume** — Settings → Resume, a PDF path.
 3. **Profile** — name, contact details, work authorization, target job titles
    and locations. Collection uses the target titles as its search terms.

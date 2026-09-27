@@ -4,6 +4,10 @@
   "selectProvider": "Select Provider",
   "configuration": "{{provider}} Configuration",
   "providers": {
+    "chatgpt": {
+      "name": "ChatGPT plan (Plus / Pro)",
+      "description": "Use your ChatGPT subscription instead of an API key: sign in once, and usage counts against your plan's Codex limits"
+    },
     "openrouter": {
       "name": "OpenRouter (Recommended)",
       "description": "100+ vision models (GPT, Claude, Gemini, Qwen, Llama) via a single API key"
@@ -110,5 +114,18 @@
     "testConnection": "Test Connection",
     "connectionSuccessful": "Connection successful!",
     "connectionFailed": "Connection failed."
+  },
+  "chatgpt": {
+    "signIn": "Sign in with ChatGPT",
+    "signOut": "Sign out",
+    "signedInAs": "Signed in as {{email}}",
+    "plan": "{{plan}} plan",
+    "notSignedIn": "Not signed in. Sign in with the ChatGPT account that has your Plus or Pro plan.",
+    "waiting": "Finish signing in in the browser tab that just opened.",
+    "openAgain": "Didn't open? Open the sign-in page",
+    "reasoningEffort": "Reasoning effort",
+    "effortDefault": "Model default",
+    "effortHint": "Higher effort thinks longer on each step: better on tricky forms, but slower and uses more of your plan's limit.",
+    "howItWorks": "This uses the same sign-in as OpenAI's Codex app. Each AI step counts toward your plan's Codex usage limit (it resets every few hours); nothing is billed per token. It isn't an official API, so OpenAI could change it."
   }
 }

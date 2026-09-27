@@ -95,6 +95,7 @@ def load_llm_settings() -> dict:
         "gemini": {"api_key": "", "model": "gemini-3-flash-preview"},
         "ollama": {"base_url": "http://localhost:11434", "model": ""},
         "openrouter": {"api_key": "", "model": "qwen/qwen3.6-plus"},
+        "chatgpt": {"model": "gpt-6-luna", "reasoning_effort": ""},
     })
 
 

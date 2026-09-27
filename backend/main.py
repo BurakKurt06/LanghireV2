@@ -135,7 +135,7 @@ class _RateLimiter:
         return True
 
 _rate_limiter = _RateLimiter(max_calls=60, window_seconds=60)
-_rate_limited_prefixes = ("/jobs/collect", "/apply/start", "/apply/stop", "/llm/test", "/auth/login")
+_rate_limited_prefixes = ("/jobs/collect", "/apply/start", "/apply/stop", "/llm/test", "/auth/login", "/chatgpt/login")
 
 _ALLOWED_ORIGINS = {"http://localhost:1420", "tauri://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://127.0.0.1:1420"}
 
@@ -604,6 +604,39 @@ async def test_llm(settings: dict):
             
         _log.error(f"LLM test failed: {e}", exc_info=True)
         return {"success": False, "message": f"LLM test failed: {msg}"}
+
+
+@app.post("/chatgpt/login")
+async def chatgpt_login():
+    """Start "Sign in with ChatGPT" in the default browser; returns the sign-in URL too."""
+    from core import chatgpt_auth
+    try:
+        return {"url": await asyncio.to_thread(chatgpt_auth.start_login), "error": ""}
+    except RuntimeError as e:  # both callback ports busy
+        return {"url": "", "error": str(e)}
+
+
+@app.get("/chatgpt/status")
+async def chatgpt_status():
+    from core import chatgpt_auth
+    return chatgpt_auth.status()
+
+
+@app.post("/chatgpt/logout")
+async def chatgpt_logout():
+    from core import chatgpt_auth
+    await asyncio.to_thread(chatgpt_auth.logout)
+    return chatgpt_auth.status()
+
+
+@app.get("/chatgpt/models")
+async def chatgpt_models():
+    """Models the signed-in ChatGPT plan offers, with their reasoning effort levels."""
+    from core import chatgpt_auth
+    try:
+        return {"success": True, "models": await asyncio.to_thread(chatgpt_auth.list_models)}
+    except Exception as e:
+        return {"success": False, "models": [], "message": str(e)}
 
 
 @app.post("/llm/ollama-models")
@@ -1787,6 +1820,9 @@ async def get_setup_status():
     elif provider == "openai_compatible":
         compat = llm.get("openai_compatible") or {}
         llm_done = bool(compat.get("base_url", "").strip())
+    elif provider == "chatgpt":
+        from core import chatgpt_auth
+        llm_done = chatgpt_auth.load() is not None
 
     resume_done = bool(settings.get("resume_path", "").strip())
     onboarding_completed = settings.get("onboarding_completed", False)

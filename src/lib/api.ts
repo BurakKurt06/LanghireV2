@@ -21,6 +21,8 @@ import type {
   RunWithLogs,
   QAEntry,
   QAStats,
+  ChatGPTStatus,
+  ChatGPTModel,
 } from "./types";
 
 const DEFAULT_PORT = 8743;
@@ -128,6 +130,23 @@ export async function fetchOllamaModels(baseUrl: string) {
     method: "POST",
     body: JSON.stringify({ base_url: baseUrl }),
   });
+}
+
+// ── ChatGPT plan sign-in ──────────────────────────────────────────────────
+export async function startChatGPTLogin() {
+  return request<{ url: string; error: string }>("/chatgpt/login", { method: "POST" });
+}
+
+export async function getChatGPTStatus() {
+  return request<ChatGPTStatus>("/chatgpt/status");
+}
+
+export async function chatGPTLogout() {
+  return request<ChatGPTStatus>("/chatgpt/logout", { method: "POST" });
+}
+
+export async function getChatGPTModels() {
+  return request<{ success: boolean; models: ChatGPTModel[]; message?: string }>("/chatgpt/models");
 }
 
 // ── App Settings ──────────────────────────────────────────────────────────

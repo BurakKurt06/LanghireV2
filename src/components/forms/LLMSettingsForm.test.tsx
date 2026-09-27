@@ -7,6 +7,10 @@ import {
   saveLLMSettings,
   testLLMConnection,
   fetchOllamaModels,
+  startChatGPTLogin,
+  getChatGPTStatus,
+  chatGPTLogout,
+  getChatGPTModels,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
 
@@ -24,6 +28,10 @@ vi.mock("../../lib/api", () => ({
   saveLLMSettings: vi.fn(),
   testLLMConnection: vi.fn(),
   fetchOllamaModels: vi.fn(),
+  startChatGPTLogin: vi.fn(),
+  getChatGPTStatus: vi.fn(),
+  chatGPTLogout: vi.fn(),
+  getChatGPTModels: vi.fn(),
 }));
 
 const mockGetLLMSettings = vi.mocked(getLLMSettings);
@@ -31,6 +39,13 @@ const mockSaveLLMSettings = vi.mocked(saveLLMSettings);
 const mockTestLLMConnection = vi.mocked(testLLMConnection);
 const mockFetchOllamaModels = vi.mocked(fetchOllamaModels);
 const mockTrackEvent = vi.mocked(trackEvent);
+const mockStartChatGPTLogin = vi.mocked(startChatGPTLogin);
+const mockGetChatGPTStatus = vi.mocked(getChatGPTStatus);
+const mockChatGPTLogout = vi.mocked(chatGPTLogout);
+const mockGetChatGPTModels = vi.mocked(getChatGPTModels);
+
+const signedOut = { signed_in: false, email: "", plan: "", pending: false, error: "", url: "" };
+const signedIn = { ...signedOut, signed_in: true, email: "ada@example.com", plan: "plus" };
 
 const baseSettings = {
   provider: "openrouter",
@@ -65,6 +80,8 @@ describe("LLMSettingsForm", () => {
     mockSaveLLMSettings.mockResolvedValue({ success: true } as never);
     mockTestLLMConnection.mockResolvedValue({ success: true, message: "ok" } as never);
     mockFetchOllamaModels.mockResolvedValue({ success: true, models: [] } as never);
+    mockGetChatGPTStatus.mockResolvedValue(signedOut);
+    mockGetChatGPTModels.mockResolvedValue({ success: true, models: [] });
     stubFetch();
   });
 
@@ -81,7 +98,7 @@ describe("LLMSettingsForm", () => {
     await screen.findByText("selectProvider");
 
     const radios = screen.getAllByRole("radio");
-    expect(radios).toHaveLength(7);
+    expect(radios).toHaveLength(8);
     const openrouter = screen.getByRole("radio", { name: /providers\.openrouter/ });
     expect(openrouter).toBeChecked();
     // OpenRouter config field (api key) is present.
@@ -406,6 +423,73 @@ describe("LLMSettingsForm", () => {
           expect.objectContaining({ anthropic: expect.objectContaining({ model: "claude-next" }) }),
         ),
       );
+    });
+  });
+
+  describe("ChatGPT plan", () => {
+    const planModels = [
+      { id: "gpt-6-luna", name: "GPT-6 Luna", efforts: ["low", "medium", "high", "max"], default_effort: "medium" },
+      { id: "gpt-6-sol", name: "GPT-6 Sol", efforts: ["low", "medium"], default_effort: "medium" },
+    ];
+
+    it("signed out: sign-in starts the browser flow and shows the waiting state", async () => {
+      const user = userEvent.setup();
+      mockStartChatGPTLogin.mockResolvedValue({ url: "https://auth.openai.com/oauth/authorize?x=1", error: "" });
+      render(<LLMSettingsForm />);
+      await screen.findByText("selectProvider");
+
+      await user.click(screen.getByRole("radio", { name: /providers\.chatgpt/ }));
+      expect(await screen.findByText("chatgpt.notSignedIn")).toBeInTheDocument();
+      expect(mockSaveLLMSettings).toHaveBeenCalledWith(expect.objectContaining({ provider: "chatgpt" }));
+
+      mockGetChatGPTStatus.mockResolvedValue({ ...signedOut, pending: true, url: "https://auth.openai.com/oauth/authorize?x=1" });
+      await user.click(screen.getByRole("button", { name: /chatgpt\.signIn/ }));
+      expect(mockStartChatGPTLogin).toHaveBeenCalled();
+      expect(await screen.findByText("chatgpt.waiting")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /chatgpt\.openAgain/ })).toHaveAttribute("href", "https://auth.openai.com/oauth/authorize?x=1");
+    });
+
+    it("shows a sign-in error, such as busy callback ports", async () => {
+      const user = userEvent.setup();
+      mockStartChatGPTLogin.mockResolvedValue({ url: "", error: "ports 1455 and 1457 are in use" });
+      mockGetLLMSettings.mockResolvedValue({ ...structuredClone(baseSettings), provider: "chatgpt" } as never);
+      render(<LLMSettingsForm />);
+      await user.click(await screen.findByRole("button", { name: /chatgpt\.signIn/ }));
+      expect(await screen.findByRole("alert")).toHaveTextContent("in use");
+    });
+
+    it("signed in: shows the account, loads the plan's models, and saves model and effort", async () => {
+      const user = userEvent.setup();
+      mockGetChatGPTStatus.mockResolvedValue(signedIn);
+      mockGetChatGPTModels.mockResolvedValue({ success: true, models: planModels });
+      mockChatGPTLogout.mockResolvedValue(signedOut);
+      mockGetLLMSettings.mockResolvedValue({
+        ...structuredClone(baseSettings), provider: "chatgpt", chatgpt: { model: "gpt-6-luna", reasoning_effort: "max" },
+      } as never);
+      render(<LLMSettingsForm />);
+
+      expect(await screen.findByText("chatgpt.signedInAs")).toBeInTheDocument();
+      await waitFor(() => expect(screen.getByRole("option", { name: "max" })).toBeInTheDocument());
+      expect(screen.getByLabelText("chatgpt.reasoningEffort")).toHaveValue("max");
+
+      // Sol doesn't offer "max", so switching resets the effort to the model default.
+      await user.selectOptions(screen.getByLabelText("labels.model"), "gpt-6-sol");
+      await waitFor(() =>
+        expect(mockSaveLLMSettings).toHaveBeenLastCalledWith(
+          expect.objectContaining({ chatgpt: { model: "gpt-6-sol", reasoning_effort: "" } }),
+        ),
+      );
+
+      await user.selectOptions(screen.getByLabelText("chatgpt.reasoningEffort"), "low");
+      await waitFor(() =>
+        expect(mockSaveLLMSettings).toHaveBeenLastCalledWith(
+          expect.objectContaining({ chatgpt: { model: "gpt-6-sol", reasoning_effort: "low" } }),
+        ),
+      );
+
+      await user.click(screen.getByRole("button", { name: /chatgpt\.signOut/ }));
+      expect(mockChatGPTLogout).toHaveBeenCalled();
+      expect(await screen.findByText("chatgpt.notSignedIn")).toBeInTheDocument();
     });
   });
 });

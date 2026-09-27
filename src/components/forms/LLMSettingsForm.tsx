@@ -1,12 +1,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { TestTube, CheckCircle, XCircle, Loader2, ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
-import { getLLMSettings, saveLLMSettings, testLLMConnection, fetchOllamaModels } from "../../lib/api";
+import {
+  getLLMSettings, saveLLMSettings, testLLMConnection, fetchOllamaModels,
+  startChatGPTLogin, getChatGPTStatus, chatGPTLogout, getChatGPTModels,
+} from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
-import type { LLMProvider, LLMSettings } from "../../lib/types";
+import type { ChatGPTModel, ChatGPTStatus, LLMProvider, LLMSettings } from "../../lib/types";
 import { useTranslation } from "react-i18next";
 import PasswordInput from "../ui/PasswordInput";
 
 const PROVIDERS: { id: LLMProvider; nameKey: string; descKey: string }[] = [
+  { id: "chatgpt", nameKey: "providers.chatgpt.name", descKey: "providers.chatgpt.description" },
   { id: "openrouter", nameKey: "providers.openrouter.name", descKey: "providers.openrouter.description" },
   { id: "openai", nameKey: "providers.openai.name", descKey: "providers.openai.description" },
   { id: "anthropic", nameKey: "providers.anthropic.name", descKey: "providers.anthropic.description" },
@@ -50,6 +54,12 @@ const OPENROUTER_FALLBACK_MODELS = [
   "meta-llama/llama-4-maverick",
   "mistralai/mistral-large-2411",
 ];
+// Until the signed-in plan's own list loads.
+const CHATGPT_FALLBACK_MODELS: ChatGPTModel[] = [
+  { id: "gpt-6-luna", name: "GPT-6 Luna", efforts: [], default_effort: "" },
+  { id: "gpt-6-sol", name: "GPT-6 Sol", efforts: [], default_effort: "" },
+];
+const CHATGPT_FALLBACK_EFFORTS = ["low", "medium", "high"];
 const BEDROCK_MODELS = [
   "us.anthropic.claude-sonnet-4-6",
   "us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -59,6 +69,7 @@ const BEDROCK_MODELS = [
 
 const defaultSettings: LLMSettings = {
   provider: "openrouter",
+  chatgpt: { model: "gpt-6-luna", reasoning_effort: "" },
   openai: { api_key: "", model: "gpt-5.4-mini" },
   anthropic: { api_key: "", model: "claude-sonnet-5" },
   gemini: { api_key: "", model: "gemini-3-flash-preview" },
@@ -197,6 +208,7 @@ function ModelPicker({ value, options, onChange, customLabel, placeholder }: Mod
 }
 
 const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
+  chatgpt: "ChatGPT",
   openai: "OpenAI",
   anthropic: "Anthropic",
   gemini: "Google Gemini",
@@ -205,6 +217,126 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   openrouter: "OpenRouter",
   openai_compatible: "OpenAI-Compatible",
 };
+
+type ChatGPTSettings = NonNullable<LLMSettings["chatgpt"]>;
+
+/** "Sign in with ChatGPT" plus the plan's model and reasoning effort. */
+function ChatGPTSection({ value, onChange }: { value: ChatGPTSettings; onChange: (patch: Partial<ChatGPTSettings>) => void }) {
+  const { t } = useTranslation("llm");
+  const [status, setStatus] = useState<ChatGPTStatus | null>(null);
+  const [models, setModels] = useState<ChatGPTModel[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(() => getChatGPTStatus().then(setStatus).catch(() => {}), []);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  // Poll while the sign-in page is open in the browser.
+  useEffect(() => {
+    if (!status?.pending) return;
+    const timer = setInterval(refresh, 2000);
+    return () => clearInterval(timer);
+  }, [status?.pending, refresh]);
+
+  useEffect(() => {
+    if (!status?.signed_in) { setModels([]); return; }
+    let cancelled = false;
+    getChatGPTModels()
+      .then((r) => { if (!cancelled && r.success && r.models.length > 0) setModels(r.models); })
+      .catch(() => { /* keep the fallback list */ });
+    return () => { cancelled = true; };
+  }, [status?.signed_in]);
+
+  const signIn = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await startChatGPTLogin();
+      if (result.error) setError(result.error);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const signOut = async () => {
+    setBusy(true);
+    try { setStatus(await chatGPTLogout()); } catch { /* backend unreachable */ }
+    finally { setBusy(false); }
+  };
+
+  const options = models.length > 0 ? models : CHATGPT_FALLBACK_MODELS;
+  const effortsFor = (id: string) => {
+    const offered = options.find((m) => m.id === id)?.efforts ?? [];
+    return offered.length > 0 ? offered : CHATGPT_FALLBACK_EFFORTS;
+  };
+  const efforts = effortsFor(value.model);
+  const effort = value.reasoning_effort || "";
+  const shownError = error || status?.error || "";
+
+  return (
+    <div className="space-y-3">
+      <div className="rounded-2xl border border-border p-4 space-y-3">
+        {status?.signed_in ? (
+          <div className="flex items-center gap-3">
+            <CheckCircle className="w-4 h-4 text-green-600 flex-shrink-0" />
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-foreground truncate">{t("chatgpt.signedInAs", { email: status.email || "ChatGPT" })}</p>
+              {status.plan && <p className="text-xs text-muted-foreground capitalize">{t("chatgpt.plan", { plan: status.plan })}</p>}
+            </div>
+            <button onClick={signOut} disabled={busy} className="btn-secondary ml-auto disabled:opacity-50">{t("chatgpt.signOut")}</button>
+          </div>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground">{status?.pending ? t("chatgpt.waiting") : t("chatgpt.notSignedIn")}</p>
+            <div className="flex items-center gap-3 flex-wrap">
+              <button onClick={signIn} disabled={busy} className="btn-primary disabled:opacity-50">
+                {(busy || status?.pending) && <Loader2 className="w-4 h-4 animate-spin" />}
+                {t("chatgpt.signIn")}
+              </button>
+              {status?.pending && status.url && (
+                <a href={status.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-primary font-semibold hover:underline">
+                  {t("chatgpt.openAgain")} <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+            </div>
+          </>
+        )}
+        {shownError && !status?.signed_in && (
+          <p role="alert" className="text-xs text-red-600 whitespace-pre-wrap break-words">{shownError}</p>
+        )}
+      </div>
+      <div>
+        <label htmlFor="chatgpt-model" className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.model")}</label>
+        <select
+          id="chatgpt-model"
+          value={value.model}
+          onChange={(e) => {
+            const model = e.target.value;
+            // Drop an effort the new model doesn't offer.
+            onChange(effort && !effortsFor(model).includes(effort) ? { model, reasoning_effort: "" } : { model });
+          }}
+          className="input-base"
+        >
+          {!options.some((m) => m.id === value.model) && <option value={value.model}>{value.model}</option>}
+          {options.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+        </select>
+      </div>
+      <div>
+        <label htmlFor="chatgpt-effort" className="block text-sm font-semibold text-foreground mb-1.5">{t("chatgpt.reasoningEffort")}</label>
+        <select id="chatgpt-effort" value={effort} onChange={(e) => onChange({ reasoning_effort: e.target.value })} className="input-base">
+          <option value="">{t("chatgpt.effortDefault")}</option>
+          {effort && !efforts.includes(effort) && <option value={effort}>{effort}</option>}
+          {efforts.map((level) => <option key={level} value={level}>{level}</option>)}
+        </select>
+        <p className="text-xs text-muted-foreground mt-1">{t("chatgpt.effortHint")}</p>
+      </div>
+      <p className="text-xs text-muted-foreground">{t("chatgpt.howItWorks")}</p>
+    </div>
+  );
+}
 
 interface LLMSettingsFormProps {
   onSaved?: () => void;
@@ -349,6 +481,12 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
     const ns = { ...settings, provider };
     setSettings(ns);
     setTestStatus("idle");
+    immediateSave(ns);
+  };
+
+  const updateChatGPT = (patch: Partial<ChatGPTSettings>) => {
+    const ns = { ...settings, chatgpt: { ...defaultSettings.chatgpt!, ...settings.chatgpt, ...patch } };
+    setSettings(ns);
     immediateSave(ns);
   };
 
@@ -537,6 +675,10 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
       {/* Provider Config */}
       <div className={compact ? "" : "card"}>
         {!compact && <h3 className="text-sm font-bold text-foreground mb-4">{t("configuration", { provider: PROVIDER_DISPLAY_NAMES[settings.provider] })}</h3>}
+
+        {settings.provider === "chatgpt" && (
+          <ChatGPTSection value={{ ...defaultSettings.chatgpt!, ...settings.chatgpt }} onChange={updateChatGPT} />
+        )}
 
         {settings.provider === "openai" && (
           <div className="space-y-3">

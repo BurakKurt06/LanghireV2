@@ -1,7 +1,8 @@
 """
 Multi-provider LLM factory.
 Creates browser_use chat models from user settings.
-Supports: OpenAI, Anthropic (direct), AWS Bedrock, Google Gemini.
+Supports: OpenAI, Anthropic (direct), AWS Bedrock, Google Gemini, and a
+ChatGPT plan through the Codex sign-in (chatgpt_auth).
 """
 
 import re
@@ -38,6 +39,14 @@ def create_llm(settings: dict):
         return ChatOpenAI(
             model=cfg.get("model", "gpt-5.4-mini"),
             api_key=cfg.get("api_key", "").strip(),
+        )
+
+    elif provider == "chatgpt":
+        from core.chatgpt_llm import ChatChatGPT
+        cfg = settings.get("chatgpt", {})
+        return ChatChatGPT(
+            model=cfg.get("model") or "gpt-6-luna",
+            reasoning_effort=cfg.get("reasoning_effort") or "",
         )
 
     elif provider == "anthropic":
@@ -231,6 +240,11 @@ def _friendly_llm_error(message: str, status_code=None) -> str:
     """Map an LLM provider failure to a friendly, actionable message."""
     msg = (message or "").lower()
     code = status_code
+
+    # ChatGPT plan errors are already written for the user (sign-in, usage limit).
+    if any(s in msg for s in ("sign in to chatgpt", "chatgpt sign-in", "chatgpt plan", "chatgpt rejected",
+                              "reach chatgpt", "chatgpt request")):
+        return message
 
     # Authentication / invalid API key
     if code in (401, 403) or any(
