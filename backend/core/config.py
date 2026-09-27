@@ -3,6 +3,7 @@ Configuration management for LangHireV2.
 All settings stored in OS-appropriate app data directory.
 No hardcoded values.
 """
+import copy
 import json
 import platform
 from pathlib import Path
@@ -46,32 +47,37 @@ def _save_json(path: Path, data):
 # ── Profile ───────────────────────────────────────────────────────────────
 
 def load_profile() -> dict:
-    return _load_json(get_data_dir() / "candidate_profile.json", {
-        "name": "",
-        "email": "",
-        "phone": "",
-        "phone_country_code": "+1",
-        "country": "US",
-        "address": {"street": "", "city": "", "state": "", "zip": "", "country": "USA"},
-        "work_authorization": "",
-        "visa_sponsorship_needed": False,
-        "willing_to_relocate": False,
-        "preferred_work_mode": "hybrid",
-        "years_of_experience": 0,
-        "education": {"degree": "", "major": "", "school": "", "graduation": ""},
-        "current_role": "",
-        "target_job_titles": [],
-        "target_locations": [],
-        "languages": ["English"],
-        "skills": [],
-        "salary_expectation": {"min": 50000, "max": 100000, "currency": "USD", "period": "annual"},
-        "notice_period": "",
-        "nationality": "",
-        "date_of_birth": "",
-        "cover_letter": "",
-        "date_format": "MM/DD/YYYY",
-        "notes": "",
-    })
+    return _load_json(get_data_dir() / "candidate_profile.json", copy.deepcopy(DEFAULT_PROFILE))
+
+
+# Every field a profile can have. Saved profiles may lack some (older versions,
+# hand edits), so readers fill the gaps from here.
+DEFAULT_PROFILE = {
+    "name": "",
+    "email": "",
+    "phone": "",
+    "phone_country_code": "+1",
+    "country": "US",
+    "address": {"street": "", "city": "", "state": "", "zip": "", "country": "USA"},
+    "work_authorization": "",
+    "visa_sponsorship_needed": False,
+    "willing_to_relocate": False,
+    "preferred_work_mode": "hybrid",
+    "years_of_experience": 0,
+    "education": {"degree": "", "major": "", "school": "", "graduation": ""},
+    "current_role": "",
+    "target_job_titles": [],
+    "target_locations": [],
+    "languages": ["English"],
+    "skills": [],
+    "salary_expectation": {"min": 50000, "max": 100000, "currency": "USD", "period": "annual"},
+    "notice_period": "",
+    "nationality": "",
+    "date_of_birth": "",
+    "cover_letter": "",
+    "date_format": "MM/DD/YYYY",
+    "notes": "",
+}
 
 
 def save_profile(profile: dict):

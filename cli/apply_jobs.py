@@ -11,6 +11,7 @@ Usage:
 """
 import argparse
 import asyncio
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,67 @@ except ImportError:
 
 # Lock for thread-safe QA file writes
 _qa_lock = asyncio.Lock()
+
+# Runs at least this long are worth an LLM call to summarise what was learned.
+LEARN_FROM_RUNS_OVER_STEPS = 15
+
+
+MIN_SECRET_LENGTH = 6
+NO_VALID_EMAIL_ERROR = (
+    "No valid email address to apply with: the Profile email isn't a valid address and "
+    "no account email is set in Settings. Fix Profile → Email, then retry this job."
+)
+
+
+def _looks_like_email(value: str) -> bool:
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value or ""))
+
+
+def build_agent_secrets(profile: dict, sensitive: dict) -> dict:
+    """Secrets the agent may type, keyed by the placeholder names in the task.
+
+    email          address for application form fields: the Profile email, or the
+                   Settings account email when the Profile one isn't a valid address
+    account_email  login / account-creation email for employer sites
+    password       login / account-creation password for employer sites
+
+    browser-use masks every occurrence of each value in everything sent to the
+    LLM. A short value (e.g. a 4-letter typo in the email field) would therefore
+    turn ordinary page text into <secret> placeholders, and would be typed into
+    forms as the "email". Such values, and empty ones, are left out.
+    """
+    profile_email = (profile.get("email") or "").strip()
+    account_email = (sensitive.get("email") or "").strip()
+    form_email = profile_email if _looks_like_email(profile_email) else (
+        account_email if _looks_like_email(account_email) else "")
+    secrets = {
+        "email": form_email,
+        "account_email": account_email if _looks_like_email(account_email) else form_email,
+        "password": sensitive.get("password") or "",
+    }
+    return {k: v for k, v in secrets.items() if len(v.strip()) >= MIN_SECRET_LENGTH}
+
+
+def same_company_applications(applied_labels: list[str], company: str) -> list[str]:
+    """The earlier applications ("<title> at <company>") worth showing for this job.
+
+    The list goes into every LLM step's prompt. Each run targets one posting,
+    so only earlier applications at the same company can matter (the agent
+    may meet an "already applied" page there); the full history just grew the
+    prompt with every application.
+    """
+    name = (company or "").strip().lower()
+    if not name or name == "unknown":
+        return []
+    return [label for label in applied_labels or [] if label.lower().endswith(f" at {name}")]
+
+
+def _max_failures() -> int:
+    """Settings -> "Max Failures Per Job" (1-50, default 8)."""
+    try:
+        return max(1, min(int(config.load_runtime_settings().get("max_failures", 8)), 50))
+    except (TypeError, ValueError):
+        return 8
 
 
 _ERROR_MAP = [
@@ -126,6 +188,13 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         print(f"  ⏭️  [W{worker_id}] Skipped (already claimed): {title} at {company}")
         return "skipped"
 
+    agent_sensitive_data = build_agent_secrets(profile, SENSITIVE_DATA)
+    if "email" not in agent_sensitive_data:
+        # Nearly every form asks for an email; don't spend a run typing a bad one.
+        await save_job_status(url, "failed", NO_VALID_EMAIL_ERROR)
+        print(f"  ❌ [W{worker_id}] Failed: {title} at {company} — no valid email address")
+        return "failed"
+
     # Always refresh credentials before each job to avoid mid-run expiry
     refresh_credentials()
 
@@ -141,7 +210,11 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     domain = mem_store.extract_domain(url)
     memories_before = mem_store.get_domain_memories(url, limit=50)
     memories_injected_count = len(memories_before) if memories_before else 0
-    memory = build_memory_context(profile, qa, applied_labels, job_url=url)
+    # Show the agent the email it will actually type (see build_agent_secrets).
+    memory = build_memory_context(
+        {**profile, "email": agent_sensitive_data["email"]}, qa,
+        same_company_applications(applied_labels, company), job_url=url,
+    )
     run_started_at = datetime.now(timezone.utc)
 
     resume_path = resume_path_override or RESUME_PATH
@@ -156,14 +229,6 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     except ImportError:
         pass
 
-    # Profile email is for application forms; credentials email/password are for ATS login
-    agent_sensitive_data = {
-        "email": profile.get("email", "").strip(),
-        "account_email": SENSITIVE_DATA.get("email", "").strip(),
-        "password": SENSITIVE_DATA.get("password", ""),
-    }
-    if not agent_sensitive_data["email"]:
-        agent_sensitive_data["email"] = agent_sensitive_data["account_email"]
 
     # Jobs no longer come only from LinkedIn: pasted links, Handshake and Intern
     # Insider all land here. Telling the agent a greenhouse.io URL is "on
@@ -172,28 +237,22 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     _host = (_urlparse(url).hostname or "").lower()
     is_linkedin = _host.endswith("linkedin.com")
 
-    if is_linkedin:
-        login_preamble = (
-            f"FIRST — LOGIN CHECK:\n"
-            f"1. Go to https://www.linkedin.com/feed/ to check if you're logged into LinkedIn.\n"
-            f"   - If you see the feed/home page → logged in ✓\n"
-            f"   - If you see a login page → WAIT for user to log in manually. Check every 15 seconds (refresh). Wait up to 5 minutes.\n"
-            f"2. Open a new tab and go to https://mail.google.com/mail/u/0/#inbox to check Gmail.\n"
-            f"   - If you see the Gmail inbox (list of emails) → logged in ✓\n"
-            f"   - If you see a Google sign-in page or redirect → WAIT for user to log in manually. Check every 15 seconds. Wait up to 5 minutes.\n"
-            f"3. Close the Gmail tab and switch back to LinkedIn.\n\n"
-        )
-    else:
-        # Not a LinkedIn posting: skip the LinkedIn check entirely (it would
-        # only waste steps) but still make sure Gmail is reachable for OTPs.
-        login_preamble = (
-            f"FIRST — LOGIN CHECK:\n"
-            f"1. Open https://mail.google.com/mail/u/0/#inbox to check Gmail is signed in.\n"
-            f"   - If you see the inbox → logged in ✓\n"
-            f"   - If you see a Google sign-in page → WAIT for user to log in manually. Check every 15 seconds. Wait up to 5 minutes.\n"
-            f"   Gmail is needed only to read verification codes later.\n"
-            f"2. Close the Gmail tab.\n\n"
-        )
+    # No up-front LinkedIn/Gmail login checks: they cost 2-4 LLM steps on every
+    # job (on two of the heaviest pages on the web), and a signed-out Gmail made
+    # the agent re-check every 15 s for 5 minutes, about 20 requests before the
+    # job was even opened. Sign-in pages are now handled only when one actually
+    # appears, with a short, bounded wait. The run opens the job URL itself
+    # (initial_actions below), so the task starts on the posting.
+    signin_wait = (
+        "wait for the user to sign in in this browser window: use the wait action "
+        "(30 seconds) at most 4 times, checking the page after each wait. If it is still "
+        "signed out, call done with success=false and"
+    )
+    linkedin_signin_note = (
+        f"LINKEDIN SIGN-IN: If LinkedIn shows a sign-in or join page instead of the job, "
+        f"{signin_wait} the text 'LinkedIn sign-in required: log in to LinkedIn from LangHire, "
+        f"then retry this job.'\n\n"
+    ) if is_linkedin else ""
 
     otp_instructions = (
         "\n\nOTP/VERIFICATION CODES: If ANY site asks for a verification code, OTP, or 2FA token:\n"
@@ -201,7 +260,10 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         "2. Open a new tab and go to https://mail.google.com\n"
         "3. Find the most recent email with the verification/OTP code\n"
         "4. Copy the code, switch back to the application tab, and enter it\n"
-        "5. This is NOT a blocker — always attempt to retrieve the code from Gmail before giving up"
+        "5. This is NOT a blocker — always attempt to retrieve the code from Gmail before giving up\n"
+        f"6. If Gmail shows a Google sign-in page instead of the inbox, {signin_wait} the text "
+        "'Gmail sign-in required to read the verification code: log in to Gmail from LangHire, "
+        "then retry this job.'"
     )
 
     has_password = bool(agent_sensitive_data.get("password", "").strip())
@@ -219,9 +281,9 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
 
     if easy_apply:
         apply_instructions = (
-            f"{login_preamble}"
-            f"THEN: Go to {url} on LinkedIn. Click Easy Apply and complete the application. "
+            f"You are on a LinkedIn job posting: {url}. Click Easy Apply and complete the application. "
             f"Use resume at {resume_path}. Auto-fill all fields from candidate profile.\n\n"
+            f"{linkedin_signin_note}"
             f"EMAIL USAGE:\n"
             f"- For APPLICATION FORM fields (contact email, email address, etc.): use <secret>email</secret>\n"
             f"- For LOGGING IN or CREATING ACCOUNTS: use <secret>account_email</secret> and <secret>password</secret>\n"
@@ -246,17 +308,17 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         # pasted link or a Handshake/Intern Insider posting is already on (or one
         # click from) the employer's own form.
         opening = (
-            f"THEN: Go to {url} on LinkedIn. Click Apply and follow through to the "
+            f"You are on a LinkedIn job posting: {url}. Click Apply and follow through to the "
             f"external application page. "
             if is_linkedin else
-            f"THEN: Go to {url}. This is a job posting; it is NOT on LinkedIn, so do "
+            f"You are on a job posting: {url}. It is NOT on LinkedIn, so do "
             f"not go to LinkedIn. Find the application form on this site, following "
             f"an 'Apply' button through to the employer's own form if needed. "
         )
         apply_instructions = (
-            f"{login_preamble}"
             f"{opening}"
             f"Use resume at {resume_path}. Auto-fill all fields from candidate profile.\n\n"
+            f"{linkedin_signin_note}"
             f"NAVIGATING EXTERNAL SITES:\n"
             f"- The LinkedIn 'Apply' button often opens a company careers page, NOT the application form directly.\n"
             f"- You MUST explore the landing page: look for 'Apply Now', 'Submit Application', or similar buttons.\n"
@@ -329,9 +391,21 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         ),
         llm=llm,
         fallback_llm=config.get_fallback_llm(),
+        # Open the posting before the first LLM step. browser-use only does this
+        # itself when the task contains a single URL, and ours has several.
+        initial_actions=[{"navigate": {"url": url, "new_tab": False}}],
+        # browser-use's judge re-sends the task, every step and up to 10
+        # screenshots after each run, purely for logging; LangHire never reads it.
+        use_judge=False,
+        # Fill up to 10 fields per step instead of 5. Actions after a page change
+        # are skipped automatically, and every step saved is a whole request.
+        max_actions_per_step=10,
         use_vision=True,
-        llm_call_timeout=300,  # 5 minutes per step
-        max_failures=10,
+        # A slow reply (retries, long thinking) can take longer than the old
+        # default of 75 s.
+        llm_timeout=180,
+        step_timeout=300,
+        max_failures=_max_failures(),
         loop_detection_enabled=True,
         loop_detection_window=5,
         browser_session=browser,
@@ -379,34 +453,43 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         marker_learnings = extract_learnings_from_markers(result)
         if marker_learnings:
             store_learnings(mem_store, marker_learnings, url, success)
-        # 2. LLM-based: use the configured LLM to summarise the run into procedural learnings
+        # 2. LLM-based: use the configured LLM to summarise the run into procedural
+        # learnings. It costs a request, so only for runs with something to learn:
+        # failures, and long flows (e.g. multi-page Workday forms).
         llm_learnings = []
-        try:
-            def _llm_call(prompt):
-                """Use the user's configured LLM for memory extraction."""
-                import asyncio
-                from browser_use.llm.messages import UserMessage
-                extraction_llm = config.get_llm()
-                loop = asyncio.new_event_loop()
-                try:
-                    resp = loop.run_until_complete(
-                        asyncio.wait_for(
-                            extraction_llm.ainvoke([UserMessage(content=prompt)]),
-                            timeout=30,
-                        )
-                    )
-                    return resp.completion if hasattr(resp, 'completion') else (resp.content if hasattr(resp, 'content') else str(resp))
-                finally:
-                    loop.close()
+        if not success or len(result.history) >= LEARN_FROM_RUNS_OVER_STEPS:
+            try:
+                def _llm_call(prompt):
+                    """Use the user's configured LLM for memory extraction.
 
-            llm_learnings = extract_learnings_via_llm(
-                result, job_url=url, job_title=title, success=success,
-                llm_call=_llm_call,
-            )
-            if llm_learnings:
-                store_learnings(mem_store, llm_learnings, url, success)
-        except Exception as mem_err:
-            print(f"    ⚠️  [W{worker_id}] Memory extraction failed (non-fatal): {mem_err}")
+                    Runs in a worker thread (see asyncio.to_thread below), which
+                    has no event loop of its own, so it can run one here. Called
+                    from the agent's thread this raised "Cannot run the event loop
+                    while another loop is running" and never produced a learning.
+                    """
+                    from browser_use.llm.messages import UserMessage
+                    extraction_llm = config.get_llm()
+                    loop = asyncio.new_event_loop()
+                    try:
+                        resp = loop.run_until_complete(
+                            asyncio.wait_for(
+                                extraction_llm.ainvoke([UserMessage(content=prompt)]),
+                                timeout=60,
+                            )
+                        )
+                        return resp.completion if hasattr(resp, 'completion') else (resp.content if hasattr(resp, 'content') else str(resp))
+                    finally:
+                        loop.close()
+
+                llm_learnings = await asyncio.to_thread(
+                    extract_learnings_via_llm,
+                    result, job_url=url, job_title=title, success=success,
+                    llm_call=_llm_call,
+                )
+                if llm_learnings:
+                    store_learnings(mem_store, llm_learnings, url, success)
+            except Exception as mem_err:
+                print(f"    ⚠️  [W{worker_id}] Memory extraction failed (non-fatal): {mem_err}")
 
         # ── Record metrics ────────────────────────────────────────────────
         run_finished_at = datetime.now(timezone.utc)

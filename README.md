@@ -43,12 +43,15 @@ On first launch the app downloads Chromium (~150 MB) automatically.
 2. **Resume** — Settings → Resume, a PDF path.
 3. **Profile** — name, contact details, work authorization, target job titles
    and locations. Collection uses the target titles as its search terms.
-4. **Logins** — LinkedIn and Gmail have buttons in the app. Handshake and
-   Intern Insider are signed into manually when the agent pauses for you (it
-   waits up to 5 minutes, once per run).
+4. **Logins** — LinkedIn and Gmail have buttons in the app; log in there before
+   a run. Other sites (Handshake, Intern Insider, …) are signed into in the
+   agent's window: when a sign-in page appears the agent waits for you, up to
+   2 minutes, then stops that run with a "sign-in required" message. Nothing
+   checks logins up front, because every check is a paid LLM request.
 
-Gmail matters beyond email: the agent reads OTP and verification codes off the
-Gmail page in its own browser. There is no IMAP or API integration.
+Gmail matters beyond email: when a site sends a verification code, the agent
+reads it off the Gmail page in its own browser. There is no IMAP or API
+integration. Gmail is only opened when a code is actually needed.
 
 ## Getting jobs in
 
@@ -81,7 +84,9 @@ are appended in code, so no plugin can ship without them.
 | Stealth mode | off | Hides automation signals (`navigator.webdriver`, plugin list, WebGL fingerprint) via CDP injection, and drops the automation launch flags. |
 | Human-like delays | off | Randomised pause (default 5–15s) between applications, between collection sources, and between worker launches. |
 | Solve CAPTCHAs with 2Captcha | off | Sends CAPTCHAs to 2Captcha, max 2 attempts. Needs your API key. |
-| Account email / password | empty | Used to create and log into accounts on employer sites. Passed to the agent as secret placeholders, never as prompt text. |
+| Account email / password | empty | Used to create and log into accounts on employer sites. Passed to the agent as secret placeholders, never as prompt text. The account email is also used on forms when the Profile email isn't a valid address. |
+| Browser | Automatic (Chrome) | Which installed Chromium browser (Chrome, Edge, Brave, Vivaldi, or a custom path) the agent drives. Each gets its own automation profile. |
+| Max failures per job | 8 | Consecutive failed steps before the agent gives up on a job. |
 
 All defaults reproduce the app's behaviour with none of the new features on.
 
@@ -131,8 +136,10 @@ uv run pytest tests/
 - **Secrets are stored in plaintext.** The account password and the 2Captcha
   API key live in `%APPDATA%\langhirev2\settings.json` as plain JSON. The code
   attempts a restrictive `chmod`, which does almost nothing on Windows.
-- **ESLint scans `.venv`.** Most of the reported errors come from Playwright's
-  bundled type definitions, not from this codebase.
+- **LinkedIn collection costs one request per job.** The LinkedIn plugin reads
+  each job's URL from the address bar after clicking it, so collecting 25 jobs
+  takes 25+ LLM requests; on Gemini's free tier (20 requests/day per model)
+  collect in small batches.
 
 ## Automation and terms of service
 

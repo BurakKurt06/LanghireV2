@@ -623,3 +623,16 @@ def test_schema_version_recorded(store):
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert "qa_repository" in tables and "memories" in tables
+
+
+def test_qa_for_prompt_is_capped_and_ranks_this_site_first(store):
+    """Answers ride along on every LLM step, so only the most relevant are sent."""
+    for i in range(5):
+        store.qa_add(f"Common question {i}?", answer=f"A{i}")
+    for _ in range(3):
+        store.qa_add("Common question 0?", answer="A0")  # seen more often
+    store.qa_add("Workday-only question?", answer="W", source_domain="acme.wd5.myworkdayjobs.com")
+
+    top = list(store.qa_get_all_for_prompt(domain="acme.wd5.myworkdayjobs.com", limit=2))
+    assert top == ["Workday-only question?", "Common question 0?"]
+    assert len(store.qa_get_all_for_prompt()) == 6  # no limit: everything, as before

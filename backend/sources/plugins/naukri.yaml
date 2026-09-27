@@ -17,12 +17,13 @@ auth_cookies:
 search_url: "https://www.naukri.com/{title}-jobs-in-{location}?experience=0&jobAge=7"
 
 collection_prompt: |
-  FIRST — LOGIN CHECK:
-  1. Go to https://www.naukri.com/mnjuser/profile to check if you're logged into Naukri.
-     - If you see your profile page → logged in ✓
-     - If you see a login page → WAIT for user to log in manually. Check every 15 seconds. Wait up to 5 minutes.
+  SIGN-IN: If a sign-in or login page appears instead of the results, the user
+  must sign in in this browser window. Use the wait action
+  (30 seconds) at most 4 times, checking the page after each wait, then open the
+  search URL below again. If it is still signed out, call done with success=false
+  and the text 'Sign-in required: log in to Naukri in this browser, then collect again.'
 
-  THEN: Navigate to the Naukri search page:
+  START: This search page is already open when you begin:
   {search_url}
 
   If that URL doesn't load results, use the search form:

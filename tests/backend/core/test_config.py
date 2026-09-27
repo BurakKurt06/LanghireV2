@@ -205,3 +205,14 @@ def test_describe_education_includes_major_and_tolerates_old_profiles():
     assert shared_config._describe_education(edu) == "B.S. in Computer Science from MIT (2027)"
     old = {"degree": "B.S.", "school": "MIT", "graduation": "2027"}  # saved before "major" existed
     assert shared_config._describe_education(old) == "B.S. from MIT (2027)"
+
+
+def test_memory_context_survives_a_partial_profile():
+    """Missing or null profile fields must not crash every application."""
+    from core import shared_config
+    text = shared_config.build_memory_context(
+        {"name": "Ada", "email": "ada@example.com", "address": None, "skills": None, "education": {"school": "MIT"}},
+        {},
+    )
+    assert "Name: Ada" in text
+    assert "MIT" in text

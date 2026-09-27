@@ -29,6 +29,7 @@ try:
         read_jobs, write_jobs, update_job,
     )
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
+    from core.markers import parse_marker
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import (
@@ -37,6 +38,7 @@ except ImportError:
         read_jobs, write_jobs, update_job,
     )
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
+    from backend.core.markers import parse_marker
 
 
 _registry = None
@@ -72,7 +74,7 @@ async def collect_for_title(title: str, existing_jobs: dict, profile: dict, max_
     the generic safety and efficiency rules are appended here so that no plugin
     can ship without them.
     """
-    import json as _json, re as _re
+    import re as _re
     from datetime import datetime, timezone
 
     known_urls = [
@@ -100,14 +102,11 @@ async def collect_for_title(title: str, existing_jobs: dict, profile: dict, max_
 
         # Structured markers
         for m in _re.finditer(r"@@JOB_FOUND:\s*(\{[^}]{1,2000}\})", text):
-            try:
-                job = _json.loads(m.group(1))
-                url = job.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    new_in_step.append(job)
-            except _json.JSONDecodeError:
-                pass
+            job = parse_marker(m.group(1))
+            url = str(job.get("url") or "") if job else ""
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                new_in_step.append(job)
 
         # LinkedIn job URLs with metadata in surrounding text
         # (bare URLs without @@JOB_FOUND are skipped — no useful metadata)
@@ -214,12 +213,21 @@ async def collect_for_title(title: str, existing_jobs: dict, profile: dict, max_
         task += "\n\nADDITIONAL RULES:\n" + "".join(extra_rules)
     task += security + resume_hint
 
+    search_url = plugin.build_search_url(
+        [title], profile.get("target_locations", []), max_jobs, filters,
+    )
     agent = Agent(
         task=task,
         llm=llm,
         fallback_llm=config.get_fallback_llm(),
+        # The prompt says the search page is already open: open it before the
+        # first LLM step (browser-use won't when the prompt holds several URLs).
+        initial_actions=[{"navigate": {"url": search_url, "new_tab": False}}],
         use_vision=True,
-        llm_call_timeout=300,  # 5 minutes per step
+        # See cli/apply_jobs.py: room for slow replies; no judge call.
+        llm_timeout=180,
+        step_timeout=300,
+        use_judge=False,
         browser_session=browser,
         max_failures=10,
         register_new_step_callback=on_step,
@@ -276,8 +284,9 @@ async def fetch_description_for_job(url: str, job: dict) -> str:
     agent = Agent(
         task=(
             f"Go to {url}. This is a job posting page. If a login page appears "
-            f"instead, WAIT for the user to log in manually, checking every 15 "
-            f"seconds for up to 5 minutes.\n\n"
+            f"instead, wait for the user to log in: use the wait action (30 seconds) "
+            f"at most 4 times, checking the page after each wait. If it is still a "
+            f"login page, call done with success=false and the text 'Login required'.\n\n"
             f"Extract the FULL job description text including:\n"
             f"- Job title\n- Company name\n- Location\n- About the job / description\n"
             f"- Qualifications / requirements\n- Skills mentioned\n- Responsibilities\n\n"
@@ -290,6 +299,9 @@ async def fetch_description_for_job(url: str, job: dict) -> str:
         llm=llm,
         fallback_llm=config.get_fallback_llm(),
         use_vision=True,
+        use_judge=False,
+        llm_timeout=180,
+        step_timeout=300,
         browser_session=browser,
         max_failures=5,
         message_compaction=True,

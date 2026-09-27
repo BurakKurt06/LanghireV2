@@ -35,14 +35,13 @@ filters:
     url_param: "posted"
 
 collection_prompt: |
-  FIRST — LOGIN CHECK:
-  1. Go to https://app.interninsider.me/dashboard
-     - If you see a list of internship postings → logged in ✓
-     - If you land on https://app.interninsider.me/signin → WAIT for the user to
-       log in manually. Check every 15 seconds (refresh). Wait up to 5 minutes.
-       Do NOT try to enter credentials yourself.
+  SIGN-IN: If a sign-in or login page appears instead of the results, the user
+  must sign in in this browser window (do NOT try to enter credentials yourself). Use the wait action
+  (30 seconds) at most 4 times, checking the page after each wait, then open the
+  search URL below again. If it is still signed out, call done with success=false
+  and the text 'Sign-in required: log in to Intern Insider in this browser, then collect again.'
 
-  THEN: Navigate to this search URL:
+  START: This search page is already open when you begin:
   {search_url}
 
   HOW TO COLLECT JOBS — follow this exact process:

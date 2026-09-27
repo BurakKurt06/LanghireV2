@@ -1,0 +1,239 @@
+"""Tests for cli/apply_jobs.py: what one application sends to the agent, and what it saves.
+
+The browser-use Agent is replaced by a fake that records its constructor
+arguments, so these run without a browser or an LLM.
+"""
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from cli import apply_jobs
+
+GREENHOUSE = "https://boards.greenhouse.io/acme/jobs/123"
+LINKEDIN = "https://www.linkedin.com/jobs/view/4242/"
+GOOD_PROFILE = {"name": "Ada Lovelace", "email": "ada@example.com", "address": {"city": "Boston", "state": "MA", "zip": "02110"}}
+
+
+# ── build_agent_secrets ─────────────────────────────────────────────────────
+
+class TestBuildAgentSecrets:
+    def test_valid_profile_and_account_emails(self):
+        s = apply_jobs.build_agent_secrets(GOOD_PROFILE, {"email": "login@example.com", "password": "hunter2hunter2"})
+        assert s == {"email": "ada@example.com", "account_email": "login@example.com", "password": "hunter2hunter2"}
+
+    def test_invalid_profile_email_falls_back_to_account_email(self):
+        """A 4-letter typo must never be typed into forms or masked across page text."""
+        s = apply_jobs.build_agent_secrets({"email": "Zork"}, {"email": "login@example.com", "password": "x" * 12})
+        assert s["email"] == "login@example.com"
+        assert "Zork" not in s.values()
+
+    def test_no_valid_email_at_all_leaves_email_out(self):
+        s = apply_jobs.build_agent_secrets({"email": "Zork"}, {"email": "", "password": "x" * 12})
+        assert "email" not in s and "account_email" not in s
+
+    def test_invalid_account_email_uses_the_form_email_for_accounts(self):
+        s = apply_jobs.build_agent_secrets(GOOD_PROFILE, {"email": "nope", "password": ""})
+        assert s["account_email"] == "ada@example.com"
+
+    @pytest.mark.parametrize("password,kept", [("", False), ("abc", False), ("abcdef", True)])
+    def test_short_or_empty_password_is_dropped(self, password, kept):
+        s = apply_jobs.build_agent_secrets(GOOD_PROFILE, {"email": "", "password": password})
+        assert ("password" in s) is kept
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("a@b.co", True), ("ada.lovelace+jobs@example.org", True),
+    ("Zork", False), ("a@b", False), ("a b@c.d", False), ("", False),
+])
+def test_looks_like_email(value, expected):
+    assert apply_jobs._looks_like_email(value) is expected
+
+
+@pytest.mark.parametrize("stored,expected", [(None, 8), (3, 3), (0, 1), (99, 50), ("x", 8)])
+def test_max_failures_reads_the_settings_value(monkeypatch, stored, expected):
+    settings = {} if stored is None else {"max_failures": stored}
+    monkeypatch.setattr(apply_jobs.config, "load_runtime_settings", lambda: settings)
+    assert apply_jobs._max_failures() == expected
+
+
+# ── apply_to_job with a fake Agent ──────────────────────────────────────────
+
+class FakeHistory:
+    def __init__(self, success=True, steps=3):
+        self._success = success
+        self.history = [object()] * steps
+
+    def is_successful(self):
+        return self._success
+
+    def errors(self):
+        return [] if self._success else ["form broken"]
+
+
+@pytest.fixture
+def run(data_dir, monkeypatch):
+    """Run apply_to_job with everything external faked; returns (status, agent_kwargs, saved)."""
+    created, saved = [], []
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            created.append(kwargs)
+            self.kwargs = kwargs
+
+        async def run(self):
+            return self.history
+
+        def stop(self):
+            pass
+
+    class FakeBrowser:
+        def __init__(self, **kwargs):
+            pass
+
+        async def close(self):
+            pass
+
+    async def fake_save(url, status, error=None):
+        saved.append((status, error))
+
+    async def no_stealth(browser):
+        return False
+
+    async def no_qa(*args, **kwargs):
+        return None
+
+    fake_store = SimpleNamespace(
+        extract_domain=lambda url: "greenhouse.io",
+        get_domain_memories=lambda url, limit=50: [],
+        detect_ats_platform=lambda domain: None,
+    )
+    monkeypatch.setattr(apply_jobs, "Agent", FakeAgent)
+    monkeypatch.setattr(apply_jobs, "BrowserSession", FakeBrowser)
+    monkeypatch.setattr(apply_jobs, "claim_job", lambda url: True)
+    monkeypatch.setattr(apply_jobs, "save_job_status", fake_save)
+    monkeypatch.setattr(apply_jobs, "save_new_qa", no_qa)
+    monkeypatch.setattr(apply_jobs, "get_memory_store", lambda: fake_store)
+    monkeypatch.setattr(apply_jobs, "extract_from_history", lambda result: ({}, {}))
+    monkeypatch.setattr(apply_jobs, "extract_learnings_from_markers", lambda result: [])
+    monkeypatch.setattr(apply_jobs, "MetricsStore", lambda: SimpleNamespace(record_run=lambda **kw: None))
+    monkeypatch.setattr(apply_jobs, "BLOCKED_DOMAINS", [])
+    monkeypatch.setattr(apply_jobs, "RESUME_PATH", "C:/resumes/ada.pdf")
+    monkeypatch.setattr(apply_jobs, "SENSITIVE_DATA", {"email": "login@example.com", "password": "correct-horse-battery"})
+    monkeypatch.setattr(apply_jobs.config, "get_llm", lambda: object())
+    monkeypatch.setattr(apply_jobs.config, "maybe_apply_stealth", no_stealth)
+    monkeypatch.setattr(apply_jobs.config, "build_browser_kwargs", lambda: {})
+    monkeypatch.setattr(apply_jobs.config, "load_runtime_settings", lambda: {"max_failures": 6})
+
+    def _run(url=GREENHOUSE, profile=GOOD_PROFILE, easy_apply=False, history=None):
+        FakeAgent.history = history or FakeHistory()
+        job = {"url": url, "title": "Intern", "company": "Acme", "location": "Boston"}
+        status = asyncio.run(apply_jobs.apply_to_job(job, profile, {}, [], easy_apply=easy_apply, worker_id=1))
+        return status, (created[-1] if created else None), saved
+
+    return _run
+
+
+class TestAgentSetup:
+    def test_opens_the_job_before_the_first_llm_step(self, run):
+        _, kwargs, _ = run()
+        assert kwargs["initial_actions"] == [{"navigate": {"url": GREENHOUSE, "new_tab": False}}]
+
+    def test_judge_is_off_and_settings_are_wired(self, run):
+        _, kwargs, _ = run()
+        assert kwargs["use_judge"] is False
+        assert kwargs["max_actions_per_step"] == 10
+        assert kwargs["max_failures"] == 6          # Settings -> Max Failures Per Job
+        assert kwargs["llm_timeout"] == 180         # was an ignored "llm_call_timeout"
+        assert "llm_call_timeout" not in kwargs
+
+    @pytest.mark.parametrize("url,easy", [(GREENHOUSE, False), (LINKEDIN, False), (LINKEDIN, True)])
+    def test_no_up_front_login_checks(self, run, url, easy):
+        _, kwargs, _ = run(url=url, easy_apply=easy)
+        task = kwargs["task"]
+        assert "LOGIN CHECK" not in task
+        assert "linkedin.com/feed" not in task
+        assert "mail.google.com/mail/u/0/#inbox" not in task
+        assert "Wait up to 5 minutes" not in task
+        assert "at most 4 times" in task            # bounded wait, only when needed
+
+    def test_linkedin_sign_in_rule_only_for_linkedin(self, run):
+        _, gh, _ = run(url=GREENHOUSE)
+        assert "LINKEDIN SIGN-IN" not in gh["task"]
+        _, li, _ = run(url=LINKEDIN)
+        assert "LINKEDIN SIGN-IN" in li["task"]
+
+    def test_secrets_use_the_valid_email(self, run):
+        _, kwargs, _ = run(profile={**GOOD_PROFILE, "email": "Zork"})
+        assert kwargs["sensitive_data"]["email"] == "login@example.com"
+        assert "Zork" not in kwargs["extend_system_message"]
+
+
+class TestNoValidEmail:
+    def test_fails_fast_without_starting_the_agent(self, run, monkeypatch):
+        monkeypatch.setattr(apply_jobs, "SENSITIVE_DATA", {"email": "", "password": ""})
+        status, kwargs, saved = run(profile={**GOOD_PROFILE, "email": "Zork"})
+        assert status == "failed"
+        assert kwargs is None
+        assert saved == [("failed", apply_jobs.NO_VALID_EMAIL_ERROR)]
+
+
+class TestLearningExtraction:
+    """The LLM summary used to run an event loop inside the running one and always failed."""
+
+    def _capture(self, monkeypatch):
+        calls = []
+
+        class FakeLLM:
+            async def ainvoke(self, messages, **kwargs):
+                return SimpleNamespace(completion='[{"category": "navigation", "content": "x"}]')
+
+        def fake_extract(result, job_url, job_title, success, llm_call):
+            calls.append(llm_call("prompt"))
+            return []
+
+        monkeypatch.setattr(apply_jobs, "extract_learnings_via_llm", fake_extract)
+        monkeypatch.setattr(apply_jobs.config, "get_llm", lambda: FakeLLM())
+        return calls
+
+    def test_failed_run_gets_a_working_llm_summary(self, run, monkeypatch):
+        calls = self._capture(monkeypatch)
+        status, _, _ = run(history=FakeHistory(success=False, steps=4))
+        assert status == "failed"
+        assert calls == ['[{"category": "navigation", "content": "x"}]']
+
+    def test_long_successful_run_is_summarised(self, run, monkeypatch):
+        calls = self._capture(monkeypatch)
+        run(history=FakeHistory(success=True, steps=apply_jobs.LEARN_FROM_RUNS_OVER_STEPS))
+        assert len(calls) == 1
+
+    def test_short_successful_run_spends_no_request(self, run, monkeypatch):
+        calls = self._capture(monkeypatch)
+        status, _, _ = run(history=FakeHistory(success=True, steps=3))
+        assert status == "applied"
+        assert calls == []
+
+
+@pytest.mark.parametrize("company,expected", [
+    ("Acme", ["Intern at Acme", "Engineer at ACME"]),
+    ("Unknown", []),
+    ("", []),
+    ("Globex", []),
+])
+def test_same_company_applications(company, expected):
+    labels = ["Intern at Acme", "Engineer at ACME", "Intern at Initech", "Acme fan at Initech"]
+    assert apply_jobs.same_company_applications(labels, company) == expected
+
+
+def test_prompt_lists_only_same_company_applications(run, monkeypatch):
+    captured = {}
+    real_build = apply_jobs.build_memory_context
+
+    def spy(profile, qa, applied_labels=None, job_url=None):
+        captured["labels"] = applied_labels
+        return real_build(profile, qa, applied_labels, job_url=job_url)
+
+    monkeypatch.setattr(apply_jobs, "build_memory_context", spy)
+    job = {"url": GREENHOUSE, "title": "Intern", "company": "Acme", "location": "Boston"}
+    asyncio.run(apply_jobs.apply_to_job(job, GOOD_PROFILE, {}, ["Old role at Acme", "Other at Initech"], False, 1))
+    assert captured["labels"] == ["Old role at Acme"]

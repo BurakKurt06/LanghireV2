@@ -308,7 +308,7 @@ def base_profile():
 def no_op_store(monkeypatch):
     """Stub the memory store so build_memory_context skips DB/website memory."""
     class FakeStore:
-        def qa_get_all_for_prompt(self):
+        def qa_get_all_for_prompt(self, domain="", limit=None):
             return {}
 
         def get_domain_memories(self, url, limit=20):
@@ -368,7 +368,7 @@ def test_build_memory_context_default_date_format(base_profile, no_op_store):
 def test_build_memory_context_injects_website_memory(base_profile, monkeypatch):
     """When a job_url is given, per-website memories are appended."""
     class FakeStore:
-        def qa_get_all_for_prompt(self):
+        def qa_get_all_for_prompt(self, domain="", limit=None):
             return {}
 
         def get_domain_memories(self, url, limit=20):
@@ -388,7 +388,7 @@ def test_build_memory_context_injects_website_memory(base_profile, monkeypatch):
 def test_build_memory_context_qa_db_overrides_passed_in(base_profile, monkeypatch):
     """SQLite Q&A takes precedence over the passed-in qa dict."""
     class FakeStore:
-        def qa_get_all_for_prompt(self):
+        def qa_get_all_for_prompt(self, domain="", limit=None):
             return {"DBQ": "DBA"}
 
         def get_domain_memories(self, url, limit=20):

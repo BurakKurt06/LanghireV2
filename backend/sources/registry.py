@@ -63,14 +63,14 @@ class PluginConfig:
     enabled: bool = True
     file_path: str = ""
 
-    def render_collection_prompt(
+    def build_search_url(
         self,
         titles: list[str],
         locations: list[str],
         max_jobs: int,
         filters: dict | None = None,
-        languages: list[str] | None = None,
     ) -> str:
+        """The pre-filtered search URL the collection prompt starts from."""
         from urllib.parse import quote_plus
 
         title = titles[0] if titles else ""
@@ -97,7 +97,19 @@ class PluginConfig:
         if filter_params:
             sep = "&" if "?" in search_url else "?"
             search_url += sep + "&".join(filter_params)
+        return search_url
 
+    def render_collection_prompt(
+        self,
+        titles: list[str],
+        locations: list[str],
+        max_jobs: int,
+        filters: dict | None = None,
+        languages: list[str] | None = None,
+    ) -> str:
+        title = titles[0] if titles else ""
+        location = locations[0] if locations else ""
+        search_url = self.build_search_url(titles, locations, max_jobs, filters)
         return self.collection_prompt.format(
             search_url=search_url,
             title=title, titles=", ".join(titles),

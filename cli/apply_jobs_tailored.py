@@ -62,6 +62,7 @@ async def fetch_job_description(job: dict, worker_id: int) -> str:
         llm=llm,
         fallback_llm=config.get_fallback_llm(),
         use_vision=True,
+        use_judge=False,  # browser-use's post-run judge is an extra LLM call nobody reads
         browser_session=browser,
         max_failures=5,
         save_conversation_path=str(LOGS_DIR / f"desc_{job.get('company', 'unknown').replace(' ', '_')}_{job.get('title', '').replace(' ', '_')[:20]}"),

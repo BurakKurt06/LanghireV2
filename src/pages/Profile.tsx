@@ -166,7 +166,12 @@ export default function Profile() {
       <Section title={t("personal.title")}>
         <div className="grid grid-cols-2 gap-4">
           <Input label={t("personal.fullName")} value={profile.name} onChange={(v) => update("name", v)} />
-          <Input label={t("personal.email")} type="email" value={profile.email} onChange={(v) => update("email", v)} />
+          <div>
+            <Input label={t("personal.email")} type="email" value={profile.email} onChange={(v) => update("email", v)} />
+            {profile.email.trim() !== "" && !looksLikeEmail(profile.email) && (
+              <p role="alert" className="text-[12px] text-destructive mt-1">{t("personal.emailInvalid")}</p>
+            )}
+          </div>
           <div>
             <label className="block text-sm font-semibold text-foreground mb-1.5">{t("personal.phone")}</label>
             <div className="flex gap-2">
@@ -342,6 +347,11 @@ export default function Profile() {
       </Section>
     </div>
   );
+}
+
+/** Same rule the apply agent uses (cli/apply_jobs.py _looks_like_email). */
+function looksLikeEmail(value: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value.trim());
 }
 
 function Input({ label, value, onChange, type = "text", className = "", placeholder = "" }: {

@@ -5,6 +5,8 @@ These cover only the new behaviour: the Handshake and Intern Insider plugins,
 and the percent-encoding of values interpolated into a plugin's ``search_url``.
 The pre-existing plugin behaviour is covered by ``test_registry.py``.
 """
+from pathlib import Path
+
 import pytest
 
 from sources.registry import PluginRegistry
@@ -106,9 +108,8 @@ class TestLinkedInParity:
         )
 
     @pytest.mark.parametrize("needle", [
-        "LOGIN CHECK",
-        "linkedin.com/feed",
-        "mail.google.com",
+        "SIGN-IN",
+        "at most 4 times",
         "linkedin.com/jobs/search",
         "left side of the page",
         "currentJobId",
@@ -119,6 +120,11 @@ class TestLinkedInParity:
     ])
     def test_navigation_rules_survived(self, rendered, needle):
         assert needle in rendered
+
+    @pytest.mark.parametrize("needle", ["mail.google.com", "linkedin.com/feed", "every 15 seconds"])
+    def test_no_upfront_login_steps(self, rendered, needle):
+        """Collection never needs Gmail, and each login re-check is a paid LLM request."""
+        assert needle not in rendered
 
     def test_prompt_injection_defence_present(self, rendered):
         """The single most important rule: job text is data, not instructions."""
@@ -186,3 +192,20 @@ class TestSearchUrlEncoding:
         plugin = registry.get_by_name("indeed")
         out = plugin.render_collection_prompt(["Software Engineer"], ["Toronto"], 5)
         assert "q=Software+Engineer" in out
+
+
+class TestSignInIsOnDemand:
+    """No plugin may start with a login check or wait minutes for a login.
+
+    Every check is a paid LLM request; a 15-second re-check for 5 minutes
+    burned about 20 of them, the whole daily free-tier quota.
+    """
+
+    @pytest.mark.parametrize("name", [p.stem for p in (Path(__file__).resolve().parents[3] / "backend" / "sources" / "plugins").glob("*.yaml")])
+    def test_bounded_sign_in_and_search_url_first(self, registry, name):
+        plugin = registry.get_by_name(name)
+        rendered = plugin.render_collection_prompt(["Engineer"], ["Boston, MA"], 10, None)
+        assert "LOGIN CHECK" not in rendered
+        assert "Wait up to 5 minutes" not in rendered
+        assert "at most 4 times" in rendered
+        assert plugin.build_search_url(["Engineer"], ["Boston, MA"], 10, None) in rendered

@@ -36,16 +36,13 @@ filters:
     default: "7"
 
 collection_prompt: |
-  FIRST — LOGIN CHECK:
-  1. Go to https://app.joinhandshake.com/stu/postings
-     - If you see a list of job postings → logged in ✓
-     - If you land on https://app.joinhandshake.com/access or any school
-       single-sign-on page → WAIT for the user to log in manually. They will
-       sign in through their university. Check every 15 seconds (refresh).
-       Wait up to 5 minutes. Do NOT try to enter credentials yourself.
-  2. Once postings are visible, continue.
+  SIGN-IN: If a sign-in or login page appears instead of the results, the user
+  must sign in in this browser window (they sign in through their university; do NOT enter credentials yourself). Use the wait action
+  (30 seconds) at most 4 times, checking the page after each wait, then open the
+  search URL below again. If it is still signed out, call done with success=false
+  and the text 'Sign-in required: log in to Handshake in this browser, then collect again.'
 
-  THEN: Navigate to this pre-filtered search URL:
+  START: This search page is already open when you begin:
   {search_url}
   Do NOT re-search or change the filters. Results are ready.
 

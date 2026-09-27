@@ -14,6 +14,11 @@ import re
 
 from .store import MemoryStore, CATEGORIES
 
+try:
+    from core.markers import parse_marker
+except ImportError:
+    from backend.core.markers import parse_marker
+
 
 # ── Marker-based extraction ──────────────────────────────────────────────────
 
@@ -32,18 +37,17 @@ def extract_learnings_from_markers(result) -> list[dict]:
         memory = getattr(item.model_output, "memory", "") or ""
 
         for m in re.finditer(r"@@LEARNING:\s*(\{[^}]{1,2000}\})", memory):
-            try:
-                learning = json.loads(m.group(1))
-                insight = learning.get("insight", "").strip()
-                if insight and insight not in seen:
-                    seen.add(insight)
-                    learnings.append({
-                        "domain": learning.get("domain", ""),
-                        "category": learning.get("category", "form_strategy"),
-                        "content": insight,
-                    })
-            except json.JSONDecodeError:
-                pass
+            learning = parse_marker(m.group(1))
+            if not learning:
+                continue
+            insight = str(learning.get("insight") or "").strip()
+            if insight and insight not in seen:
+                seen.add(insight)
+                learnings.append({
+                    "domain": learning.get("domain", ""),
+                    "category": learning.get("category", "form_strategy"),
+                    "content": insight,
+                })
 
     return learnings
 

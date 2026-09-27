@@ -13,9 +13,11 @@ from browser_use.llm import ChatAWSBedrock
 
 try:
     from core.config import get_data_dir
+    from core.markers import parse_marker
     from memory import MemoryStore
 except ImportError:
     from backend.core.config import get_data_dir
+    from backend.core.markers import parse_marker
     from backend.memory import MemoryStore
 
 _SOURCE_DIR = Path(__file__).resolve().parent.parent.parent  # project root (or temp dir if frozen)
@@ -288,6 +290,32 @@ def get_fallback_llm():
     return None
 
 
+# Pre-filled Q&A answers sent to the agent (site-specific first, then most seen).
+QA_PROMPT_LIMIT = 80
+
+
+def _with_profile_defaults(profile: dict | None) -> dict:
+    """The profile with every missing or empty-typed field filled from DEFAULT_PROFILE.
+
+    A saved profile can lack keys (older app versions, hand edits); indexing a
+    missing one used to raise KeyError and fail every application.
+    """
+    try:
+        from core.config import DEFAULT_PROFILE
+    except ImportError:
+        from backend.core.config import DEFAULT_PROFILE
+    merged = {**DEFAULT_PROFILE, **(profile or {})}
+    for key, default in DEFAULT_PROFILE.items():
+        value = merged.get(key)
+        if isinstance(default, dict):
+            merged[key] = {**default, **(value if isinstance(value, dict) else {})}
+        elif isinstance(default, list) and not isinstance(value, list):
+            merged[key] = list(default)
+        elif value is None:
+            merged[key] = default
+    return merged
+
+
 def _describe_work_mode(mode: str) -> str:
     """Spell out 'any' so the agent picks whatever option a form offers."""
     if (mode or "").lower() == "any":
@@ -316,6 +344,7 @@ def build_memory_context(
 ) -> str:
     """Build the system message context with candidate profile, Q&A bank, and per-website learnings."""
     parts = []
+    profile = _with_profile_defaults(profile)
 
     # Salary formatting (country-aware)
     sal = profile.get('salary_expectation', {})
@@ -367,12 +396,14 @@ def build_memory_context(
     if applied_labels:
         parts.append("Already applied — SKIP:\n" + "\n".join(f"- {j}" for j in applied_labels))
 
-    # Try SQLite Q&A first, fall back to passed-in dict
-    qa_for_prompt = qa
+    # Try SQLite Q&A first, fall back to passed-in dict. The answers ride along
+    # on every LLM step, so only the most relevant QA_PROMPT_LIMIT are sent.
+    qa_for_prompt = dict(list((qa or {}).items())[:QA_PROMPT_LIMIT])
     try:
         store = get_memory_store()
         if store:
-            db_qa = store.qa_get_all_for_prompt()
+            domain = store.extract_domain(job_url) if job_url else ""
+            db_qa = store.qa_get_all_for_prompt(domain=domain, limit=QA_PROMPT_LIMIT)
             if db_qa:
                 qa_for_prompt = db_qa
     except Exception:
@@ -415,21 +446,18 @@ def extract_from_history(result):
             continue
         memory = item.model_output.memory or ""
         for m in re.finditer(r"@@JOB_APPLIED:\s*(\{[^}]{1,2000}\})", memory):
-            try:
-                j = json.loads(m.group(1))
+            j = parse_marker(m.group(1))
+            if j:
                 jobs.append(f"{j.get('title','')} at {j.get('company','')} - {j.get('location','')}")
-            except json.JSONDecodeError:
-                pass
         for m in re.finditer(r"@@QUESTION:\s*(\{[^}]{1,2000}\})", memory):
-            try:
-                q = json.loads(m.group(1))
-                qtext, ans = q.get("question", "").strip(), q.get("answer", "").strip()
-                norm = normalize_question(qtext)
-                if qtext and norm not in seen:
-                    seen.add(norm)
-                    questions[qtext] = ans
-            except json.JSONDecodeError:
-                pass
+            q = parse_marker(m.group(1))
+            if not q:
+                continue
+            qtext, ans = str(q.get("question") or "").strip(), str(q.get("answer") or "").strip()
+            norm = normalize_question(qtext)
+            if qtext and norm not in seen:
+                seen.add(norm)
+                questions[qtext] = ans
         # Fallback
         if not jobs and any(kw in memory.lower() for kw in ["application submitted", "successfully applied"]):
             for pat in [r"applied to (.+?) via", r"Application submitted for (.+?) via"]:

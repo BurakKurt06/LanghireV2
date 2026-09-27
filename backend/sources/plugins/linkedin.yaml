@@ -58,16 +58,13 @@ filters:
     url_param: "f_JT"
 
 collection_prompt: |
-  FIRST — LOGIN CHECK:
-  1. Go to https://www.linkedin.com/feed/ to check if you're logged into LinkedIn.
-     - If you see the feed/home page → logged in ✓
-     - If you see a login page → WAIT for user to log in manually. Check every 15 seconds (refresh). Wait up to 5 minutes.
-  2. Open a new tab and go to https://mail.google.com/mail/u/0/#inbox to check Gmail.
-     - If you see the Gmail inbox → logged in ✓
-     - If you see a Google sign-in page → WAIT for user to log in manually. Check every 15 seconds. Wait up to 5 minutes.
-  3. Close the Gmail tab and switch back to LinkedIn.
+  SIGN-IN: If a sign-in or login page appears instead of the results, the user
+  must sign in in this browser window. Use the wait action
+  (30 seconds) at most 4 times, checking the page after each wait, then open the
+  search URL below again. If it is still signed out, call done with success=false
+  and the text 'Sign-in required: log in to LinkedIn in this browser, then collect again.'
 
-  THEN: Navigate directly to this pre-filtered search URL:
+  START: This search page is already open when you begin:
   {search_url}
   Do NOT re-search or modify the filters. Results are ready.
 

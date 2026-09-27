@@ -97,6 +97,20 @@ describe("Profile page", () => {
     expect(screen.getByText("Python")).toBeInTheDocument();
   });
 
+  it("warns when the email isn't an email address, and not when it is", async () => {
+    const user = userEvent.setup();
+    render(<Profile />);
+    const email = await screen.findByDisplayValue("ada@example.com");
+    expect(screen.queryByText("personal.emailInvalid")).not.toBeInTheDocument();
+
+    await user.clear(email);
+    await user.type(email, "Zork");
+    expect(screen.getByRole("alert")).toHaveTextContent("personal.emailInvalid");
+
+    await user.type(email, "@example.com");
+    expect(screen.queryByText("personal.emailInvalid")).not.toBeInTheDocument();
+  });
+
   it("populates the country dropdown from getCountries and reflects the selection", async () => {
     render(<Profile />);
     await screen.findByRole("button", { name: "save" });

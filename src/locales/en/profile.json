@@ -15,6 +15,7 @@
     "title": "Personal Information",
     "fullName": "Full Name",
     "email": "Email",
+    "emailInvalid": "This doesn't look like an email address. Applications will use your Settings account email instead until it's fixed.",
     "phone": "Phone",
     "phonePrefix": "+1",
     "phonePlaceholder": "Phone number",

@@ -737,8 +737,20 @@ class MemoryStore:
         conn.commit()
         return merged_count
 
-    def qa_get_all_for_prompt(self) -> dict[str, str]:
-        """Get all canonical Q&A pairs as a dict for agent prompt injection."""
+    def qa_get_all_for_prompt(self, domain: str = "", limit: int | None = None) -> dict[str, str]:
+        """Canonical Q&A pairs for agent prompt injection.
+
+        The answers go into every step's prompt, so with a limit they are
+        ranked: pairs learned on `domain` first, then the most often seen.
+        """
         conn = self._get_conn()
-        rows = conn.execute("SELECT question, answer FROM qa_repository WHERE merged_into_id IS NULL AND answer != ''").fetchall()
+        query = (
+            "SELECT question, answer FROM qa_repository WHERE merged_into_id IS NULL AND answer != '' "
+            "ORDER BY (source_domain = ?) DESC, times_seen DESC, updated_at DESC"
+        )
+        params: list = [domain or ""]
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        rows = conn.execute(query, params).fetchall()
         return {r["question"]: r["answer"] for r in rows}

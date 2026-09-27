@@ -56,12 +56,13 @@ filters:
     url_param: "explvl"
 
 collection_prompt: |
-  FIRST — LOGIN CHECK:
-  1. Go to https://www.indeed.com/account/view to check if you're logged into Indeed.
-     - If you see your account/profile page → logged in ✓
-     - If you see a sign-in page → WAIT for user to log in manually. Check every 15 seconds (refresh). Wait up to 5 minutes.
+  SIGN-IN: If a sign-in or login page appears instead of the results, the user
+  must sign in in this browser window. Use the wait action
+  (30 seconds) at most 4 times, checking the page after each wait, then open the
+  search URL below again. If it is still signed out, call done with success=false
+  and the text 'Sign-in required: log in to Indeed in this browser, then collect again.'
 
-  THEN: Navigate directly to this search URL:
+  START: This search page is already open when you begin:
   {search_url}
   Do NOT modify the search filters. Results are ready.
 
