@@ -405,3 +405,23 @@ def test_worker_rereads_the_profile_before_each_job(monkeypatch, tmp_path):
 
     asyncio.run(go())
     assert seen == ["old", "12 Example St"]
+
+
+# ── the task text ───────────────────────────────────────────────────────────
+
+def test_page_check_rules_always_and_review_rules_only_in_trial_runs(run):
+    apply_jobs.set_trial_run(False)
+    _, kwargs, _ = run()
+    assert "PAGE BY PAGE" in kwargs["task"] and "record_guesses" in kwargs["task"]
+    assert "never stop the application over it" in kwargs["task"]
+    assert "referred by an employee, worked or applied here before" in kwargs["task"]
+    assert "REVIEW BEFORE SUBMITTING" not in kwargs["task"]
+    assert kwargs["step_timeout"] == 300
+    apply_jobs.set_trial_run(True)
+    try:
+        _, kwargs, _ = run()
+    finally:
+        apply_jobs.set_trial_run(False)
+    assert "REVIEW BEFORE SUBMITTING" in kwargs["task"]
+    assert kwargs["step_timeout"] == apply_jobs.REVIEW_STEP_TIMEOUT
+    assert "request_submit_review" in kwargs["tools"].registry.registry.actions

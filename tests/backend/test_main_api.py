@@ -558,7 +558,7 @@ class TestMemoryAndQA:
 
     def test_qa_stats(self, auth_client):
         stats = auth_client.get("/qa/stats").json()
-        assert stats == {"total": 0, "answered": 0, "unanswered": 0}
+        assert stats == {"total": 0, "answered": 0, "unanswered": 0, "guessed": 0}
 
     def test_qa_auto_squash(self, auth_client):
         resp = auth_client.post("/qa/auto-squash")
@@ -1004,3 +1004,38 @@ def test_cover_letter_prompt_includes_resume_and_major(auth_client, monkeypatch,
     auth_client.post("/cover-letter/generate", json={"job_description": "Build.", "job_title": "Dev", "company": "Acme"})
     assert "CORNER MARKET | Cashier" in prompts[0]
     assert "BS in Computer Science from State University (2028)" in prompts[0]
+
+
+class TestApplyReview:
+    def test_review_decision_reaches_the_waiting_application(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        decided = []
+        monkeypatch.setattr(apply_jobs, "decide_review", lambda url, approve: decided.append((url, approve)) or True)
+        main._apply_status.update({"running": True, "log": []})
+        try:
+            assert auth_client.post("/apply/review", json={"url": "https://x.example/1", "approve": True}).json() == {"success": True}
+            assert decided == [("https://x.example/1", True)]
+            assert "Approved" in main._apply_status["log"][-1]
+        finally:
+            main._apply_status["running"] = False
+
+    def test_status_lists_waiting_reviews(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        pending = [{"url": "u", "title": "Intern", "company": "Acme", "summary": "s"}]
+        monkeypatch.setattr(apply_jobs, "pending_reviews", lambda: pending)
+        main._apply_status.update({"running": True, "log": []})
+        try:
+            assert auth_client.get("/apply/status").json()["reviews"] == pending
+        finally:
+            main._apply_status["running"] = False
+
+    def test_start_passes_the_trial_run_choice(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
+        monkeypatch.setattr(main, "_run_async_in_thread", lambda make_coro, status: None)
+        auth_client.post("/apply/start", json={"mode": "all", "review": True})
+        assert apply_jobs.is_trial_run()
+        main._apply_status["running"] = False
+        auth_client.post("/apply/start", json={"mode": "all"})
+        assert not apply_jobs.is_trial_run()
+        main._apply_status["running"] = False

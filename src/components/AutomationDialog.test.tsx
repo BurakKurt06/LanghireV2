@@ -29,7 +29,7 @@ describe("AutomationDialog", () => {
     renderDialog({ title: "Apply to Jobs" });
     expect(screen.getByRole("heading", { name: "Apply to Jobs" })).toBeInTheDocument();
     expect(screen.getByText("This may take a while")).toBeInTheDocument();
-    expect(screen.getByText("First-time login required")).toBeInTheDocument();
+    expect(screen.getByText("Log in first")).toBeInTheDocument();
     expect(screen.getByText("Keep the browser window open")).toBeInTheDocument();
   });
 

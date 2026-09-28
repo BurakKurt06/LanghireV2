@@ -14,6 +14,18 @@ export interface Education {
   graduation: string;
 }
 
+/** Answers to the screening questions that sink applications when guessed. */
+export interface ScreeningAnswers {
+  start_date: string;
+  gpa: string;
+  linkedin_url: string;
+  portfolio_url: string;
+  gender: string;
+  race_ethnicity: string;
+  veteran_status: string;
+  disability_status: string;
+}
+
 export interface SalaryExpectation {
   min: number;
   max: number;
@@ -46,6 +58,7 @@ export interface CandidateProfile {
   cover_letter: string;
   date_format: string;
   notes: string;
+  screening?: ScreeningAnswers;
 }
 
 // ── LLM Settings ──────────────────────────────────────────────────────────
@@ -318,6 +331,8 @@ export interface ApplyStatus {
   running: boolean;
   /** Paused from the app so the user can take over the browser. */
   paused?: boolean;
+  /** Applications filled in and waiting for the user's approval to submit. */
+  reviews?: PendingReview[];
   mode: string | null;
   workers: number;
   log: string[];
@@ -360,6 +375,13 @@ export interface SetupStatus {
 }
 
 // ── Q&A Repository ───────────────────────────────────────────────────────
+export interface PendingReview {
+  url: string;
+  title: string;
+  company: string;
+  summary: string;
+}
+
 export interface QAEntry {
   id: number;
   question: string;
@@ -367,6 +389,10 @@ export interface QAEntry {
   answer: string;
   question_type: string;
   source_domain: string;
+  /** "user" when you gave the answer; "agent" when the AI recorded it; "guess" when it had to guess. */
+  source?: string;
+  /** The choices of a dropdown/radio question, one per line. */
+  options?: string;
   times_seen: number;
   merged_into_id: number | null;
   created_at: string;
@@ -377,6 +403,8 @@ export interface QAStats {
   total: number;
   answered: number;
   unanswered: number;
+  /** Answers the agent had to guess, for the user to check. */
+  guessed?: number;
 }
 
 // ── Run Logs ─────────────────────────────────────────────────────────────

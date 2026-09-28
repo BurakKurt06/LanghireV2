@@ -88,5 +88,19 @@
     "title": "Instructions for the AI",
     "hint": "The agent follows these on every application, like rules. Describe how you want forms handled; your profile and resume already supply the facts.",
     "placeholder": "For example:\n- Usual flow: open the job page, click Apply, create an account if needed, then fill in personal info, address, experience and questions.\n- Prefer 'Apply with resume' or autofill options when offered, then check every field.\n- Put my street address in Address Line 1 and leave Line 2 empty.\n- Answer 'No' to optional marketing emails."
+  },
+  "screening": {
+    "title": "Screening Answers",
+    "hint": "Answers to questions many applications ask. Leave the voluntary ones (gender, race, veteran, disability) empty to always decline to answer.",
+    "startDate": "Earliest start date",
+    "startDatePlaceholder": "e.g. May 2027, or Immediately",
+    "gpa": "GPA",
+    "linkedin": "LinkedIn profile URL",
+    "portfolio": "Portfolio / GitHub URL",
+    "gender": "Gender (voluntary)",
+    "race": "Race / ethnicity (voluntary)",
+    "veteran": "Veteran status (voluntary)",
+    "disability": "Disability status (voluntary)",
+    "declinePlaceholder": "Empty = decline to answer"
   }
 }

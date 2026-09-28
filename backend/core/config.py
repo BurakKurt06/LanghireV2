@@ -77,6 +77,17 @@ DEFAULT_PROFILE = {
     "cover_letter": "",
     "date_format": "MM/DD/YYYY",
     "notes": "",
+    # Answers to common screening questions; empty ones are left to the agent's rules.
+    "screening": {
+        "start_date": "",
+        "gpa": "",
+        "linkedin_url": "",
+        "portfolio_url": "",
+        "gender": "",
+        "race_ethnicity": "",
+        "veteran_status": "",
+        "disability_status": "",
+    },
 }
 
 

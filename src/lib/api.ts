@@ -294,7 +294,7 @@ export async function exportMemories() {
 }
 
 // ── Apply ─────────────────────────────────────────────────────────────────
-export async function startApplying(params: { workers?: number; mode?: string; limit?: number; job_url?: string; job_urls?: string[] }) {
+export async function startApplying(params: { workers?: number; mode?: string; limit?: number; job_url?: string; job_urls?: string[]; review?: boolean }) {
   return request<{ success: boolean; message: string }>("/apply/start", {
     method: "POST",
     body: JSON.stringify(params),
@@ -311,6 +311,10 @@ export async function pauseApplying() {
 
 export async function resumeApplying() {
   return request<{ success: boolean; paused: boolean }>("/apply/resume", { method: "POST" });
+}
+
+export async function reviewApplication(url: string, approve: boolean) {
+  return request<{ success: boolean }>("/apply/review", { method: "POST", body: JSON.stringify({ url, approve }) });
 }
 
 export async function getApplyStatus() {

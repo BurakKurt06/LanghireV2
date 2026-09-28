@@ -1059,6 +1059,8 @@ async def start_applying(body: ApplyRequest):
     limit = body.limit
     target_job_url = body.job_url
     target_job_urls = body.job_urls
+    from cli import apply_jobs as _apply_jobs_module
+    _apply_jobs_module.set_trial_run(body.review)
 
     if target_job_url:
         _apply_status = {"running": True, "mode": mode, "workers": 1, "log": [f"Applying to single job..."]}
@@ -1204,12 +1206,30 @@ def _apply_paused() -> bool:
     return apply_jobs.is_paused()
 
 
+def _pending_reviews() -> list[dict]:
+    from cli import apply_jobs
+    return apply_jobs.pending_reviews()
+
+
+@app.post("/apply/review")
+async def review_application(body: dict):
+    """Approve (submit) or skip an application that is waiting for the user's review."""
+    from cli import apply_jobs
+    approve = bool(body.get("approve"))
+    ok = apply_jobs.decide_review(body.get("url", ""), approve)
+    if ok:
+        with _status_lock:
+            _apply_status["log"].append("✅ Approved: submitting." if approve else "⏭️ Skipped: not submitted.")
+    return {"success": ok}
+
+
 @app.get("/apply/status")
 async def apply_status():
     with _status_lock:
         return {
             "running": _apply_status.get("running", False),
             "paused": _apply_status.get("running", False) and _apply_paused(),
+            "reviews": _pending_reviews() if _apply_status.get("running") else [],
             "mode": _apply_status.get("mode"),
             "workers": _apply_status.get("workers", 1),
             "log": list(_apply_status.get("log", [])[-100:]),

@@ -12,7 +12,8 @@
   },
   "filter": {
     "all": "All ({{count}})",
-    "unanswered": "Unanswered ({{count}})"
+    "unanswered": "Unanswered ({{count}})",
+    "toCheck": "To check ({{count}})"
   },
   "searchPlaceholder": "Search questions or answers...",
   "mergeMode": {
@@ -28,7 +29,13 @@
     "saving": "Saving...",
     "unsaved": "Unsaved",
     "mergeTitle": "Merge into another question",
-    "deleteTitle": "Delete question"
+    "deleteTitle": "Delete question",
+    "origin": {
+      "needsAnswer": "Needs your answer",
+      "yours": "Your answer",
+      "fromAI": "AI's answer: check it",
+      "guess": "AI's guess: check it"
+    }
   },
   "toast": {
     "deleted": "Question deleted",
@@ -42,5 +49,6 @@
   },
   "error": {
     "loadFailed": "Failed to load Q&A"
-  }
+  },
+  "toCheckBanner": "{{count}} answer(s) to check: questions the AI had to guess (or couldn't answer). Correct any that are wrong; your answer is used from then on."
 }

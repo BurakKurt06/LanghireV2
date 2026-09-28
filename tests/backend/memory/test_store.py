@@ -500,7 +500,7 @@ def test_qa_stats(store):
     store.qa_add("Q1", answer="A")
     store.qa_add("Q2", answer="")
     stats = store.qa_stats()
-    assert stats == {"total": 2, "answered": 1, "unanswered": 1}
+    assert stats == {"total": 2, "answered": 1, "unanswered": 1, "guessed": 0}
 
 
 def test_qa_update(store):
@@ -615,10 +615,12 @@ def test_separate_stores_have_isolated_dbs(tmp_path):
 
 
 def test_schema_version_recorded(store):
-    """Migrations advance schema_version to 2 (qa_repository present)."""
+    """Migrations advance schema_version to 3 (qa_repository with source and options)."""
     conn = store._get_conn()
     version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    assert version == 2
+    assert version == 3
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(qa_repository)").fetchall()}
+    assert {"source", "options"} <= columns
     # qa_repository table exists.
     tables = {r[0] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -636,3 +638,47 @@ def test_qa_for_prompt_is_capped_and_ranks_this_site_first(store):
     top = list(store.qa_get_all_for_prompt(domain="acme.wd5.myworkdayjobs.com", limit=2))
     assert top == ["Workday-only question?", "Common question 0?"]
     assert len(store.qa_get_all_for_prompt()) == 6  # no limit: everything, as before
+
+
+# ── Who answered: the user or the agent ─────────────────────────────────────
+
+def _row(store, question):
+    return next(r for r in store.qa_list() if r["question"] == question)
+
+
+def test_answers_edited_in_the_app_are_the_users(store):
+    store.qa_add("Are you willing to relocate?", "No")
+    assert _row(store, "Are you willing to relocate?")["source"] == "agent"
+    store.qa_update(_row(store, "Are you willing to relocate?")["id"], "Yes")
+    assert store.qa_user_confirmed() == {"Are you willing to relocate?"}
+
+
+def test_set_answer_overwrites_and_agent_never_replaces_the_user(store):
+    store.qa_add("How did you hear about us?", "LinkedIn")
+    store.qa_set_answer("How did you hear about us?", "Company Website", source="user")
+    assert _row(store, "How did you hear about us?")["answer"] == "Company Website"
+    store.qa_set_answer("How did you hear about us?", "Indeed", source="agent")
+    assert _row(store, "How did you hear about us?")["answer"] == "Company Website"
+    store.qa_set_answer("A brand new question here?", "Yes", source="user", options=["Yes", "No"])
+    row = _row(store, "A brand new question here?")
+    assert (row["answer"], row["source"], row["options"]) == ("Yes", "user", "Yes\nNo")
+
+
+def test_guesses_are_listed_to_check_until_the_user_answers(store):
+    store.qa_add("What is your name exactly?", "Ada")
+    store.qa_set_answer("Were you referred by an employee?", "No", source="guess", options=["Yes", "No"])
+    row = _row(store, "Were you referred by an employee?")
+    assert (row["answer"], row["source"], row["options"]) == ("No", "guess", "Yes\nNo")
+    assert [r["question"] for r in store.qa_list(unanswered_only=True)] == ["Were you referred by an employee?"]
+    assert store.qa_stats()["guessed"] == 1
+    store.qa_update(row["id"], "Yes")
+    assert store.qa_list(unanswered_only=True) == [] and store.qa_stats()["guessed"] == 0
+    store.qa_set_answer("Were you referred by an employee?", "No", source="guess")
+    assert _row(store, "Were you referred by an employee?")["answer"] == "Yes"   # a guess never replaces the user
+
+
+def test_users_answers_come_first_in_the_prompt(store):
+    for i in range(3):
+        store.qa_add(f"Agent question number {i}?", "a")
+    store.qa_set_answer("What is your GPA exactly?", "3.6", source="user")
+    assert list(store.qa_get_all_for_prompt(limit=1)) == ["What is your GPA exactly?"]

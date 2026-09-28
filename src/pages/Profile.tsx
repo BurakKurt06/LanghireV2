@@ -31,6 +31,10 @@ const defaultProfile: CandidateProfile = {
   cover_letter: "",
   date_format: "MM/DD/YYYY",
   notes: "",
+  screening: {
+    start_date: "", gpa: "", linkedin_url: "", portfolio_url: "",
+    gender: "", race_ethnicity: "", veteran_status: "", disability_status: "",
+  },
 };
 
 export default function Profile() {
@@ -50,7 +54,11 @@ export default function Profile() {
 
   useEffect(() => {
     Promise.all([
-      getProfile().then((data) => setProfile({ ...defaultProfile, ...data })),
+      getProfile().then((data) => setProfile({
+        ...defaultProfile,
+        ...data,
+        screening: { ...defaultProfile.screening!, ...(data.screening || {}) },
+      })),
       getCountries().then((data) => {
         setCountries(data.countries);
         setNoticePeriodOptions(data.notice_period_options || []);
@@ -82,7 +90,7 @@ export default function Profile() {
     setSaved(false);
   };
 
-  const updateNested = (parent: keyof Pick<CandidateProfile, "address" | "education" | "salary_expectation">, field: string, value: unknown) => {
+  const updateNested = (parent: keyof Pick<CandidateProfile, "address" | "education" | "salary_expectation" | "screening">, field: string, value: unknown) => {
     setProfile((p) => {
       const current = p[parent];
       if (typeof current === "object" && current !== null) {
@@ -297,6 +305,21 @@ export default function Profile() {
               <option value="hourly">{t("salary.hourly")}</option>
             </select>
           </div>
+        </div>
+      </Section>
+
+      {/* Screening answers */}
+      <Section title={t("screening.title")}>
+        <p className="text-[13px] text-muted-foreground mb-3">{t("screening.hint")}</p>
+        <div className="grid grid-cols-2 gap-4">
+          <Input label={t("screening.startDate")} value={profile.screening?.start_date ?? ""} onChange={(v) => updateNested("screening", "start_date", v)} placeholder={t("screening.startDatePlaceholder")} />
+          <Input label={t("screening.gpa")} value={profile.screening?.gpa ?? ""} onChange={(v) => updateNested("screening", "gpa", v)} placeholder="3.6" />
+          <Input label={t("screening.linkedin")} value={profile.screening?.linkedin_url ?? ""} onChange={(v) => updateNested("screening", "linkedin_url", v)} placeholder="https://linkedin.com/in/..." />
+          <Input label={t("screening.portfolio")} value={profile.screening?.portfolio_url ?? ""} onChange={(v) => updateNested("screening", "portfolio_url", v)} placeholder="https://github.com/..." />
+          <Input label={t("screening.gender")} value={profile.screening?.gender ?? ""} onChange={(v) => updateNested("screening", "gender", v)} placeholder={t("screening.declinePlaceholder")} />
+          <Input label={t("screening.race")} value={profile.screening?.race_ethnicity ?? ""} onChange={(v) => updateNested("screening", "race_ethnicity", v)} placeholder={t("screening.declinePlaceholder")} />
+          <Input label={t("screening.veteran")} value={profile.screening?.veteran_status ?? ""} onChange={(v) => updateNested("screening", "veteran_status", v)} placeholder={t("screening.declinePlaceholder")} />
+          <Input label={t("screening.disability")} value={profile.screening?.disability_status ?? ""} onChange={(v) => updateNested("screening", "disability_status", v)} placeholder={t("screening.declinePlaceholder")} />
         </div>
       </Section>
 

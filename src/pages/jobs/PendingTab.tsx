@@ -38,6 +38,8 @@ import {
 import { markStart, measureAndTrack } from "../../lib/perf";
 import type { Job, JobStatus, JobStats, TailorOptions } from "../../lib/types";
 import AutomationDialog from "../../components/AutomationDialog";
+import ApplyModeToggle from "../../components/ApplyModeToggle";
+import { loadApplyMode, saveApplyMode, type ApplyMode } from "../../lib/applyMode";
 import { useTranslation } from "react-i18next";
 
 const STATUS_ICONS: Record<JobStatus, typeof CheckCircle> = {
@@ -98,6 +100,11 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   // Apply state
   const [applyingUrl, setApplyingUrl] = useState<string | null>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [applyMode, setApplyMode] = useState<ApplyMode>(loadApplyMode);
+  const changeApplyMode = (mode: ApplyMode) => {
+    setApplyMode(mode);
+    saveApplyMode(mode);
+  };
   const [pendingApplyUrl, setPendingApplyUrl] = useState<string | null>(null);
 
   // Cover letter state
@@ -262,6 +269,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         job_url: pendingApplyUrl,
         workers: 1,
         mode: "all",
+        review: applyMode === "trial",
       });
       if (!res.success) {
         alert(res.message);
@@ -368,6 +376,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         job_urls: [...selectedJobs],
         workers: 1,
         mode: "all",
+        review: applyMode === "trial",
       });
       if (!res.success) {
         alert(res.message);
@@ -905,6 +914,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           <span className="text-sm font-medium text-foreground">
             {selectedJobs.size} selected
           </span>
+          <ApplyModeToggle value={applyMode} onChange={changeApplyMode} compact />
           <button
             onClick={handleBatchApply}
             disabled={batchApplying}
@@ -949,7 +959,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           setShowConfirmDialog(false);
           setPendingApplyUrl(null);
         }}
-      />
+      >
+        <ApplyModeToggle value={applyMode} onChange={changeApplyMode} />
+      </AutomationDialog>
 
       {/* Cover Letter Modal */}
       {coverLetterJob && (

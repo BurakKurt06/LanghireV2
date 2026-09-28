@@ -87,6 +87,22 @@ describe("Profile page", () => {
     expect(await screen.findByRole("button", { name: "save" })).toBeInTheDocument();
   });
 
+  it("edits and saves screening answers", async () => {
+    mockGetProfile.mockResolvedValue({ ...sampleProfile, screening: { gpa: "3.2" } } as CandidateProfile);
+    const user = userEvent.setup();
+    render(<Profile />);
+    expect(await screen.findByText("screening.title")).toBeInTheDocument();
+    const gpa = screen.getByDisplayValue("3.2");
+    await user.clear(gpa);
+    await user.type(gpa, "3.6");
+    await user.click(screen.getByRole("button", { name: "save" }));
+    await waitFor(() =>
+      expect(mockSaveProfile).toHaveBeenCalledWith(
+        expect.objectContaining({ screening: expect.objectContaining({ gpa: "3.6", start_date: "" }) }),
+      ),
+    );
+  });
+
   it("shows date of birth for US profiles too, and the AI instructions box", async () => {
     mockGetProfile.mockResolvedValue({ ...sampleProfile, notes: "Use Apply with resume first." } as CandidateProfile);
     render(<Profile />);

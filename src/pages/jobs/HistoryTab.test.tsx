@@ -6,6 +6,7 @@ import {
   stopApplying,
   pauseApplying,
   resumeApplying,
+  reviewApplication,
   getApplyStatus,
   getJobs,
   getMetricRuns,
@@ -24,6 +25,7 @@ vi.mock("../../lib/api", () => ({
   stopApplying: vi.fn(),
   pauseApplying: vi.fn(),
   resumeApplying: vi.fn(),
+  reviewApplication: vi.fn(),
   getApplyStatus: vi.fn(),
   getJobs: vi.fn(),
   getMetricRuns: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock("../../lib/api", () => ({
 const mockStopApplying = vi.mocked(stopApplying);
 const mockPauseApplying = vi.mocked(pauseApplying);
 const mockResumeApplying = vi.mocked(resumeApplying);
+const mockReviewApplication = vi.mocked(reviewApplication);
 const mockGetApplyStatus = vi.mocked(getApplyStatus);
 const mockGetJobs = vi.mocked(getJobs);
 const mockGetMetricRuns = vi.mocked(getMetricRuns);
@@ -167,6 +170,29 @@ describe("HistoryTab", () => {
     await user.click(screen.getByRole("button", { name: /controls\.resume/ }));
     expect(mockResumeApplying).toHaveBeenCalled();
     expect(await screen.findByText("controls.pauseHint")).toBeInTheDocument();
+  });
+
+  it("shows an application waiting for review, and approves it", async () => {
+    const review = { url: "https://jobs.example/1", title: "Intern", company: "Acme", summary: "Filled 3 pages." };
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], reviews: [review] } as never);
+    mockReviewApplication.mockResolvedValue({ success: true });
+    const user = userEvent.setup();
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+
+    expect(await screen.findByText("review.title")).toBeInTheDocument();
+    expect(screen.getByText("Filled 3 pages.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "review.approve" }));
+    expect(mockReviewApplication).toHaveBeenCalledWith("https://jobs.example/1", true);
+  });
+
+  it("skips an application waiting for review", async () => {
+    const review = { url: "https://jobs.example/2", title: "Intern", company: "Acme", summary: "" };
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], reviews: [review] } as never);
+    mockReviewApplication.mockResolvedValue({ success: true });
+    const user = userEvent.setup();
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+    await user.click(await screen.findByRole("button", { name: "review.skip" }));
+    expect(mockReviewApplication).toHaveBeenCalledWith("https://jobs.example/2", false);
   });
 
   it("shows the paused state reported by the backend", async () => {

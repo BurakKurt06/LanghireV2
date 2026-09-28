@@ -244,6 +244,17 @@ class MemoryStore:
             conn.execute("INSERT OR REPLACE INTO schema_version VALUES (2)")
             self._migrate_qa_json()
 
+        if current_version < 3:
+            # source: who gave the answer, 'agent' (recorded during a run) or
+            # 'user' (typed in the app, or a field the user fixed by hand).
+            # options: the choices of a dropdown/radio question, one per line.
+            existing = {r[1] for r in conn.execute("PRAGMA table_info(qa_repository)").fetchall()}
+            if "source" not in existing:
+                conn.execute("ALTER TABLE qa_repository ADD COLUMN source TEXT DEFAULT 'agent'")
+            if "options" not in existing:
+                conn.execute("ALTER TABLE qa_repository ADD COLUMN options TEXT DEFAULT ''")
+            conn.execute("INSERT OR REPLACE INTO schema_version VALUES (3)")
+
         conn.commit()
 
     # ── Domain / ATS helpers ──────────────────────────────────────────────
@@ -680,7 +691,8 @@ class MemoryStore:
             query += " AND (question LIKE ? OR answer LIKE ?)"
             params.extend([f"%{search}%", f"%{search}%"])
         if unanswered_only:
-            query += " AND (answer IS NULL OR answer = '')"
+            # "To check": no answer yet, or one the agent guessed.
+            query += " AND (answer IS NULL OR answer = '' OR source = 'guess')"
         query += " ORDER BY times_seen DESC, updated_at DESC"
         return [dict(r) for r in conn.execute(query, params).fetchall()]
 
@@ -688,12 +700,56 @@ class MemoryStore:
         conn = self._get_conn()
         total = conn.execute("SELECT COUNT(*) FROM qa_repository WHERE merged_into_id IS NULL").fetchone()[0]
         answered = conn.execute("SELECT COUNT(*) FROM qa_repository WHERE merged_into_id IS NULL AND answer != ''").fetchone()[0]
-        return {"total": total, "answered": answered, "unanswered": total - answered}
+        guessed = conn.execute(
+            "SELECT COUNT(*) FROM qa_repository WHERE merged_into_id IS NULL AND answer != '' AND source = 'guess'"
+        ).fetchone()[0]
+        return {"total": total, "answered": answered, "unanswered": total - answered, "guessed": guessed}
 
-    def qa_update(self, qa_id: int, answer: str) -> bool:
+    def _find_qa(self, conn, normalized: str):
+        """The canonical row for a normalized question (exact, then fuzzy), or None."""
+        row = conn.execute(
+            "SELECT * FROM qa_repository WHERE normalized = ? AND merged_into_id IS NULL", (normalized,)
+        ).fetchone()
+        if row:
+            return row
+        for candidate in conn.execute("SELECT * FROM qa_repository WHERE merged_into_id IS NULL").fetchall():
+            if self._token_overlap(normalized, candidate["normalized"]) > 0.85:
+                return candidate
+        return None
+
+    def qa_set_answer(self, question: str, answer: str, source: str = "user",
+                      question_type: str = "text", source_domain: str = "", options: list[str] | None = None) -> None:
+        """Insert or overwrite a question's answer (qa_add never overwrites).
+
+        Used for answers the user gave: typed in the app or fixed by hand in the
+        browser. An agent answer never replaces a user one.
+        """
+        normalized = self._normalize_qa(question)
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute("UPDATE qa_repository SET answer = ?, updated_at = ? WHERE id = ?", (answer, now, qa_id))
+        row = self._find_qa(conn, normalized)
+        opts = "\n".join(o for o in (options or []) if o)
+        if row:
+            if source != "user" and (row["source"] or "agent") == "user" and row["answer"]:
+                return
+            conn.execute(
+                "UPDATE qa_repository SET answer = ?, source = ?, options = CASE WHEN ? != '' THEN ? ELSE options END, "
+                "updated_at = ? WHERE id = ?",
+                (answer, source, opts, opts, now, row["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO qa_repository (question, normalized, answer, question_type, source_domain, source, options, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (question, normalized, answer, question_type, source_domain, source, opts, now, now),
+            )
+        conn.commit()
+
+    def qa_update(self, qa_id: int, answer: str) -> bool:
+        """An answer edited in the app: it counts as the user's."""
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute("UPDATE qa_repository SET answer = ?, source = 'user', updated_at = ? WHERE id = ?", (answer, now, qa_id))
         conn.commit()
         return conn.total_changes > 0
 
@@ -741,12 +797,13 @@ class MemoryStore:
         """Canonical Q&A pairs for agent prompt injection.
 
         The answers go into every step's prompt, so with a limit they are
-        ranked: pairs learned on `domain` first, then the most often seen.
+        ranked: the user's own answers first, then pairs learned on `domain`,
+        then the most often seen.
         """
         conn = self._get_conn()
         query = (
             "SELECT question, answer FROM qa_repository WHERE merged_into_id IS NULL AND answer != '' "
-            "ORDER BY (source_domain = ?) DESC, times_seen DESC, updated_at DESC"
+            "ORDER BY (source = 'user') DESC, (source_domain = ?) DESC, times_seen DESC, updated_at DESC"
         )
         params: list = [domain or ""]
         if limit is not None:
@@ -754,3 +811,11 @@ class MemoryStore:
             params.append(limit)
         rows = conn.execute(query, params).fetchall()
         return {r["question"]: r["answer"] for r in rows}
+
+    def qa_user_confirmed(self) -> set[str]:
+        """Questions whose answer the user gave (typed in the app or fixed by hand)."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT question FROM qa_repository WHERE merged_into_id IS NULL AND answer != '' AND source = 'user'"
+        ).fetchall()
+        return {r["question"] for r in rows}

@@ -259,6 +259,31 @@ describe("PendingTab", () => {
     expect(mockTailorResumes.mock.invocationCallOrder[0]).toBeLessThan(mockStartApplying.mock.invocationCallOrder[0]);
   });
 
+  it("trial run chosen in the start dialog is sent with the apply", async () => {
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
+    await user.click(await screen.findByRole("radio", { name: "Trial run" }));
+    await user.click(screen.getByRole("button", { name: "Got it, Start" }));
+    await waitFor(() =>
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ review: true })),
+    );
+    expect(localStorage.getItem("langhire_apply_mode")).toBe("trial");
+  });
+
+  it("full auto is the default", async () => {
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
+    expect(await screen.findByRole("radio", { name: "Full auto" })).toHaveAttribute("aria-checked", "true");
+    await user.click(screen.getByRole("button", { name: "Got it, Start" }));
+    await waitFor(() =>
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ review: false })),
+    );
+  });
+
   it("auto-tailor off: applies without tailoring", async () => {
     const user = userEvent.setup();
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);

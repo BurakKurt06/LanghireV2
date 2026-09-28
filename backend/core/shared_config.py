@@ -316,6 +316,26 @@ def _with_profile_defaults(profile: dict | None) -> dict:
     return merged
 
 
+# Profile -> "Screening answers": the questions that sink applications when guessed.
+SCREENING_LABELS = {
+    "start_date": "Earliest start date",
+    "gpa": "GPA",
+    "linkedin_url": "LinkedIn profile URL",
+    "portfolio_url": "Portfolio / GitHub URL",
+    "gender": "Gender (voluntary self-identification)",
+    "race_ethnicity": "Race / ethnicity (voluntary self-identification)",
+    "veteran_status": "Veteran status (voluntary self-identification)",
+    "disability_status": "Disability status (voluntary self-identification)",
+}
+
+
+def _describe_screening(screening: dict) -> str:
+    return "\n".join(
+        f"{label}: {screening[key]}" for key, label in SCREENING_LABELS.items()
+        if str(screening.get(key) or "").strip()
+    )
+
+
 def _describe_salary(currency: str, low, high, period: str) -> str:
     """'USD 20-30 (hourly)'; an empty or lower maximum means no upper limit.
 
@@ -424,6 +444,10 @@ def build_memory_context(
 
     parts.append("\n".join(profile_lines))
 
+    screening = _describe_screening(profile.get('screening') or {})
+    if screening:
+        parts.append("SCREENING ANSWERS (the candidate's own answers):\n" + screening)
+
     # Profile -> "Instructions for the AI". Framed as rules, not as one more
     # profile line, so the agent follows them.
     if (profile.get('notes') or '').strip():
@@ -450,6 +474,7 @@ def build_memory_context(
     # Try SQLite Q&A first, fall back to passed-in dict. The answers ride along
     # on every LLM step, so only the most relevant QA_PROMPT_LIMIT are sent.
     qa_for_prompt = dict(list((qa or {}).items())[:QA_PROMPT_LIMIT])
+    confirmed: set[str] = set()
     try:
         store = get_memory_store()
         if store:
@@ -457,12 +482,19 @@ def build_memory_context(
             db_qa = store.qa_get_all_for_prompt(domain=domain, limit=QA_PROMPT_LIMIT)
             if db_qa:
                 qa_for_prompt = db_qa
+            confirmed = store.qa_user_confirmed()
     except Exception:
         pass
-    if qa_for_prompt:
-        qa_list = "\n".join(f'Q: {q}\nA: {a}' for q, a in qa_for_prompt.items() if a)
-        if qa_list:
-            parts.append(f"Pre-filled answers for application questions:\n{qa_list}")
+    # The user's own answers are facts. Answers the agent recorded on earlier
+    # runs may have been guesses, so they only count when they fit the profile.
+    user_answers = [(q, a) for q, a in qa_for_prompt.items() if a and q in confirmed]
+    earlier_answers = [(q, a) for q, a in qa_for_prompt.items() if a and q not in confirmed]
+    if user_answers:
+        parts.append("ANSWERS THE USER GAVE (always use these):\n"
+                     + "\n".join(f"Q: {q}\nA: {a}" for q, a in user_answers))
+    if earlier_answers:
+        parts.append("Answers recorded in earlier applications (use one only when it agrees with the "
+                     "profile and resume):\n" + "\n".join(f"Q: {q}\nA: {a}" for q, a in earlier_answers))
 
     # ── Per-website memory injection ──────────────────────────────────────
     if job_url:

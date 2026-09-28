@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { AlertTriangle, Clock, Globe, X } from "lucide-react";
 
 interface AutomationDialogProps {
@@ -5,9 +6,11 @@ interface AutomationDialogProps {
   title: string;
   onConfirm: () => void;
   onCancel: () => void;
+  /** Extra options shown above the buttons (e.g. Full auto / Trial run). */
+  children?: ReactNode;
 }
 
-export default function AutomationDialog({ open, title, onConfirm, onCancel }: AutomationDialogProps) {
+export default function AutomationDialog({ open, title, onConfirm, onCancel, children }: AutomationDialogProps) {
   if (!open) return null;
 
   return (
@@ -33,10 +36,9 @@ export default function AutomationDialog({ open, title, onConfirm, onCancel }: A
           <div className="flex gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
             <Globe className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-blue-900">
-              <strong className="block mb-1">First-time login required</strong>
-              On the first run, the browser will open LinkedIn and Google login pages.
-              You'll need to <strong>log in manually</strong> once — after that, your session cookies
-              are saved and future runs will log in automatically.
+              <strong className="block mb-1">Log in first</strong>
+              Log in to LinkedIn and Gmail from the app before you start. If a site asks you to sign in
+              during a run, the agent waits up to 2 minutes for you.
             </div>
           </div>
 
@@ -44,10 +46,11 @@ export default function AutomationDialog({ open, title, onConfirm, onCancel }: A
             <AlertTriangle className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
             <div className="text-sm text-foreground">
               <strong className="block mb-1">Keep the browser window open</strong>
-              A Chromium window will appear — this is the AI agent working. Don't close it or
-              interact with it unless you need to log in.
+              A browser window will appear: this is the AI agent working. Don't close it. To fix
+              something yourself, press Pause in the History tab first, so the agent keeps your changes.
             </div>
           </div>
+          {children}
         </div>
 
         <div className="flex justify-end gap-3 px-6 pb-6">

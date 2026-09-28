@@ -19,7 +19,11 @@ from pathlib import Path
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from browser_use import Agent, BrowserSession
+from browser_use import Agent, BrowserSession, Tools
+# The real class, for action signatures (tests swap BrowserSession for a fake).
+from browser_use import BrowserSession as _BrowserSessionType
+from browser_use.agent.views import ActionResult
+from pydantic import BaseModel, Field
 
 try:
     import core.shared_config as config
@@ -35,6 +39,7 @@ try:
     from memory.metrics import MetricsStore
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import core.captcha as _captcha
+    from core import form_snapshot
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import (
@@ -49,6 +54,7 @@ except ImportError:
     from backend.memory.metrics import MetricsStore
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import backend.core.captcha as _captcha
+    from backend.core import form_snapshot
 
 # Lock for thread-safe QA file writes
 _qa_lock = asyncio.Lock()
@@ -164,10 +170,235 @@ def _set_agent_paused(agent, paused: bool) -> None:
 
 
 def set_paused(paused: bool) -> None:
-    """Pause or resume every running application agent; new ones follow suit."""
+    """Pause or resume every running application agent; new ones follow suit.
+
+    While paused the user may fix fields by hand. The page's form values are
+    read when pausing and again before resuming; the fields that changed are
+    pinned for the agent (it must not change them back) and saved as the
+    user's answers for later applications.
+    """
     _pause_state["paused"] = paused
     for agent in list(_running_agents):
-        _set_agent_paused(agent, paused)
+        loop = getattr(agent, "_langhire_loop", None)
+        if paused:
+            _set_agent_paused(agent, True)
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(_snapshot_before_edits(agent), loop)
+        elif loop is not None and loop.is_running():
+            asyncio.run_coroutine_threadsafe(_resume_keeping_user_edits(agent), loop)
+        else:
+            _set_agent_paused(agent, False)
+
+
+# Let the agent's last action finish before reading the page's "before" state.
+PAUSE_SETTLE_SECONDS = 2
+
+
+async def _snapshot_before_edits(agent) -> None:
+    await asyncio.sleep(PAUSE_SETTLE_SECONDS)
+    agent._langhire_before_edits = await form_snapshot.snapshot(agent.browser_session)
+
+
+async def _resume_keeping_user_edits(agent) -> None:
+    try:
+        before = getattr(agent, "_langhire_before_edits", None)
+        if before is not None:
+            after = await form_snapshot.snapshot(agent.browser_session)
+            keep_user_edits(agent, form_snapshot.changed_fields(before, after))
+    finally:
+        agent._langhire_before_edits = None
+        agent.resume()
+
+
+# A label that looks like an element id ("input-12", "workExperience_3") isn't
+# a question worth saving as an answer.
+def _looks_like_question(label: str) -> bool:
+    return bool(re.search(r"[A-Za-z]{3,}", label)) and (" " in label.strip() or label.strip().endswith("?"))
+
+
+# Longer text is a job-specific essay, not an answer to reuse elsewhere.
+USER_ANSWER_MAX_LENGTH = 150
+
+
+def keep_user_edits(agent, changes: list[tuple[str, str, str]]) -> None:
+    """Pin fields the user set by hand for the rest of this run, and save them as answers."""
+    if not changes:
+        return
+    pinned = getattr(agent, "_langhire_user_fields", {})
+    for label, _old, new in changes:
+        pinned[label] = new
+    agent._langhire_user_fields = pinned
+    _pin_in_system_message(agent, pinned)
+
+    domain = getattr(agent, "_langhire_domain", "")
+    store = get_memory_store()
+    if store is None:
+        return
+    for label, _old, new in changes:
+        if _looks_like_question(label) and len(new) <= USER_ANSWER_MAX_LENGTH:
+            try:
+                store.qa_set_answer(label, new, source="user", source_domain=domain)
+            except Exception as e:
+                print(f"    ⚠️  Couldn't save your answer for '{label}': {e}")
+
+
+def _pin_in_system_message(agent, pinned: dict[str, str]) -> None:
+    """Add the user's values to the system message, which persists across steps.
+
+    browser-use rebuilds the per-step messages every step, so a note there would
+    be gone by the next one.
+    """
+    try:
+        manager = agent._message_manager
+        current = manager.state.history.system_message
+        base = getattr(agent, "_langhire_base_system", None)
+        if base is None:
+            base = current.text
+            agent._langhire_base_system = base
+        lines = "\n".join(f'- "{label}" = "{value}"' for label, value in pinned.items())
+        note = ("\n\nFIELDS THE USER SET BY HAND (keep exactly these values; never change them back, "
+                "even if you would have answered differently):\n" + lines)
+        manager._set_message_with_type(current.model_copy(update={"content": base + note}), "system")
+    except Exception as e:
+        print(f"    ⚠️  Couldn't pass your edits to the agent: {e}")
+
+
+# ── Review before submitting, and questions the agent can't answer ─────────
+# Chosen when starting a run in the app: "Trial run" waits for the user's
+# approval before every submit, "Full auto" never does.
+_run_options = {"review": False}
+REVIEW_WAIT_SECONDS = 25 * 60
+# A step waiting for the user's decision must not hit the step timeout.
+REVIEW_STEP_TIMEOUT = REVIEW_WAIT_SECONDS + 5 * 60
+
+_reviews: dict[str, dict] = {}  # job url -> {title, company, summary, loop, future}
+
+
+def set_trial_run(review: bool) -> None:
+    """Trial run (wait for approval before each submit) or full auto, for the next run."""
+    _run_options["review"] = bool(review)
+
+
+def is_trial_run() -> bool:
+    return _run_options["review"]
+
+
+def pending_reviews() -> list[dict]:
+    return [{"url": url, "title": r["title"], "company": r["company"], "summary": r["summary"]}
+            for url, r in list(_reviews.items())]
+
+
+def decide_review(url: str, approve: bool) -> bool:
+    """The user's decision on an application waiting for review (called from the app)."""
+    review = _reviews.get(url)
+    if review is None:
+        return False
+    future = review["future"]
+    review["loop"].call_soon_threadsafe(lambda: future.done() or future.set_result(approve))
+    return True
+
+
+class GuessedAnswer(BaseModel):
+    question: str = Field(description="The question exactly as the form shows it")
+    answer: str = Field(description="The answer you gave")
+    options: list[str] = Field(default_factory=list, description="The choices, for a dropdown, radio or checkbox question")
+    field_type: str = Field(default="text", description="text, dropdown, radio, checkbox or date")
+
+
+class GuessedAnswers(BaseModel):
+    guesses: list[GuessedAnswer]
+
+
+class SubmitReview(BaseModel):
+    summary: str = Field(description="One short paragraph: what you filled in and anything you were unsure of")
+
+
+def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id: int) -> Tools:
+    """The agent's actions for one application: the defaults plus ours."""
+    tools = Tools()
+    url, title, company = job["url"], job.get("title", ""), job.get("company", "")
+
+    @tools.action(
+        "Log the answers you had to guess: questions the profile, resume, saved answers and the "
+        "user's instructions don't answer. Call it in the same step as filling them in; the "
+        "application continues. The user checks the guesses later on the Q&A page.",
+        param_model=GuessedAnswers,
+    )
+    async def record_guesses(params: GuessedAnswers):
+        store = get_memory_store()
+        guesses = [g for g in params.guesses if g.question.strip() and g.answer.strip()]
+        for g in guesses:
+            if store is not None:
+                store.qa_set_answer(g.question.strip(), g.answer.strip(), source="guess",
+                                    question_type=g.field_type, source_domain=domain, options=g.options)
+        if guesses:
+            print(f"  🤔 [W{worker_id}] Guessed {len(guesses)} answer(s) at {company}: "
+                  + " | ".join(f"{g.question.strip()} → {g.answer.strip()}" for g in guesses))
+        return ActionResult(extracted_content=f"Logged {len(guesses)} guessed answer(s) for the user to check.")
+
+    if review:
+        @tools.action(
+            "Call this INSTEAD of clicking the final Submit/Apply button, once every page is done. "
+            "It waits for the user to check the page and approve.",
+            param_model=SubmitReview,
+        )
+        async def request_submit_review(params: SubmitReview, browser_session: _BrowserSessionType):
+            if agent_ref.get("approved"):
+                return ActionResult(extracted_content="Already approved: click the final Submit button now.")
+            loop = asyncio.get_running_loop()
+            future = loop.create_future()
+            before = await form_snapshot.snapshot(browser_session)
+            _reviews[url] = {"title": title, "company": company, "summary": params.summary,
+                             "loop": loop, "future": future}
+            print(f"  👀 [W{worker_id}] Ready to submit, waiting for your review: {title} at {company}")
+            try:
+                approve = await asyncio.wait_for(future, REVIEW_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                approve = None
+            finally:
+                _reviews.pop(url, None)
+            changes = form_snapshot.changed_fields(before, await form_snapshot.snapshot(browser_session))
+            if agent_ref.get("agent") is not None:
+                keep_user_edits(agent_ref["agent"], changes)
+            if approve is None:
+                message = "Not submitted: no review decision within 25 minutes."
+                return ActionResult(is_done=True, success=False, extracted_content=message, long_term_memory=message)
+            if not approve:
+                message = "Not submitted: you chose Skip when reviewing it."
+                return ActionResult(is_done=True, success=False, extracted_content=message, long_term_memory=message)
+            agent_ref["approved"] = True
+            note = ("\nThe user changed these fields while reviewing; keep them:\n"
+                    + form_snapshot.describe_changes(changes)) if changes else ""
+            return ActionResult(extracted_content=(
+                "The user reviewed the application and approved it." + note
+                + "\nNow click the final Submit button, check that it went through, then call done."))
+
+    return tools
+
+
+PAGE_CHECK_RULES = (
+    "PAGE BY PAGE: before clicking Next, Continue, Save and Continue or Submit, check every field on the "
+    "current page:\n"
+    "- Every answer must come from the candidate profile, the resume, the saved answers, the user's "
+    "instructions or these rules. Correct anything that doesn't.\n"
+    "- A REQUIRED question none of those answer: never stop the application over it. Give the most "
+    "reasonable, conservative answer and log it with record_guesses (question, your answer, its options):\n"
+    "  - About this company specifically (referred by an employee, worked or applied here before, "
+    "relatives working here, agreements with other employers, conflicts of interest): No / None.\n"
+    "  - Consent, and willingness to have a background check or drug test or to follow policies: Yes.\n"
+    "  - A skill, certification, license, clearance or tool the resume doesn't show: No. Years of "
+    "experience with something: from the resume, else 0.\n"
+    "  - Anything else: the safest plausible answer. Never invent experience, employers, degrees or dates.\n"
+    "- An OPTIONAL question you can't answer from those sources: leave it blank.\n"
+    "- Voluntary self-identification (gender, race/ethnicity, veteran status, disability): the "
+    "screening answer if there is one, otherwise the 'decline to answer' option.\n\n"
+)
+
+REVIEW_RULES = (
+    "REVIEW BEFORE SUBMITTING: the user checks this application before it is sent. When every page is "
+    "done and only the final Submit / Apply button is left, do NOT click it: call request_submit_review "
+    "with a short summary. If it says the user approved, click Submit. If it says not submitted, stop.\n\n"
+)
 
 
 def is_paused() -> bool:
@@ -216,14 +447,49 @@ def resume_text(path: str, limit: int = RESUME_TEXT_LIMIT) -> str:
     return text[:limit]
 
 
+# Resume headings, by what their entries are. Only "work" entries are jobs.
+_SECTION_KINDS = {
+    "work": ("experience", "work experience", "professional experience", "relevant experience",
+             "additional experience", "other experience", "employment", "employment history",
+             "work history", "internships", "internship experience"),
+    "not_job": ("projects", "personal projects", "academic projects", "technical projects",
+                "selected projects", "activities", "extracurricular activities", "leadership",
+                "volunteer", "volunteering", "volunteer experience", "community service",
+                "awards", "honors", "honors & awards", "certifications", "coursework",
+                "relevant coursework", "involvement", "research projects"),
+}
+
+
+def resume_sections(text: str) -> dict[str, list[str]]:
+    """{"work": [...], "not_job": [...]}: the resume's section headings, by kind."""
+    found: dict[str, list[str]] = {"work": [], "not_job": []}
+    for line in text.splitlines():
+        heading = line.strip().rstrip(":")
+        key = heading.lower()
+        for kind, names in _SECTION_KINDS.items():
+            if key in names and heading not in found[kind]:
+                found[kind].append(heading)
+    return found
+
+
 def resume_instructions(text: str) -> str:
     """Task text with the resume and the rules for work history sections."""
     if not text:
         return ""
+    sections = resume_sections(text)
+    section_rule = ""
+    if sections["work"] or sections["not_job"]:
+        section_rule = (
+            f"- The resume's job sections are: {', '.join(sections['work']) or 'none'}. Only entries under "
+            f"these go under Work Experience / Employment History.\n"
+            f"- Entries under {', '.join(sections['not_job']) or 'other sections'} are NOT jobs: never put "
+            f"them under Work Experience and never make up a company or job title for them.\n"
+        )
     return (
         "RESUME (the file you upload; the source of truth for work history, education and projects):\n"
         f"<resume>\n{text}\n</resume>\n"
         "WORK EXPERIENCE AND EDUCATION SECTIONS:\n"
+        f"{section_rule}"
         "- Fill them from the resume above, never from guesses.\n"
         "- Only real positions (jobs, internships, research or teaching roles) go under Work Experience. "
         "Projects, coursework and clubs are NOT jobs: leave them out of Work Experience "
@@ -232,7 +498,8 @@ def resume_instructions(text: str) -> str:
         "often get them wrong. Check every pre-filled entry against the resume: the employer goes in "
         "Company and the role in Job Title (a resume line like 'CORNER MARKET | Cashier' means "
         "Company = Corner Market, Job Title = Cashier), fill missing required fields from the resume, "
-        "and delete entries that are projects or duplicates.\n\n"
+        "and DELETE entries that are projects, activities or duplicates (use the entry's Delete button) "
+        "instead of inventing a company or title to satisfy a required field.\n\n"
     )
 
 
@@ -499,11 +766,19 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             # Detection problems must never break an otherwise-fine run.
             pass
 
+    job_domain = (_urlparse(url).hostname or "").removeprefix("www.")
+    review = is_trial_run()
+    if review:
+        print(f"  👀 [W{worker_id}] Trial run: it will wait for your review before submitting")
+    tools = build_tools(job, job_domain, review, _agent_ref, worker_id)
+
     agent = Agent(
         task=(
             f"{apply_instructions}\n\n"
             f"{resume_instructions(resume_text(resume_path))}"
             f"{FORM_RULES}"
+            f"{PAGE_CHECK_RULES}"
+            f"{REVIEW_RULES if review else ''}"
             f"PERSISTENCE & EFFICIENCY:\n"
             f"- Try at least 3 DIFFERENT approaches before reporting failure.\n"
             f"- If an element doesn't respond after 2-3 clicks, try a completely different method (keyboard, scrolling, different selector).\n"
@@ -515,6 +790,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             f"For each form question: @@QUESTION: {{\"question\": \"...\", \"answer\": \"...\", \"type\": \"...\"}}"
         ),
         llm=llm,
+        tools=tools,
         fallback_llm=config.get_fallback_llm(),
         # Open the posting before the first LLM step. browser-use only does this
         # itself when the task contains a single URL, and ours has several.
@@ -529,7 +805,8 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         # A slow reply (retries, long thinking) can take longer than the old
         # default of 75 s.
         llm_timeout=180,
-        step_timeout=300,
+        # A review step waits for the user, up to REVIEW_WAIT_SECONDS.
+        step_timeout=REVIEW_STEP_TIMEOUT if review else 300,
         max_failures=_max_failures(),
         loop_detection_enabled=True,
         loop_detection_window=5,
@@ -544,6 +821,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     )
     _agent_ref["agent"] = agent
     agent._langhire_loop = asyncio.get_running_loop()
+    agent._langhire_domain = job_domain
     _running_agents.add(agent)
     if is_paused():
         agent.pause()

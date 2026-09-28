@@ -32,5 +32,11 @@
   "dialog": {
     "title": "Start Applying"
   },
-  "starting": "Starting..."
+  "starting": "Starting...",
+  "review": {
+    "title": "Ready to submit: {{title}} at {{company}}",
+    "hint": "Check the application in the browser and fix anything that's wrong. Your changes are kept and saved as answers. Then approve it, or skip it to leave it unsent.",
+    "approve": "Approve & submit",
+    "skip": "Skip, don't submit"
+  }
 }

@@ -451,3 +451,36 @@ def test_describe_salary(low, high, period, expected):
 def test_target_roles_reach_the_agent(base_profile, no_op_store):
     ctx = sc.build_memory_context({**base_profile, "target_job_titles": ["Software Intern", "Data Intern"]}, qa={})
     assert "Target Roles: Software Intern, Data Intern" in ctx
+
+
+def test_users_answers_and_earlier_guesses_are_labelled(base_profile, monkeypatch):
+    class Store:
+        def qa_get_all_for_prompt(self, domain="", limit=None):
+            return {"How did you hear about us?": "Company Website", "Do you smoke?": "No"}
+
+        def qa_user_confirmed(self):
+            return {"How did you hear about us?"}
+
+        def get_domain_memories(self, url, limit=20):
+            return []
+
+        def extract_domain(self, url):
+            return ""
+
+    monkeypatch.setattr(sc, "get_memory_store", lambda: Store())
+    ctx = sc.build_memory_context(base_profile, qa={})
+    users = ctx.index("ANSWERS THE USER GAVE (always use these):\nQ: How did you hear about us?\nA: Company Website")
+    earlier = ctx.index("Answers recorded in earlier applications (use one only when it agrees")
+    assert users < earlier and "Q: Do you smoke?\nA: No" in ctx[earlier:]
+
+
+def test_screening_answers_reach_the_agent(base_profile, no_op_store):
+    base_profile["screening"] = {"start_date": "May 2027", "gpa": "3.6", "gender": "", "linkedin_url": "https://linkedin.com/in/ada"}
+    ctx = sc.build_memory_context(base_profile, qa={})
+    assert "SCREENING ANSWERS (the candidate's own answers):" in ctx
+    assert "Earliest start date: May 2027\nGPA: 3.6\nLinkedIn profile URL: https://linkedin.com/in/ada" in ctx
+    assert "Gender" not in ctx.split("SCREENING ANSWERS")[1].split("\n\n")[0]
+
+
+def test_no_screening_section_when_empty(base_profile, no_op_store):
+    assert "SCREENING ANSWERS" not in sc.build_memory_context(base_profile, qa={})

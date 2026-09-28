@@ -11,6 +11,8 @@ export default function QA() {
   const [stats, setStats] = useState<QAStats>({ total: 0, answered: 0, unanswered: 0 });
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "unanswered">("all");
+  // Questions without an answer, plus answers the agent had to guess.
+  const toCheck = stats.unanswered + (stats.guessed ?? 0);
   const [loading, setLoading] = useState(true);
   const [squashing, setSquashing] = useState(false);
   const [smartSquashing, setSmartSquashing] = useState(false);
@@ -117,6 +119,12 @@ export default function QA() {
 
       {error && <div className="error-banner mt-4 mb-4">{error}</div>}
 
+      {toCheck > 0 && (
+        <p role="status" className="mt-4 rounded-xl border border-primary/40 bg-primary/5 px-4 py-3 text-[13px] text-foreground">
+          {t("toCheckBanner", { count: toCheck })}
+        </p>
+      )}
+
       {/* Search + Filter */}
       <div className="flex items-center gap-3 mt-5 mb-4">
         <div className="flex-1 relative">
@@ -140,7 +148,7 @@ export default function QA() {
                   : "bg-secondary text-muted-foreground hover:bg-border"
               }`}
             >
-              {f === "all" ? t("filter.all", { count: stats.total }) : t("filter.unanswered", { count: stats.unanswered })}
+              {f === "all" ? t("filter.all", { count: stats.total }) : t("filter.toCheck", { count: toCheck })}
             </button>
           ))}
         </div>
@@ -216,6 +224,11 @@ function QACard({
   const [answer, setAnswer] = useState(entry.answer);
   const [saving, setSaving] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const options = (entry.options || "").split("\n").filter(Boolean);
+  const origin = !entry.answer ? "needsAnswer"
+    : entry.source === "user" ? "yours"
+    : entry.source === "guess" ? "guess"
+    : "fromAI";
 
   const handleChange = (val: string) => {
     setAnswer(val);
@@ -246,6 +259,21 @@ function QACard({
         </div>
       </div>
 
+      {options.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={(e) => { e.stopPropagation(); handleChange(option); }}
+              className={`px-2 py-1 rounded-lg border text-[11px] ${answer === option ? "border-primary bg-primary/10 text-foreground" : "border-border text-muted-foreground hover:border-primary"}`}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      )}
+
       <textarea
         value={answer}
         onChange={(e) => handleChange(e.target.value)}
@@ -257,6 +285,7 @@ function QACard({
 
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+          <span className={origin === "needsAnswer" || origin === "guess" ? "font-semibold text-primary" : ""}>{t(`card.origin.${origin}`)}</span>
           {entry.source_domain && <span>{entry.source_domain}</span>}
           {saving && <span className="text-primary">{t("card.saving")}</span>}
           {!saving && answer !== entry.answer && <span className="text-primary">{t("card.unsaved")}</span>}

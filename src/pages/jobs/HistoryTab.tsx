@@ -21,6 +21,7 @@ import {
   stopApplying,
   pauseApplying,
   resumeApplying,
+  reviewApplication,
   getApplyStatus,
   getJobs,
   getMetricRuns,
@@ -30,7 +31,7 @@ import {
 import { trackEvent } from "../../lib/analytics";
 import LogLine from "../../components/LogLine";
 import { useTranslation } from "react-i18next";
-import type { Job, RunMetric, AppSettings } from "../../lib/types";
+import type { Job, RunMetric, AppSettings, PendingReview } from "../../lib/types";
 
 interface AppliedJobRow {
   job: Job;
@@ -46,6 +47,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
 
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [reviews, setReviews] = useState<PendingReview[]>([]);
   const [log, setLog] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const logRef = useRef<HTMLDivElement>(null);
@@ -60,6 +62,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
       getApplyStatus().then((s) => {
         setRunning(s.running);
         setPaused(!!s.paused);
+        setReviews(s.reviews || []);
         setLog(s.log || []);
       }),
       loadAppliedJobs(),
@@ -123,6 +126,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
             }
             setRunning(s.running);
             setPaused(!!s.paused);
+            setReviews(s.reviews || []);
             setLog(s.log || []);
           }
         })
@@ -146,6 +150,11 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
     await stopApplying();
     setRunning(false);
     setPaused(false);
+  };
+
+  const handleReview = async (url: string, approve: boolean) => {
+    await reviewApplication(url, approve);
+    setReviews((current) => current.filter((r) => r.url !== url));
   };
 
   const handlePauseToggle = async () => {
@@ -240,6 +249,25 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
               {paused ? t("controls.pausedHint") : t("controls.pauseHint")}
             </p>
           )}
+          {running && reviews.map((review) => (
+            <div key={review.url} role="alert" className="rounded-2xl border border-primary/40 bg-primary/5 p-4 mb-3">
+              <p className="text-sm font-semibold text-foreground">
+                {t("review.title", { title: review.title, company: review.company })}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">{t("review.hint")}</p>
+              {review.summary && (
+                <p className="text-xs text-foreground mt-2 whitespace-pre-wrap break-words">{review.summary}</p>
+              )}
+              <div className="flex gap-2 mt-3">
+                <button onClick={() => handleReview(review.url, true)} className="btn-primary text-xs px-3 py-1.5">
+                  {t("review.approve")}
+                </button>
+                <button onClick={() => handleReview(review.url, false)} className="btn-secondary text-xs px-3 py-1.5">
+                  {t("review.skip")}
+                </button>
+              </div>
+            </div>
+          ))}
           <div ref={logRef} className="log-viewer">
             <div className="flex items-center gap-2 mb-2 text-muted-foreground">
               <Terminal className="w-3.5 h-3.5" /> {t("log.applicationLog")}

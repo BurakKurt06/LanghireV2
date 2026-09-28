@@ -75,6 +75,33 @@ describe("QA page", () => {
     mockSmartSquashQA.mockResolvedValue({ success: true, merged: 1 } as never);
   });
 
+  it("marks who answered, and says how many questions need an answer", async () => {
+    mockGetQAList.mockResolvedValue([
+      makeEntry({ id: 1, question: "Q user?", source: "user" }),
+      makeEntry({ id: 2, question: "Q ai?", source: "agent" }),
+      makeEntry({ id: 3, question: "Q open?", answer: "" }),
+      makeEntry({ id: 4, question: "Q guess?", source: "guess" }),
+    ] as never);
+    mockGetQAStats.mockResolvedValue({ total: 4, answered: 3, unanswered: 1, guessed: 1 } as never);
+    render(<QA />);
+    expect(await screen.findByText("card.origin.yours")).toBeInTheDocument();
+    expect(screen.getByText("card.origin.fromAI")).toBeInTheDocument();
+    expect(screen.getByText("card.origin.needsAnswer")).toBeInTheDocument();
+    expect(screen.getByText("card.origin.guess")).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent('toCheckBanner:{"count":2}');
+  });
+
+  it("an option chip fills in the answer", async () => {
+    mockGetQAList.mockResolvedValue([
+      makeEntry({ id: 7, question: "Clearance?", answer: "", options: "Yes\nNo" }),
+    ] as never);
+    const user = userEvent.setup();
+    render(<QA />);
+    await user.click(await screen.findByRole("button", { name: "No" }));
+    expect(screen.getByDisplayValue("No")).toBeInTheDocument();
+    await waitFor(() => expect(mockUpdateQA).toHaveBeenCalledWith(7, "No"), { timeout: 2000 });
+  });
+
   it("shows the loading spinner before the list resolves", () => {
     mockGetQAList.mockReturnValue(new Promise(() => {}) as never);
     render(<QA />);
@@ -94,7 +121,7 @@ describe("QA page", () => {
     render(<QA />);
     await screen.findByText("Why do you want this job?");
 
-    await user.click(screen.getByRole("button", { name: /filter\.unanswered/ }));
+    await user.click(screen.getByRole("button", { name: /filter\.toCheck/ }));
 
     await waitFor(() =>
       expect(mockGetQAList).toHaveBeenCalledWith(
