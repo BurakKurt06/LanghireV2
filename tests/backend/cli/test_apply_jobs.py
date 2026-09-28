@@ -352,3 +352,56 @@ def test_pause_reaches_running_agents_and_new_ones_start_paused(run):
     finally:
         apply_jobs._running_agents.discard(running)
     assert run.agents[-1] not in apply_jobs._running_agents  # removed when its run ended
+
+
+# ── Settings are read for every job, not once per app start ────────────────
+
+def test_settings_saved_after_startup_are_used(run, monkeypatch, tmp_path):
+    """Resume, account login and blocked sites used to be frozen at import time."""
+    new_resume = _make_resume(tmp_path / "new.pdf")
+    monkeypatch.setattr(apply_jobs.config, "load_runtime_settings", lambda: {
+        "max_failures": 6,
+        "resume_path": new_resume,
+        "sensitive_data": {"email": "new-login@example.com", "password": "brand-new-password"},
+        "blocked_domains": ["spam.example"],
+    })
+    _, kwargs, _ = run()
+    assert kwargs["available_file_paths"] == [new_resume]
+    assert kwargs["sensitive_data"]["account_email"] == "new-login@example.com"
+    assert kwargs["sensitive_data"]["password"] == "brand-new-password"
+    assert "spam.example" in kwargs["task"]
+
+
+def test_newly_blocked_domain_blocks_the_job(run, monkeypatch):
+    monkeypatch.setattr(apply_jobs.config, "load_runtime_settings",
+                        lambda: {"blocked_domains": ["greenhouse.io"]})
+    status, kwargs, saved = run()
+    assert status == "blocked" and kwargs is None
+    assert saved == [("blocked", "Blocked domain")]
+
+
+def test_worker_rereads_the_profile_before_each_job(monkeypatch, tmp_path):
+    import json
+    profile_file = tmp_path / "candidate_profile.json"
+    monkeypatch.setattr(apply_jobs, "CANDIDATE_PROFILE", profile_file)
+    seen = []
+
+    async def fake_apply(job, profile, *args, **kwargs):
+        seen.append(profile["address"]["street"])
+        profile_file.write_text(json.dumps({"address": {"street": "12 Example St"}}))
+        return "applied"
+
+    async def no_delay(label=""):
+        return 0
+
+    monkeypatch.setattr(apply_jobs, "apply_to_job", fake_apply)
+    monkeypatch.setattr(apply_jobs.config, "maybe_human_delay", no_delay)
+
+    async def go():
+        queue = asyncio.Queue()
+        for i in range(2):
+            queue.put_nowait({"url": f"https://x.example/{i}"})
+        await apply_jobs.worker("W1", 1, queue, {"address": {"street": "old"}}, {}, [], False, {})
+
+    asyncio.run(go())
+    assert seen == ["old", "12 Example St"]

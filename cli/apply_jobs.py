@@ -115,6 +115,21 @@ def _max_failures() -> int:
         return 8
 
 
+def current_settings() -> tuple[str, dict, list[str]]:
+    """(resume path, account email/password, blocked domains) as saved right now.
+
+    RESUME_PATH, SENSITIVE_DATA and BLOCKED_DOMAINS are read once, when this
+    module is first imported, so a new resume or password saved in Settings
+    was ignored until the app restarted. Read settings.json for every job
+    instead, falling back to those constants only when a key is missing.
+    """
+    settings = config.load_runtime_settings()
+    resume = settings.get("resume_path", RESUME_PATH) or ""
+    sensitive = settings.get("sensitive_data") or SENSITIVE_DATA or {}
+    blocked = settings.get("blocked_domains", BLOCKED_DOMAINS) or []
+    return resume, sensitive, blocked
+
+
 def failure_reason(result) -> str:
     """Why a finished run failed: the agent's own done text, else the last step error.
 
@@ -285,7 +300,9 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         print(f"  🚫 [W{worker_id}] Blocked (invalid URL): {title} at {company}")
         return "blocked"
 
-    if any(domain in url for domain in BLOCKED_DOMAINS):
+    settings_resume, settings_sensitive, blocked_domains = current_settings()
+
+    if any(domain in url for domain in blocked_domains):
         await save_job_status(url, "blocked", "Blocked domain")
         print(f"  🚫 [W{worker_id}] Blocked: {title} at {company}")
         return "blocked"
@@ -294,7 +311,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         print(f"  ⏭️  [W{worker_id}] Skipped (already claimed): {title} at {company}")
         return "skipped"
 
-    agent_sensitive_data = build_agent_secrets(profile, SENSITIVE_DATA)
+    agent_sensitive_data = build_agent_secrets(profile, settings_sensitive)
     if "email" not in agent_sensitive_data:
         # Nearly every form asks for an email; don't spend a run typing a bad one.
         await save_job_status(url, "failed", NO_VALID_EMAIL_ERROR)
@@ -323,7 +340,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     )
     run_started_at = datetime.now(timezone.utc)
 
-    resume_path = resume_path_override or RESUME_PATH
+    resume_path = resume_path_override or settings_resume
 
     # Use tailored resume if available for this job
     try:
@@ -443,7 +460,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             f"positioned off-screen, or marked aria-hidden: those are honeypot traps used to detect bots.\n\n"
             f"If it's a video funnel or recruitment pitch, report failure and stop. "
             f"If the external form is broken after 3 attempts, report failure and stop.\n\n"
-            f"BLOCKED SITES — if redirected to any of these, immediately call done with success=false: {', '.join(BLOCKED_DOMAINS)}"
+            f"BLOCKED SITES — if redirected to any of these, immediately call done with success=false: {', '.join(blocked_domains)}"
             f"{otp_instructions}"
         )
 
@@ -665,6 +682,9 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
             break
 
         job_easy_apply = job.get("easy_apply", easy_apply) if job.get("easy_apply") is not None else easy_apply
+        # Re-read the profile for each job, so edits saved during a long run
+        # (a fixed address, new instructions) apply to the next application.
+        profile = load_json(CANDIDATE_PROFILE, profile) or profile
         status = await apply_to_job(job, profile, qa, applied_labels, job_easy_apply, worker_id)
         stats[status] = stats.get(status, 0) + 1
 

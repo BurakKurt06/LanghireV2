@@ -2168,6 +2168,18 @@ async def delete_tailored(url_hash: str):
 
 # ── Cover Letter Generation ───────────────────────────────────────────────
 
+def _resume_block() -> str:
+    """The saved resume's text for one-shot prompts, or "" when there is none to read."""
+    from cli.apply_jobs import resume_text
+    text = resume_text(load_settings().get("resume_path", ""))
+    return f"CANDIDATE RESUME (the source of truth for experience):\n{text}\n\n" if text else ""
+
+
+def _describe_education(edu: dict) -> str:
+    from core.shared_config import _describe_education as describe
+    return describe(edu or {})
+
+
 @app.post("/cover-letter/generate")
 async def generate_cover_letter(body: dict):
     """Generate a tailored cover letter using LLM based on job description + profile."""
@@ -2194,8 +2206,9 @@ async def generate_cover_letter(body: dict):
         f"Current Role: {profile.get('current_role', '')}\n"
         f"Years of Experience: {profile.get('years_of_experience', 0)}\n"
         f"Skills: {', '.join(profile.get('skills', []))}\n"
-        f"Education: {profile.get('education', {}).get('degree', '')} from {profile.get('education', {}).get('school', '')}\n"
+        f"Education: {_describe_education(profile.get('education', {}))}\n"
         f"Languages: {', '.join(profile.get('languages', []))}\n\n"
+        f"{_resume_block()}"
         "INSTRUCTIONS:\n"
         "- Write 3-4 paragraphs\n"
         "- Highlight relevant skills and experience that match the job requirements\n"

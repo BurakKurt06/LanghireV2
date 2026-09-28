@@ -352,10 +352,11 @@ def test_build_memory_context_applied_labels(base_profile, no_op_store):
 
 
 def test_build_memory_context_no_salary(base_profile, no_op_store):
-    """A zero salary minimum renders 'Not specified'."""
+    """No minimum and no maximum renders 'Not specified'; a maximum alone is 'up to'."""
     base_profile["salary_expectation"]["min"] = 0
-    ctx = sc.build_memory_context(base_profile, qa={})
-    assert "Salary: Not specified" in ctx
+    assert "Salary: GBP up to 120,000 (annual)" in sc.build_memory_context(base_profile, qa={})
+    base_profile["salary_expectation"]["max"] = 0
+    assert "Salary: Not specified" in sc.build_memory_context(base_profile, qa={})
 
 
 def test_build_memory_context_default_date_format(base_profile, no_op_store):
@@ -431,3 +432,22 @@ def test_profile_instructions_are_sent_as_rules(base_profile, no_op_store):
     assert "Always click Apply with resume first." in ctx
     assert "Notes:" not in ctx
     assert "USER'S INSTRUCTIONS" not in sc.build_memory_context({**base_profile, "notes": "  "}, qa={})
+
+
+@pytest.mark.parametrize("low,high,period,expected", [
+    (20, 30, "hourly", "USD 20-30 (hourly)"),
+    (50000, 0, "annual", "USD 50,000+ (no maximum) (annual)"),
+    (50000, 40000, "annual", "USD 50,000+ (no maximum) (annual)"),
+    (25, 25, "hourly", "USD 25 (hourly)"),
+    (0, 90000, "annual", "USD up to 90,000 (annual)"),
+    (0, 0, "annual", "Not specified"),
+    (22.5, 30, "hourly", "USD 22.50-30 (hourly)"),
+])
+def test_describe_salary(low, high, period, expected):
+    """A maximum of 0 used to read 'USD 50,000-0'."""
+    assert sc._describe_salary("USD", low, high, period) == expected
+
+
+def test_target_roles_reach_the_agent(base_profile, no_op_store):
+    ctx = sc.build_memory_context({**base_profile, "target_job_titles": ["Software Intern", "Data Intern"]}, qa={})
+    assert "Target Roles: Software Intern, Data Intern" in ctx

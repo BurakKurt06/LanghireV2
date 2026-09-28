@@ -316,6 +316,31 @@ def _with_profile_defaults(profile: dict | None) -> dict:
     return merged
 
 
+def _describe_salary(currency: str, low, high, period: str) -> str:
+    """'USD 20-30 (hourly)'; an empty or lower maximum means no upper limit.
+
+    A maximum of 0 used to read 'USD 50,000-0', which the agent could type
+    into a form as the maximum.
+    """
+    try:
+        low, high = float(low or 0), float(high or 0)
+    except (TypeError, ValueError):
+        return "Not specified"
+
+    def fmt(n: float) -> str:
+        return f"{n:,.0f}" if n == int(n) else f"{n:,.2f}"
+
+    if low and high > low:
+        amount = f"{fmt(low)}-{fmt(high)}"
+    elif low:
+        amount = fmt(low) if high == low else f"{fmt(low)}+ (no maximum)"
+    elif high:
+        amount = f"up to {fmt(high)}"
+    else:
+        return "Not specified"
+    return f"{currency} {amount} ({period})"
+
+
 def _describe_address(address: dict) -> str:
     """The address split into the fields forms ask for.
 
@@ -369,7 +394,7 @@ def build_memory_context(
     sal_min = sal.get('min', 0) or 0
     sal_max = sal.get('max', 0) or 0
     sal_period = sal.get('period', 'annual')
-    salary_str = f"{sal_currency} {sal_min:,}-{sal_max:,} ({sal_period})" if sal_min else "Not specified"
+    salary_str = _describe_salary(sal_currency, sal_min, sal_max, sal_period)
 
     # Country-aware date format
     date_format = profile.get('date_format', '') or 'MM/DD/YYYY'
@@ -384,6 +409,7 @@ def build_memory_context(
         f"Years of Experience: {profile['years_of_experience']}",
         f"Education: {_describe_education(profile['education'])}",
         f"Current Role: {profile['current_role']}",
+        f"Target Roles: {', '.join(profile['target_job_titles'])}",
         f"Target Locations: {', '.join(profile['target_locations'])}",
         f"Languages: {', '.join(profile['languages'])}",
         f"Skills: {', '.join(profile['skills'])}",

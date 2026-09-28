@@ -979,3 +979,28 @@ class TestApplyPause:
         auth_client.post("/apply/pause")
         auth_client.post("/apply/stop")
         assert not apply_jobs.is_paused()
+
+
+def test_cover_letter_prompt_includes_resume_and_major(auth_client, monkeypatch, tmp_path):
+    """The cover letter used to see only name/role/skills, never the resume."""
+    import fitz
+    pdf = tmp_path / "r.pdf"
+    doc = fitz.open()
+    doc.new_page().insert_text((72, 72), "CORNER MARKET | Cashier 2023")
+    doc.save(str(pdf))
+    doc.close()
+    auth_client.put("/settings", json={"resume_path": str(pdf)})
+    auth_client.put("/profile", json={"name": "Ada", "education": {"degree": "BS", "major": "Computer Science", "school": "State University", "graduation": "2028"}})
+    auth_client.put("/settings/llm", json={"provider": "openai", "openai": {"api_key": "sk", "model": "gpt-4o"}})
+    prompts = []
+
+    class _LLM:
+        async def ainvoke(self, messages):
+            prompts.append(messages[0].content)
+            return type("R", (), {"content": "Dear team"})()
+
+    from core import llm_factory
+    monkeypatch.setattr(llm_factory, "create_llm", lambda s: _LLM())
+    auth_client.post("/cover-letter/generate", json={"job_description": "Build.", "job_title": "Dev", "company": "Acme"})
+    assert "CORNER MARKET | Cashier" in prompts[0]
+    assert "BS in Computer Science from State University (2028)" in prompts[0]

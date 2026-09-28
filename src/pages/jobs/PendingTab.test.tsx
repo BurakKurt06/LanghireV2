@@ -242,6 +242,33 @@ describe("PendingTab", () => {
     );
   });
 
+  it("auto-tailor on: tailors untailored jobs before a batch apply", async () => {
+    localStorage.setItem("langhire_auto_tailor", "true");
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+
+    await user.click(screen.getByRole("button", { name: /Select All/ }));
+    await user.click(await screen.findByRole("button", { name: /Apply to \d+ job/ }));
+
+    await waitFor(() => expect(mockStartApplying).toHaveBeenCalled());
+    expect(mockTailorResumes).toHaveBeenCalledTimes(1);
+    const [urls] = mockTailorResumes.mock.calls[0];
+    expect(urls).toContain(pendingJob.url);
+    expect(urls).not.toContain(tailoredJob.url); // already has a tailored resume
+    expect(mockTailorResumes.mock.invocationCallOrder[0]).toBeLessThan(mockStartApplying.mock.invocationCallOrder[0]);
+  });
+
+  it("auto-tailor off: applies without tailoring", async () => {
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
+    await user.click(await screen.findByRole("button", { name: "Got it, Start" }));
+    await waitFor(() => expect(mockStartApplying).toHaveBeenCalled());
+    expect(mockTailorResumes).not.toHaveBeenCalled();
+  });
+
   it("batch-tailors selected resumes", async () => {
     const user = userEvent.setup();
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);

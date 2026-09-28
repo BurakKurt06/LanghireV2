@@ -231,6 +231,23 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     fetchJobs();
   };
 
+  // "Auto-tailor before applying": tailor the jobs that have no tailored resume
+  // yet. The apply run picks a tailored resume up by itself; a job that can't
+  // be tailored is applied to with the base resume.
+  const tailorBeforeApplying = async (urls: string[]) => {
+    if (!autoTailor) return;
+    const todo = urls.filter((url) => !jobs.find((j) => j.url === url)?.tailored_resume_path);
+    if (todo.length === 0) return;
+    setTailoring(true);
+    try {
+      await tailorResumes(todo, tailorOptions);
+    } catch {
+      /* apply with the base resume */
+    } finally {
+      setTailoring(false);
+    }
+  };
+
   const handleApplySingle = (jobUrl: string) => {
     setPendingApplyUrl(jobUrl);
     setShowConfirmDialog(true);
@@ -240,6 +257,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     setShowConfirmDialog(false);
     if (!pendingApplyUrl) return;
     try {
+      await tailorBeforeApplying([pendingApplyUrl]);
       const res = await startApplying({
         job_url: pendingApplyUrl,
         workers: 1,
@@ -345,6 +363,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     if (selectedJobs.size === 0) return;
     setBatchApplying(true);
     try {
+      await tailorBeforeApplying([...selectedJobs]);
       const res = await startApplying({
         job_urls: [...selectedJobs],
         workers: 1,
