@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import HistoryTab from "./HistoryTab";
 import {
   stopApplying,
+  pauseApplying,
+  resumeApplying,
   getApplyStatus,
   getJobs,
   getMetricRuns,
@@ -20,6 +22,8 @@ vi.mock("../../lib/analytics", () => ({ trackEvent: vi.fn() }));
 
 vi.mock("../../lib/api", () => ({
   stopApplying: vi.fn(),
+  pauseApplying: vi.fn(),
+  resumeApplying: vi.fn(),
   getApplyStatus: vi.fn(),
   getJobs: vi.fn(),
   getMetricRuns: vi.fn(),
@@ -28,6 +32,8 @@ vi.mock("../../lib/api", () => ({
 }));
 
 const mockStopApplying = vi.mocked(stopApplying);
+const mockPauseApplying = vi.mocked(pauseApplying);
+const mockResumeApplying = vi.mocked(resumeApplying);
 const mockGetApplyStatus = vi.mocked(getApplyStatus);
 const mockGetJobs = vi.mocked(getJobs);
 const mockGetMetricRuns = vi.mocked(getMetricRuns);
@@ -144,6 +150,29 @@ describe("HistoryTab", () => {
     const stopBtn = screen.getByRole("button", { name: /controls\.stop/ });
     await user.click(stopBtn);
     expect(mockStopApplying).toHaveBeenCalled();
+  });
+
+  it("pauses so the user can take over, then resumes", async () => {
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["Applying to job..."] } as never);
+    mockPauseApplying.mockResolvedValue({ success: true, paused: true });
+    mockResumeApplying.mockResolvedValue({ success: true, paused: false });
+    const user = userEvent.setup();
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+
+    expect(await screen.findByText("controls.pauseHint")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /controls\.pause/ }));
+    expect(mockPauseApplying).toHaveBeenCalled();
+    expect(await screen.findByText("controls.pausedHint")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /controls\.resume/ }));
+    expect(mockResumeApplying).toHaveBeenCalled();
+    expect(await screen.findByText("controls.pauseHint")).toBeInTheDocument();
+  });
+
+  it("shows the paused state reported by the backend", async () => {
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, paused: true, log: ["x"] } as never);
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+    expect(await screen.findByRole("button", { name: /controls\.resume/ })).toBeInTheDocument();
   });
 
   it("does not crash when loadAppliedJobs rejects", async () => {

@@ -13,7 +13,11 @@
     "limitPlaceholder": "No limit — apply to all",
     "limitHelp": "Leave blank to apply to all {{count}} pending jobs",
     "stop": "Stop",
-    "startApplying": "Start Applying"
+    "startApplying": "Start Applying",
+    "pause": "Pause",
+    "resume": "Resume",
+    "pauseHint": "Want to fix something yourself? Pause first, so the agent doesn't undo your changes.",
+    "pausedHint": "Paused. The agent stopped after its last action: make your changes in the browser (you can also click Next), then Resume. It re-reads the page and keeps your changes."
   },
   "comingSoon": {
     "badge": "Coming Soon",

@@ -85,7 +85,8 @@
     "placeholder": "Add a language..."
   },
   "notes": {
-    "title": "Notes",
-    "placeholder": "Any special instructions for the AI agent..."
+    "title": "Instructions for the AI",
+    "hint": "The agent follows these on every application, like rules. Describe how you want forms handled; your profile and resume already supply the facts.",
+    "placeholder": "For example:\n- Usual flow: open the job page, click Apply, create an account if needed, then fill in personal info, address, experience and questions.\n- Prefer 'Apply with resume' or autofill options when offered, then check every field.\n- Put my street address in Address Line 1 and leave Line 2 empty.\n- Answer 'No' to optional marketing emails."
   }
 }

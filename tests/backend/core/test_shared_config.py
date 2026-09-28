@@ -404,3 +404,30 @@ def test_build_memory_context_qa_db_overrides_passed_in(base_profile, monkeypatc
     ctx = sc.build_memory_context(base_profile, qa={"OLDQ": "OLDA"})
     assert "Q: DBQ\nA: DBA" in ctx
     assert "OLDQ" not in ctx
+
+
+def test_street_address_reaches_the_agent(base_profile, no_op_store):
+    """Only city/state/zip used to be sent, so the town ended up in Address Line 1."""
+    base_profile["address"] = {"street": "12 Example St", "city": "Springfield", "state": "NJ",
+                               "zip": "12345", "country": "USA"}
+    ctx = sc.build_memory_context(base_profile, qa={})
+    assert ("Address: Street address (Address Line 1): 12 Example St | City: Springfield | "
+            "State: NJ | ZIP / postal code: 12345 | Country: USA") in ctx
+
+
+def test_empty_address_parts_are_left_out(base_profile, no_op_store):
+    ctx = sc.build_memory_context(base_profile, qa={})
+    assert "Address: City: London | Country: UK" in ctx
+
+
+def test_date_of_birth_only_when_set(base_profile, no_op_store):
+    assert "Date of Birth" not in sc.build_memory_context({**base_profile, "date_of_birth": ""}, qa={})
+    assert "Date of Birth: 06/07/2005" in sc.build_memory_context({**base_profile, "date_of_birth": "06/07/2005"}, qa={})
+
+
+def test_profile_instructions_are_sent_as_rules(base_profile, no_op_store):
+    ctx = sc.build_memory_context({**base_profile, "notes": "  Always click Apply with resume first.  "}, qa={})
+    assert "USER'S INSTRUCTIONS" in ctx
+    assert "Always click Apply with resume first." in ctx
+    assert "Notes:" not in ctx
+    assert "USER'S INSTRUCTIONS" not in sc.build_memory_context({**base_profile, "notes": "  "}, qa={})

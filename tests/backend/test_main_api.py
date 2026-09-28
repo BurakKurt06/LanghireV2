@@ -947,3 +947,35 @@ def test_kill_browser_processes_matches_windows_profile_paths(monkeypatch):
     main._kill_browser_processes()
     assert ours.terminated
     assert not unrelated.terminated
+
+
+class TestApplyPause:
+    @pytest.fixture(autouse=True)
+    def _unpaused(self):
+        from cli import apply_jobs
+        yield
+        apply_jobs.set_paused(False)
+        main._apply_status["running"] = False
+
+    def test_pause_when_nothing_runs_does_nothing(self, auth_client):
+        from cli import apply_jobs
+        assert auth_client.post("/apply/pause").json() == {"success": False, "paused": False}
+        assert not apply_jobs.is_paused()
+
+    def test_pause_and_resume_a_running_session(self, auth_client):
+        from cli import apply_jobs
+        main._apply_status.update({"running": True, "log": []})
+        assert auth_client.post("/apply/pause").json()["paused"] is True
+        body = auth_client.get("/apply/status").json()
+        assert body["paused"] is True and "Paused" in body["log"][-1]
+        assert auth_client.post("/apply/resume").json()["paused"] is False
+        assert auth_client.get("/apply/status").json()["paused"] is False
+        assert not apply_jobs.is_paused()
+
+    def test_stop_clears_the_pause(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
+        main._apply_status.update({"running": True, "log": []})
+        auth_client.post("/apply/pause")
+        auth_client.post("/apply/stop")
+        assert not apply_jobs.is_paused()

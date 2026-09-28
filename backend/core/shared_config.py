@@ -316,6 +316,23 @@ def _with_profile_defaults(profile: dict | None) -> dict:
     return merged
 
 
+def _describe_address(address: dict) -> str:
+    """The address split into the fields forms ask for.
+
+    Only city/state/zip used to be sent, so the agent took the street line from
+    the resume and put the town (e.g. "Springfield") in Address Line 1.
+    """
+    fields = [
+        ("Street address (Address Line 1)", address.get("street")),
+        ("City", address.get("city")),
+        ("State", address.get("state")),
+        ("ZIP / postal code", address.get("zip")),
+        ("Country", address.get("country")),
+    ]
+    known = [f"{label}: {value}" for label, value in fields if (value or "").strip()]
+    return "Address: " + (" | ".join(known) if known else "Not specified")
+
+
 def _describe_work_mode(mode: str) -> str:
     """Spell out 'any' so the agent picks whatever option a form offers."""
     if (mode or "").lower() == "any":
@@ -361,7 +378,7 @@ def build_memory_context(
         "CANDIDATE PROFILE:",
         f"Name: {profile['name']}",
         f"Email: {profile['email']}, Phone: {profile.get('phone_country_code', '')}{profile['phone']}",
-        f"Location: {profile['address']['city']}, {profile['address']['state']} {profile['address']['zip']} {profile['address'].get('country', '')}".strip(),
+        _describe_address(profile['address']),
         f"Work Authorization: {profile['work_authorization']}, Visa Sponsorship Needed: {profile['visa_sponsorship_needed']}",
         f"Willing to Relocate: {profile['willing_to_relocate']}, Preferred Work Mode: {_describe_work_mode(profile['preferred_work_mode'])}",
         f"Years of Experience: {profile['years_of_experience']}",
@@ -376,10 +393,18 @@ def build_memory_context(
         profile_lines.append(f"Notice Period: {profile['notice_period']}")
     if profile.get('nationality'):
         profile_lines.append(f"Nationality: {profile['nationality']}")
-    if profile.get('notes'):
-        profile_lines.append(f"Notes: {profile['notes']}")
+    if profile.get('date_of_birth'):
+        profile_lines.append(f"Date of Birth: {profile['date_of_birth']} (only when a form asks for it)")
 
     parts.append("\n".join(profile_lines))
+
+    # Profile -> "Instructions for the AI". Framed as rules, not as one more
+    # profile line, so the agent follows them.
+    if (profile.get('notes') or '').strip():
+        parts.append(
+            "USER'S INSTRUCTIONS (the candidate wrote these; follow them unless they would "
+            "mean submitting false information):\n" + profile['notes'].strip()
+        )
 
     # Country-specific instructions for the agent
     country_instructions = []

@@ -1052,6 +1052,7 @@ async def start_applying(body: ApplyRequest):
 
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
+    _set_apply_paused(False)
 
     workers = body.workers
     mode = body.mode
@@ -1168,8 +1169,39 @@ async def start_applying(body: ApplyRequest):
 
 @app.post("/apply/stop")
 async def stop_applying():
+    _set_apply_paused(False)
     _force_stop(_apply_status)
     return {"success": True}
+
+
+def _set_apply_paused(paused: bool) -> None:
+    from cli import apply_jobs
+    apply_jobs.set_paused(paused)
+
+
+@app.post("/apply/pause")
+async def pause_applying():
+    """Pause the running applications so the user can take over the browser."""
+    if not _apply_status.get("running"):
+        return {"success": False, "paused": False}
+    _set_apply_paused(True)
+    with _status_lock:
+        _apply_status["log"].append("⏸️ Paused: the agent stops after its current action. Make your changes, then Resume.")
+    return {"success": True, "paused": True}
+
+
+@app.post("/apply/resume")
+async def resume_applying():
+    _set_apply_paused(False)
+    if _apply_status.get("running"):
+        with _status_lock:
+            _apply_status["log"].append("▶️ Resumed: the agent re-reads the page and keeps your changes.")
+    return {"success": True, "paused": False}
+
+
+def _apply_paused() -> bool:
+    from cli import apply_jobs
+    return apply_jobs.is_paused()
 
 
 @app.get("/apply/status")
@@ -1177,6 +1209,7 @@ async def apply_status():
     with _status_lock:
         return {
             "running": _apply_status.get("running", False),
+            "paused": _apply_status.get("running", False) and _apply_paused(),
             "mode": _apply_status.get("mode"),
             "workers": _apply_status.get("workers", 1),
             "log": list(_apply_status.get("log", [])[-100:]),

@@ -87,6 +87,15 @@ describe("Profile page", () => {
     expect(await screen.findByRole("button", { name: "save" })).toBeInTheDocument();
   });
 
+  it("shows date of birth for US profiles too, and the AI instructions box", async () => {
+    mockGetProfile.mockResolvedValue({ ...sampleProfile, notes: "Use Apply with resume first." } as CandidateProfile);
+    render(<Profile />);
+    expect(await screen.findByText("personal.dateOfBirth")).toBeInTheDocument();
+    expect(screen.getByText("notes.title")).toBeInTheDocument();
+    expect(screen.getByText("notes.hint")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Use Apply with resume first.")).toBeInTheDocument();
+  });
+
   it("renders fetched profile values into the inputs", async () => {
     render(<Profile />);
     expect(await screen.findByDisplayValue("Ada Lovelace")).toBeInTheDocument();

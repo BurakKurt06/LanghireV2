@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import {
   Square,
+  Pause,
+  Play,
   Terminal,
   Loader2,
   Briefcase,
@@ -17,6 +19,8 @@ import {
 } from "lucide-react";
 import {
   stopApplying,
+  pauseApplying,
+  resumeApplying,
   getApplyStatus,
   getJobs,
   getMetricRuns,
@@ -41,6 +45,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
   const { t } = useTranslation("apply");
 
   const [running, setRunning] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [log, setLog] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const logRef = useRef<HTMLDivElement>(null);
@@ -54,6 +59,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
     Promise.all([
       getApplyStatus().then((s) => {
         setRunning(s.running);
+        setPaused(!!s.paused);
         setLog(s.log || []);
       }),
       loadAppliedJobs(),
@@ -116,6 +122,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
               onJobsChanged();
             }
             setRunning(s.running);
+            setPaused(!!s.paused);
             setLog(s.log || []);
           }
         })
@@ -138,6 +145,12 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
   const handleStop = async () => {
     await stopApplying();
     setRunning(false);
+    setPaused(false);
+  };
+
+  const handlePauseToggle = async () => {
+    const result = paused ? await resumeApplying() : await pauseApplying();
+    setPaused(result.paused);
   };
 
   const [exporting, setExporting] = useState(false);
@@ -211,11 +224,22 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
               {running ? t("log.liveOutput") : t("log.outputLog")}
             </h3>
             {running && (
-              <button onClick={handleStop} className="btn-destructive text-xs px-3 py-1.5">
-                <Square className="w-3 h-3" /> {t("controls.stop")}
-              </button>
+              <div className="flex items-center gap-2">
+                <button onClick={handlePauseToggle} className="btn-secondary text-xs px-3 py-1.5">
+                  {paused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                  {paused ? t("controls.resume") : t("controls.pause")}
+                </button>
+                <button onClick={handleStop} className="btn-destructive text-xs px-3 py-1.5">
+                  <Square className="w-3 h-3" /> {t("controls.stop")}
+                </button>
+              </div>
             )}
           </div>
+          {running && (
+            <p className="text-xs text-muted-foreground mb-3">
+              {paused ? t("controls.pausedHint") : t("controls.pauseHint")}
+            </p>
+          )}
           <div ref={logRef} className="log-viewer">
             <div className="flex items-center gap-2 mb-2 text-muted-foreground">
               <Terminal className="w-3.5 h-3.5" /> {t("log.applicationLog")}

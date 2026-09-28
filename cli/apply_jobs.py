@@ -115,6 +115,112 @@ def _max_failures() -> int:
         return 8
 
 
+def failure_reason(result) -> str:
+    """Why a finished run failed: the agent's own done text, else the last step error.
+
+    AgentHistoryList.errors() has a None for every step without an error, so
+    errors()[-1] was usually None, and slicing it raised "'NoneType' object is
+    not subscriptable", which replaced the agent's explanation with a generic
+    "unexpected page state" message.
+    """
+    if result.is_done() and result.final_result():
+        return result.final_result()
+    errors = [e for e in result.errors() if e]
+    return errors[-1] if errors else "Agent reported failure"
+
+
+# ── Pause / resume from the app ─────────────────────────────────────────────
+# Lets the user take over the browser to fix something: a paused agent stops
+# after its current action, drops the rest of that step's plan, and reads the
+# page afresh when resumed, so it sees (and keeps) the user's changes.
+_running_agents: set = set()
+_pause_state = {"paused": False}
+
+
+def _set_agent_paused(agent, paused: bool) -> None:
+    # The agent's pause event belongs to the worker's event loop, and the app
+    # calls this from a request thread.
+    action = agent.pause if paused else agent.resume
+    loop = getattr(agent, "_langhire_loop", None)
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(action)
+    else:
+        action()
+
+
+def set_paused(paused: bool) -> None:
+    """Pause or resume every running application agent; new ones follow suit."""
+    _pause_state["paused"] = paused
+    for agent in list(_running_agents):
+        _set_agent_paused(agent, paused)
+
+
+def is_paused() -> bool:
+    return _pause_state["paused"]
+
+
+FORM_RULES = (
+    "FORM ANSWER RULES (these override saved answers and learned tips):\n"
+    "- 'How did you hear about us' / referral source / job source: the company's own careers website. "
+    "Pick the option closest to 'Company Website' or 'Careers Site'; never LinkedIn, Indeed, Handshake "
+    "or another job board, and never an employee referral. If nothing fits, pick 'Other' and type "
+    "'Company careers website'.\n"
+    "- Salary fields that take only a number: enter one number, with no currency sign, range or words "
+    "(the minimum of the candidate's range). If the field asks for a different period than the "
+    "candidate's, convert it: hourly x 2080 = yearly, hourly x 173 = monthly, yearly / 12 = monthly.\n"
+    "- Address fields: copy them from the profile's Address line. Address Line 1 is the street address "
+    "(never the town or city, even if the resume shows only a town); City, State and ZIP go in their own "
+    "fields; leave Address Line 2 empty unless the profile has one.\n"
+    "- The user may be watching and fixing fields by hand. Never change a field that already holds a "
+    "valid, sensible value just because you would have entered something else. Only change fields that "
+    "are empty, show a validation error, or clearly contradict the profile or resume. If the page moved "
+    "on without you, continue from where it is now.\n\n"
+)
+
+
+# About 1,500 tokens: room for a two-page resume.
+RESUME_TEXT_LIMIT = 6000
+
+
+def resume_text(path: str, limit: int = RESUME_TEXT_LIMIT) -> str:
+    """The resume PDF's text, or "" when it can't be read.
+
+    The agent only uploads the file, so without this it has no idea of the
+    candidate's work history, and can't fix the entries that Workday and
+    similar sites pre-fill from the upload (projects listed as jobs,
+    "COMPANY | Title" pasted whole into Job Title).
+    """
+    try:
+        import fitz  # pymupdf
+        with fitz.open(path) as doc:
+            text = "\n".join(page.get_text() for page in doc)
+    except Exception:
+        return ""
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text).strip()
+    return text[:limit]
+
+
+def resume_instructions(text: str) -> str:
+    """Task text with the resume and the rules for work history sections."""
+    if not text:
+        return ""
+    return (
+        "RESUME (the file you upload; the source of truth for work history, education and projects):\n"
+        f"<resume>\n{text}\n</resume>\n"
+        "WORK EXPERIENCE AND EDUCATION SECTIONS:\n"
+        "- Fill them from the resume above, never from guesses.\n"
+        "- Only real positions (jobs, internships, research or teaching roles) go under Work Experience. "
+        "Projects, coursework and clubs are NOT jobs: leave them out of Work Experience "
+        "(use a Projects section if the form has one).\n"
+        "- Many sites (Workday, iCIMS, Taleo, ...) pre-fill these sections from the uploaded resume and "
+        "often get them wrong. Check every pre-filled entry against the resume: the employer goes in "
+        "Company and the role in Job Title (a resume line like 'CORNER MARKET | Cashier' means "
+        "Company = Corner Market, Job Title = Cashier), fill missing required fields from the resume, "
+        "and delete entries that are projects or duplicates.\n\n"
+    )
+
+
 _ERROR_MAP = [
     ("'NoneType' object is not subscriptable", "Browser agent encountered an unexpected page state. The page may have changed or timed out."),
     ("'NoneType' object has no attribute", "Browser agent lost track of a page element. The site may have redirected or loaded slowly."),
@@ -379,6 +485,8 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     agent = Agent(
         task=(
             f"{apply_instructions}\n\n"
+            f"{resume_instructions(resume_text(resume_path))}"
+            f"{FORM_RULES}"
             f"PERSISTENCE & EFFICIENCY:\n"
             f"- Try at least 3 DIFFERENT approaches before reporting failure.\n"
             f"- If an element doesn't respond after 2-3 clicks, try a completely different method (keyboard, scrolling, different selector).\n"
@@ -418,6 +526,10 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         register_done_callback=_agent_on_done,
     )
     _agent_ref["agent"] = agent
+    agent._langhire_loop = asyncio.get_running_loop()
+    _running_agents.add(agent)
+    if is_paused():
+        agent.pause()
 
     try:
         result = await agent.run()
@@ -502,7 +614,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
                 step_count=len(result.history),
                 memories_injected=memories_injected_count,
                 memories_extracted=memories_extracted_count,
-                error_message=(result.errors()[-1][:2000] if result.errors() else None) if not success else None,
+                error_message=None if success else failure_reason(result)[:2000],
             )
         except Exception as metrics_err:
             print(f"    ⚠️  [W{worker_id}] Metrics recording failed (non-fatal): {metrics_err}")
@@ -512,7 +624,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             print(f"  ✅ [W{worker_id}] Applied: {title} at {company}")
             return "applied"
         else:
-            error_msg = result.errors()[-1] if result.errors() else "Agent reported failure"
+            error_msg = failure_reason(result)
             await save_job_status(url, "failed", error_msg[:2000])
             print(f"  ❌ [W{worker_id}] Failed: {title} at {company} — {error_msg[:100]}")
             return "failed"
@@ -534,6 +646,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         print(f"  ❌ [W{worker_id}] Error: {title} at {company} — {error_str[:100]}")
         return "failed"
     finally:
+        _running_agents.discard(agent)
         try:
             await browser.close()
         except Exception as close_err:

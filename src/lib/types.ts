@@ -316,6 +316,8 @@ export interface CollectionStatus {
 
 export interface ApplyStatus {
   running: boolean;
+  /** Paused from the app so the user can take over the browser. */
+  paused?: boolean;
   mode: string | null;
   workers: number;
   log: string[];

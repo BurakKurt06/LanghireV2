@@ -305,6 +305,14 @@ export async function stopApplying() {
   return request<{ success: boolean }>("/apply/stop", { method: "POST" });
 }
 
+export async function pauseApplying() {
+  return request<{ success: boolean; paused: boolean }>("/apply/pause", { method: "POST" });
+}
+
+export async function resumeApplying() {
+  return request<{ success: boolean; paused: boolean }>("/apply/resume", { method: "POST" });
+}
+
 export async function getApplyStatus() {
   return request<ApplyStatus>("/apply/status");
 }

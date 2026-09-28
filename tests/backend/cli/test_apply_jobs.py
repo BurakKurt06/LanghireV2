@@ -60,15 +60,25 @@ def test_max_failures_reads_the_settings_value(monkeypatch, stored, expected):
 # ── apply_to_job with a fake Agent ──────────────────────────────────────────
 
 class FakeHistory:
-    def __init__(self, success=True, steps=3):
+    """Like browser-use's AgentHistoryList: errors() has a None per step without one."""
+
+    def __init__(self, success=True, steps=3, done_text=None, step_errors=None):
         self._success = success
+        self._done_text = done_text
+        self._errors = step_errors if step_errors is not None else ([None] * steps if success else [None] * (steps - 1) + ["form broken"])
         self.history = [object()] * steps
 
     def is_successful(self):
         return self._success
 
+    def is_done(self):
+        return self._done_text is not None
+
+    def final_result(self):
+        return self._done_text
+
     def errors(self):
-        return [] if self._success else ["form broken"]
+        return self._errors
 
 
 @pytest.fixture
@@ -80,6 +90,14 @@ def run(data_dir, monkeypatch):
         def __init__(self, **kwargs):
             created.append(kwargs)
             self.kwargs = kwargs
+            self.paused = False
+            FakeAgent.instances.append(self)
+
+        def pause(self):
+            self.paused = True
+
+        def resume(self):
+            self.paused = False
 
         async def run(self):
             return self.history
@@ -108,7 +126,9 @@ def run(data_dir, monkeypatch):
         get_domain_memories=lambda url, limit=50: [],
         detect_ats_platform=lambda domain: None,
     )
+    FakeAgent.instances = []
     monkeypatch.setattr(apply_jobs, "Agent", FakeAgent)
+    monkeypatch.setattr(apply_jobs, "_pause_state", {"paused": False})
     monkeypatch.setattr(apply_jobs, "BrowserSession", FakeBrowser)
     monkeypatch.setattr(apply_jobs, "claim_job", lambda url: True)
     monkeypatch.setattr(apply_jobs, "save_job_status", fake_save)
@@ -131,6 +151,7 @@ def run(data_dir, monkeypatch):
         status = asyncio.run(apply_jobs.apply_to_job(job, profile, {}, [], easy_apply=easy_apply, worker_id=1))
         return status, (created[-1] if created else None), saved
 
+    _run.agents = FakeAgent.instances
     return _run
 
 
@@ -237,3 +258,97 @@ def test_prompt_lists_only_same_company_applications(run, monkeypatch):
     job = {"url": GREENHOUSE, "title": "Intern", "company": "Acme", "location": "Boston"}
     asyncio.run(apply_jobs.apply_to_job(job, GOOD_PROFILE, {}, ["Old role at Acme", "Other at Initech"], False, 1))
     assert captured["labels"] == ["Old role at Acme"]
+
+
+# ── Resume text in the task ─────────────────────────────────────────────────
+
+def _make_resume(path):
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "EXPERIENCE\nCORNER MARKET | Cashier    06/2023 - 08/2023\n"
+                               "PROJECTS\nWeather App    01/2024 - 06/2024")
+    doc.save(str(path))
+    doc.close()
+    return str(path)
+
+
+def test_resume_text_reads_the_pdf(tmp_path):
+    text = apply_jobs.resume_text(_make_resume(tmp_path / "r.pdf"))
+    assert "CORNER MARKET | Cashier" in text and "Weather App" in text
+
+
+def test_resume_text_is_capped(tmp_path):
+    assert len(apply_jobs.resume_text(_make_resume(tmp_path / "r.pdf"), limit=20)) == 20
+
+
+def test_unreadable_resume_gives_no_text(tmp_path):
+    assert apply_jobs.resume_text(str(tmp_path / "missing.pdf")) == ""
+    assert apply_jobs.resume_instructions("") == ""
+
+
+def test_task_carries_the_resume_and_work_history_rules(run, monkeypatch, tmp_path):
+    monkeypatch.setattr(apply_jobs, "RESUME_PATH", _make_resume(tmp_path / "r.pdf"))
+    _, kwargs, _ = run()
+    task = kwargs["task"]
+    assert "<resume>" in task and "CORNER MARKET | Cashier" in task
+    assert "Projects, coursework and clubs are NOT jobs" in task
+    assert "Company = Corner Market, Job Title = Cashier" in task
+
+
+def test_task_without_a_readable_resume_has_no_resume_block(run):
+    _, kwargs, _ = run()  # the fixture's resume path doesn't exist
+    assert "<resume>" not in kwargs["task"]
+
+
+# ── Failure reasons, form rules, pause ──────────────────────────────────────
+
+def test_failed_run_saves_the_agents_own_explanation(run):
+    """errors()[-1] is None on a step without an error; that used to crash the save."""
+    history = FakeHistory(success=False, steps=5, done_text="Salary field only takes digits.",
+                          step_errors=[None] * 5)
+    status, _, saved = run(history=history)
+    assert status == "failed"
+    assert saved[-1] == ("failed", "Salary field only takes digits.")
+
+
+@pytest.mark.parametrize("history,expected", [
+    (FakeHistory(success=False, done_text="Could not submit: form broken."), "Could not submit: form broken."),
+    (FakeHistory(success=False, steps=3, step_errors=["timeout", None, None]), "timeout"),
+    (FakeHistory(success=False, steps=2, step_errors=[None, None]), "Agent reported failure"),
+])
+def test_failure_reason(history, expected):
+    assert apply_jobs.failure_reason(history) == expected
+
+
+def test_task_carries_the_form_rules(run):
+    _, kwargs, _ = run()
+    task = kwargs["task"]
+    assert "How did you hear about us" in task and "never LinkedIn" in task
+    assert "hourly x 2080 = yearly" in task
+    assert "Address Line 1 is the street address" in task
+    assert "Never change a field that already holds a valid, sensible value" in task
+
+
+def test_pause_reaches_running_agents_and_new_ones_start_paused(run):
+    class Running:
+        paused = False
+
+        def pause(self):
+            self.paused = True
+
+        def resume(self):
+            self.paused = False
+
+    running = Running()
+    apply_jobs._running_agents.add(running)
+    try:
+        apply_jobs.set_paused(True)
+        assert running.paused and apply_jobs.is_paused()
+        run()  # an application that starts while paused
+        assert run.agents[-1].paused
+        apply_jobs.set_paused(False)
+        assert not running.paused
+    finally:
+        apply_jobs._running_agents.discard(running)
+    assert run.agents[-1] not in apply_jobs._running_agents  # removed when its run ended

@@ -195,9 +195,7 @@ export default function Profile() {
           {countryConfig?.show_nationality && (
             <Input label={t("personal.nationality")} value={profile.nationality} onChange={(v) => update("nationality", v)} />
           )}
-          {countryConfig?.show_date_of_birth && (
-            <Input label={t("personal.dateOfBirth")} value={profile.date_of_birth} onChange={(v) => update("date_of_birth", v)} placeholder={countryConfig.date_format} />
-          )}
+          <Input label={t("personal.dateOfBirth")} value={profile.date_of_birth} onChange={(v) => update("date_of_birth", v)} placeholder={countryConfig?.date_format || "MM/DD/YYYY"} />
         </div>
       </Section>
 
@@ -341,8 +339,9 @@ export default function Profile() {
 
       {/* Notes */}
       <Section title={t("notes.title")}>
+        <p className="text-[13px] text-muted-foreground mb-2">{t("notes.hint")}</p>
         <textarea value={profile.notes} onChange={(e) => update("notes", e.target.value)}
-          rows={3} className="input-base"
+          rows={8} className="input-base"
           placeholder={t("notes.placeholder")} />
       </Section>
     </div>
