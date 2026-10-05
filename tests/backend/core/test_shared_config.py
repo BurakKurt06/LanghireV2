@@ -508,3 +508,13 @@ def test_learning_instructions_ask_for_few_new_learnings():
     import inspect
     source = inspect.getsource(shared_config.build_memory_context)
     assert "at most 3 per run" in source and "at least 2-3" not in source
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Ada Lovelace", "Name: Ada Lovelace (First name: Ada | Last name: Lovelace)"),
+    ("Mary Ann Evans", "Name: Mary Ann Evans (First name: Mary Ann | Last name: Evans)"),
+    ("Cher", "Name: Cher"),
+    ("", "Name: "),
+])
+def test_name_is_split_for_first_and_last_name_fields(name, expected):
+    assert sc._describe_name(name) == expected

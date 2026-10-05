@@ -367,6 +367,18 @@ def _describe_screening(screening: dict) -> str:
     )
 
 
+def _describe_name(name: str) -> str:
+    """'Name: Ada Lovelace (First name: Ada | Last name: Lovelace)'.
+
+    The profile holds one full name; without the split the agent sometimes
+    typed all of it into a form's First name field.
+    """
+    parts = (name or "").split()
+    if len(parts) < 2:
+        return f"Name: {name}"
+    return f"Name: {name} (First name: {' '.join(parts[:-1])} | Last name: {parts[-1]})"
+
+
 def _describe_salary(currency: str, low, high, period: str) -> str:
     """'USD 20-30 (hourly)'; an empty or lower maximum means no upper limit.
 
@@ -456,7 +468,7 @@ def build_memory_context(
 
     profile_lines = [
         "CANDIDATE PROFILE:",
-        f"Name: {profile['name']}",
+        _describe_name(profile['name']),
         f"Email: {profile['email']}, Phone: {profile.get('phone_country_code', '')}{profile['phone']}",
         _describe_address(profile['address']),
         f"Work Authorization: {profile['work_authorization']}, Visa Sponsorship Needed: {profile['visa_sponsorship_needed']}",
