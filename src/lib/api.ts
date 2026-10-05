@@ -192,6 +192,14 @@ export async function exportJobsCsv(): Promise<string> {
   return res.text();
 }
 
+/** Write the CSV export to a path the user picked in the Save dialog. */
+export async function saveJobsCsv(path: string) {
+  return request<{ success: boolean; path: string; rows: number }>("/jobs/export/save", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+}
+
 export async function startJobCollection(
   title?: string,
   maxJobs?: number,
@@ -294,7 +302,7 @@ export async function exportMemories() {
 }
 
 // ── Apply ─────────────────────────────────────────────────────────────────
-export async function startApplying(params: { workers?: number; mode?: string; limit?: number; job_url?: string; job_urls?: string[]; review?: boolean }) {
+export async function startApplying(params: { workers?: number; mode?: string; limit?: number; job_url?: string; job_urls?: string[]; review?: boolean; run_mode?: "auto" | "trial" | "training" }) {
   return request<{ success: boolean; message: string }>("/apply/start", {
     method: "POST",
     body: JSON.stringify(params),
@@ -311,6 +319,17 @@ export async function pauseApplying() {
 
 export async function resumeApplying() {
   return request<{ success: boolean; paused: boolean }>("/apply/resume", { method: "POST" });
+}
+
+export async function answerHelp(url: string, message: string, giveUp: boolean) {
+  return request<{ success: boolean }>("/apply/help", {
+    method: "POST",
+    body: JSON.stringify({ url, message, give_up: giveUp }),
+  });
+}
+
+export async function saveJobNote(url: string, note: string) {
+  return request<{ success: boolean }>("/jobs/note", { method: "PUT", body: JSON.stringify({ url, note }) });
 }
 
 export async function reviewApplication(url: string, approve: boolean) {
@@ -348,6 +367,7 @@ export async function getAuthStatus() {
   return request<{
     linkedin: { logged_in: boolean };
     gmail: { logged_in: boolean };
+    login_window_open?: boolean;
   }>("/auth/status");
 }
 

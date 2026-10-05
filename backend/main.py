@@ -14,6 +14,15 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
+# Windows consoles default to cp1252, which can't encode the emoji browser-use
+# logs: every such line printed a "--- Logging error ---" traceback into the
+# Output Log. Write UTF-8 instead (replacing anything unencodable).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -1042,6 +1051,10 @@ _apply_status: dict = {"running": False, "mode": None, "workers": 1, "log": []}
 _apply_thread: threading.Thread | None = None
 
 
+# Jobs the Apply / Retry buttons may (re)start.
+RETRYABLE_STATUSES = ("pending", "failed", "needs_you")
+
+
 @app.post("/apply/start")
 async def start_applying(body: ApplyRequest):
     """Start job application in-process."""
@@ -1049,6 +1062,10 @@ async def start_applying(body: ApplyRequest):
 
     if _apply_status["running"]:
         return {"success": False, "message": "Application already running"}
+    if _login_process is not None and _login_process.poll() is None:
+        # Both would use the same browser profile, and killing the window could
+        # lose a sign-in that isn't saved to disk yet.
+        return {"success": False, "message": "Close the sign-in window first, then start applying."}
 
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
@@ -1060,7 +1077,7 @@ async def start_applying(body: ApplyRequest):
     target_job_url = body.job_url
     target_job_urls = body.job_urls
     from cli import apply_jobs as _apply_jobs_module
-    _apply_jobs_module.set_trial_run(body.review)
+    _apply_jobs_module.set_run_mode(body.run_mode or ("trial" if body.review else "auto"))
 
     if target_job_url:
         _apply_status = {"running": True, "mode": mode, "workers": 1, "log": [f"Applying to single job..."]}
@@ -1096,7 +1113,7 @@ async def start_applying(body: ApplyRequest):
             if not target:
                 print("Job not found.")
                 return
-            if target.get("status") not in ("pending", "failed"):
+            if target.get("status") not in RETRYABLE_STATUSES:
                 print(f"Job is already {target.get('status')}.")
                 return
             # Reset to pending so the worker can claim it
@@ -1110,7 +1127,7 @@ async def start_applying(body: ApplyRequest):
             pending = []
             for url in target_job_urls:
                 j = jobs.get(url)
-                if j and j.get("status") in ("pending", "failed"):
+                if j and j.get("status") in RETRYABLE_STATUSES:
                     _update_job(url, status="pending", error=None)
                     j["status"] = "pending"
                     pending.append(j)
@@ -1211,6 +1228,23 @@ def _pending_reviews() -> list[dict]:
     return apply_jobs.pending_reviews()
 
 
+def _pending_help() -> list[dict]:
+    from cli import apply_jobs
+    return apply_jobs.pending_help()
+
+
+@app.post("/apply/help")
+async def help_application(body: dict):
+    """Reply to a trial-run agent that is stuck: a message and Continue, or Give up."""
+    from cli import apply_jobs
+    give_up = bool(body.get("give_up"))
+    ok = apply_jobs.answer_help(body.get("url", ""), body.get("message", ""), give_up)
+    if ok:
+        with _status_lock:
+            _apply_status["log"].append("🛑 Gave up on this application." if give_up else "▶️ Continuing with your help.")
+    return {"success": ok}
+
+
 @app.post("/apply/review")
 async def review_application(body: dict):
     """Approve (submit) or skip an application that is waiting for the user's review."""
@@ -1230,6 +1264,7 @@ async def apply_status():
             "running": _apply_status.get("running", False),
             "paused": _apply_status.get("running", False) and _apply_paused(),
             "reviews": _pending_reviews() if _apply_status.get("running") else [],
+            "help": _pending_help() if _apply_status.get("running") else [],
             "mode": _apply_status.get("mode"),
             "workers": _apply_status.get("workers", 1),
             "log": list(_apply_status.get("log", [])[-100:]),
@@ -1267,7 +1302,8 @@ async def get_jobs(
 @app.get("/jobs/stats")
 async def get_job_stats():
     jobs = _load_jobs()
-    stats = {"total": len(jobs), "pending": 0, "applied": 0, "failed": 0, "blocked": 0, "in_progress": 0}
+    stats = {"total": len(jobs), "pending": 0, "applied": 0, "failed": 0, "blocked": 0, "in_progress": 0,
+             "closed": 0, "needs_you": 0}
     for j in jobs.values():
         s = j.get("status", "pending")
         if s in stats:
@@ -1275,39 +1311,84 @@ async def get_job_stats():
     return stats
 
 
+CSV_COLUMNS = ["Last Attempt", "Date Applied", "Practised (Training Run)", "Date Collected", "Job Title",
+               "Company", "Location", "Status", "Reason", "Duration (s)", "Steps", "Source", "Easy Apply", "URL"]
+
+
+def _csv_cell(value) -> str:
+    """A spreadsheet-safe cell: text from websites starting with = + - @ would run as a formula in Excel."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def _jobs_csv() -> str:
+    """Every job as CSV text (with a UTF-8 BOM so Excel reads accents correctly)."""
+    import csv
+    import io
+
+    jobs = _load_jobs()
+    # The latest run of each job, for the attempt time, duration and steps the History list shows.
+    last_run: dict[str, dict] = {}
+    metrics = _get_metrics_store()
+    if metrics:
+        try:
+            for run in metrics.get_all_runs(limit=5000):  # newest first
+                last_run.setdefault(run.get("job_url") or "", run)
+        except Exception as e:
+            _log.warning(f"CSV export: couldn't read run history: {e}")
+
+    rows = list(jobs.values())
+    rows.sort(key=lambda j: (j.get("applied_at") or (last_run.get(j.get("url", "")) or {}).get("started_at") or "",
+                             j.get("collected_at") or ""), reverse=True)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(CSV_COLUMNS)
+    for j in rows:
+        run = last_run.get(j.get("url", "")) or {}
+        duration = run.get("duration_seconds")
+        writer.writerow([_csv_cell(v) for v in (
+            run.get("started_at") or j.get("applied_at") or "",
+            j.get("applied_at") or "",
+            j.get("practised_at") or "",
+            j.get("collected_at") or "",
+            j.get("title") or "",
+            j.get("company") or "",
+            j.get("location") or "",
+            j.get("status") or "",
+            j.get("error") or "",
+            "" if duration is None else round(float(duration)),
+            run.get("step_count") if run.get("step_count") is not None else "",
+            j.get("source") or "",
+            "" if j.get("easy_apply") is None else ("yes" if j.get("easy_apply") else "no"),
+            j.get("url") or "",
+        )])
+    return "﻿" + buf.getvalue()
+
+
 @app.get("/jobs/export")
 async def export_jobs_csv():
     """Export all jobs as a downloadable CSV file."""
-    import csv
-    import io
-    from fastapi.responses import StreamingResponse
+    from fastapi.responses import Response
 
-    jobs = _load_jobs()
-    rows = list(jobs.values())
-    # Newest first by applied_at, then collected_at — matches the History view ordering.
-    rows.sort(key=lambda j: (j.get("applied_at") or "", j.get("collected_at") or ""), reverse=True)
-
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["Date Applied", "Date Collected", "Job Title", "Company", "Location", "Status", "Source", "Easy Apply", "URL"])
-    for j in rows:
-        writer.writerow([
-            j.get("applied_at", "") or "",
-            j.get("collected_at", "") or "",
-            j.get("title", "") or "",
-            j.get("company", "") or "",
-            j.get("location", "") or "",
-            j.get("status", "") or "",
-            j.get("source", "") or "",
-            "" if j.get("easy_apply") is None else ("yes" if j.get("easy_apply") else "no"),
-            j.get("url", "") or "",
-        ])
-    buf.seek(0)
-    return StreamingResponse(
-        iter([buf.getvalue()]),
-        media_type="text/csv",
+    return Response(
+        content=_jobs_csv().encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="langhirev2-jobs.csv"'},
     )
+
+
+@app.post("/jobs/export/save")
+async def save_jobs_csv(body: dict):
+    """Write the CSV export to the path the user picked in the Save dialog."""
+    path = Path(str(body.get("path") or "")).expanduser()
+    if not path.name or path.suffix.lower() != ".csv":
+        return _api_error("invalid_path", "Choose a file name ending in .csv", 400)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_jobs_csv().encode("utf-8"))
+    except OSError as e:
+        return _api_error("write_failed", f"Couldn't save the file: {e.strerror or e}", 500)
+    return {"success": True, "path": str(path), "rows": len(_load_jobs())}
 
 
 # ── Job Management ────────────────────────────────────────────────────────
@@ -1319,7 +1400,7 @@ async def update_job_status(body: dict):
     new_status = body.get("status", "").strip()
     if not url:
         return _api_error("missing_field", "Job URL is required", 400)
-    valid_statuses = ("pending", "applied", "failed", "blocked")
+    valid_statuses = ("pending", "applied", "failed", "blocked", "closed", "needs_you")
     if new_status not in valid_statuses:
         return _api_error("invalid_status", f"Status must be one of: {', '.join(valid_statuses)}", 400)
 
@@ -1330,6 +1411,19 @@ async def update_job_status(body: dict):
     from core.shared_config import update_job
     update_job(url, status=new_status, error=None)
     return {"success": True, "url": url, "status": new_status}
+
+
+@app.put("/jobs/note")
+async def update_job_note(body: dict):
+    """A note for the agent on a job, used on its next attempt (e.g. how to get past a failure)."""
+    url = body.get("url", "").strip()
+    if not url:
+        return _api_error("missing_field", "Job URL is required", 400)
+    if url not in _load_jobs():
+        return _api_error("not_found", "Job not found", 404)
+    from core.shared_config import update_job
+    update_job(url, user_note=(body.get("note") or "").strip()[:2000])
+    return {"success": True}
 
 
 @app.post("/jobs/add")
@@ -1361,7 +1455,25 @@ async def add_job_manually(body: dict):
         "error": None,
     }
     write_jobs(jobs)
+    _schedule_posting_details([url])
     return {"success": True, "url": url}
+
+
+def _schedule_posting_details(urls: list[str]) -> None:
+    """Read each new link's real title and company (and whether it's closed) in the background."""
+    from core.shared_config import refresh_posting_details
+
+    async def _run():
+        for u in urls:
+            try:
+                await asyncio.to_thread(refresh_posting_details, u)
+            except Exception as e:
+                _log.warning(f"Couldn't read posting details for {u[:80]}: {e}")
+
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        pass
 
 
 @app.post("/jobs/add-bulk")
@@ -1428,6 +1540,7 @@ async def add_jobs_bulk(body: AddJobsBulkRequest):
 
     if added:
         write_jobs(jobs)
+        _schedule_posting_details(added)
 
     return {
         "success": True,
@@ -1503,7 +1616,8 @@ async def auth_status():
         None,
     )
 
-    result = {"linkedin": {"logged_in": False}, "gmail": {"logged_in": False}}
+    result = {"linkedin": {"logged_in": False}, "gmail": {"logged_in": False},
+              "login_window_open": _login_process is not None and _login_process.poll() is None}
 
     if cookies_db is None:
         return result
@@ -1537,89 +1651,51 @@ async def auth_status():
 
 
 _login_running = False
+_login_process: subprocess.Popen | None = None
 
 @app.post("/auth/login/{service}")
 async def auth_login(service: str):
-    """Launch a Playwright persistent browser context for login.
-    Uses the exact same mechanism as BrowserSession so cookies are compatible with collection/apply."""
-    global _login_running
+    """Open a sign-in window for LinkedIn or Gmail in the agents' browser profile.
+
+    The window is a plain browser process (the browser picked in Settings, or
+    Playwright's Chromium in automatic mode) started with the agents' profile
+    folder: no automation flags and no debugging connection. Google refuses
+    sign-ins in browsers it sees as automated ("This browser or app may not be
+    secure"), which a Playwright-driven window can trigger. The cookies land in
+    the same profile the agents use, so one sign-in lasts across runs.
+    """
+    global _login_running, _login_process
 
     if service not in ("linkedin", "gmail"):
         return {"success": False, "message": f"Unknown service: {service}"}
 
-    if _login_running:
-        return {"success": False, "message": "A login browser is already open. Please use it or close it first."}
+    if _login_process is not None and _login_process.poll() is None:
+        return {"success": False, "message": "A sign-in window is already open. Finish there, then close it."}
+    if _apply_status.get("running"):
+        return {"success": False, "message": "Applications are running in this browser profile. Stop them first, then sign in."}
 
     urls = {
         "linkedin": "https://www.linkedin.com/login",
-        "gmail": "https://accounts.google.com/signin/v2/identifier?service=mail",
+        "gmail": "https://accounts.google.com/ServiceLogin?service=mail&continue=https://mail.google.com/mail/",
     }
-
     profile_dir = _get_browser_profile_dir()
+    from core.browsers import resolve_browser
+    chosen, _ = resolve_browser(load_settings(), get_data_dir() / "browser_profile")
+    executable = chosen or _find_playwright_chromium()
+    if not executable:
+        return {"success": False, "message": "No browser found. Pick one in Settings → Browser."}
 
-    def _run_login_browser():
-        """Run Playwright persistent context in a thread (blocks until browser closes)."""
-        global _login_running
-        _login_running = True
-        try:
-            _log.info(f"Launching Playwright login browser for {service} with profile: {profile_dir}")
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as p:
-                _log.info("Playwright started, launching persistent context...")
-                # Log in with the same browser the agents will use, so the cookies
-                # land in its profile. Automatic mode keeps Playwright's Chromium
-                # (critical for frozen/PyInstaller builds).
-                from core.browsers import resolve_browser
-                chosen, _ = resolve_browser(load_settings(), get_data_dir() / "browser_profile")
-                chromium_path = chosen or _find_playwright_chromium()
-                launch_args = ["--no-first-run", "--no-default-browser-check"]
-                if sys.platform == "linux":
-                    launch_args.append("--no-sandbox")
-
-                launch_kwargs = {
-                    "user_data_dir": profile_dir,
-                    "headless": False,
-                    "args": launch_args,
-                    "ignore_default_args": ["--enable-automation"],
-                }
-                if chromium_path:
-                    launch_kwargs["executable_path"] = chromium_path
-                    _log.info(f"Using Chromium at: {chromium_path}")
-                context = p.chromium.launch_persistent_context(**launch_kwargs)
-                _log.info(f"Browser launched with {len(context.pages)} pages")
-                # Navigate existing page or create new one
-                if context.pages:
-                    page = context.pages[0]
-                else:
-                    page = context.new_page()
-                page.goto(urls[service], wait_until="domcontentloaded")
-                _log.info(f"Navigated to {urls[service]}")
-                # Keep browser open until user closes all pages
-                try:
-                    while len(context.pages) > 0:
-                        context.pages[0].wait_for_event("close", timeout=300000)
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        context.close()
-                    except Exception:
-                        pass
-                _log.info("Login browser closed by user")
-        except Exception as e:
-            _log.error(f"Login browser error: {e}", exc_info=True)
-        finally:
-            _login_running = False
-
+    args = [executable, f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
+            "--new-window", urls[service]]
     try:
-        import threading
-        t = threading.Thread(target=_run_login_browser, daemon=True)
-        t.start()
-        return {"success": True, "message": f"Browser opened for {service} login. Please log in and close the browser when done."}
+        _login_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
-        _login_running = False
-        _log.error(f"Failed to launch login browser: {e}")
-        return {"success": False, "message": f"Failed to launch browser: {e}"}
+        _log.error(f"Failed to open sign-in window: {e}")
+        return {"success": False, "message": f"Couldn't open the browser: {e}"}
+    _login_running = True
+    _log.info(f"Opened {service} sign-in window ({Path(executable).name}) with profile {profile_dir}")
+    name = "Gmail" if service == "gmail" else "LinkedIn"
+    return {"success": True, "message": f"Sign in to {name} in the window that opened, then close it."}
 
 
 # ── Memory ────────────────────────────────────────────────────────────────
@@ -1741,7 +1817,7 @@ async def parse_resume_to_profile():
   "willing_to_relocate": false,
   "preferred_work_mode": "hybrid",
   "years_of_experience": 0,
-  "education": {{"degree": "Degree Name", "major": "Field of Study", "school": "University Name", "graduation": "Year or Date"}},
+  "education": {{"degree": "Degree Name", "major": "Field of Study", "school": "University Name", "start_date": "Month Year started", "graduation": "Year or Date"}},
   "current_role": "Current or Most Recent Job Title",
   "target_job_titles": ["Job Title 1", "Job Title 2"],
   "target_locations": ["City, State"],

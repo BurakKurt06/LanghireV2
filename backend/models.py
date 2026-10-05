@@ -22,6 +22,8 @@ class ApplyRequest(BaseModel):
     job_url: Optional[str] = None
     job_urls: Optional[list[str]] = Field(default=None, description="Specific job URLs to apply to (batch apply)")
     review: bool = Field(default=False, description="Trial run: wait for the user's approval before each submit")
+    run_mode: Optional[Literal["auto", "trial", "training"]] = Field(
+        default=None, description="auto, trial (approve each submit) or training (fill in, never submit); wins over review")
 
 
 class AddJobsBulkRequest(BaseModel):

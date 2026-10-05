@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import Jobs from "./Jobs";
+import { MemoryRouter } from "react-router-dom";
+import JobsPage from "./Jobs";
+
+function Jobs({ url = "/jobs" }: { url?: string }) {
+  return (
+    <MemoryRouter initialEntries={[url]}>
+      <JobsPage />
+    </MemoryRouter>
+  );
+}
 import { getJobStats } from "../lib/api";
 
 // i18n: identity translator so assertions can use raw keys.
@@ -48,6 +57,11 @@ describe("Jobs", () => {
     render(<Jobs />);
     expect(screen.getByText("title")).toBeInTheDocument();
     await waitFor(() => expect(mockGetJobStats).toHaveBeenCalled());
+  });
+
+  it("opens the tab named in the URL (the attention pill links to ?tab=history)", async () => {
+    render(<Jobs url="/jobs?tab=history" />);
+    expect(await screen.findByTestId("history-tab")).toBeInTheDocument();
   });
 
   it("renders the Collect tab by default", async () => {

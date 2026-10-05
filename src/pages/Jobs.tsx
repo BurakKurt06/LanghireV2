@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { getJobStats } from "../lib/api";
 import { PageHeader } from "../components/ui";
@@ -12,7 +13,17 @@ type TabId = "collect" | "pending" | "history";
 
 export default function Jobs() {
   const { t } = useTranslation("jobs");
-  const [activeTab, setActiveTab] = useState<TabId>("collect");
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const [activeTab, setActiveTab] = useState<TabId>(
+    tabParam === "pending" || tabParam === "history" ? tabParam : "collect",
+  );
+  // The "agent needs you" pill links to ?tab=history from any page, also while already on Jobs.
+  const [seenTabParam, setSeenTabParam] = useState(tabParam);
+  if (tabParam !== seenTabParam) {
+    setSeenTabParam(tabParam);
+    if (tabParam === "pending" || tabParam === "history") setActiveTab(tabParam);
+  }
   const [stats, setStats] = useState<JobStats>({
     total: 0,
     pending: 0,

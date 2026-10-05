@@ -240,6 +240,37 @@ def update_job(url: str, **fields):
             save_json(JOBS_FILE, jobs)
 
 
+def refresh_posting_details(url: str, posting=None, mark_closed: bool = True):
+    """Fill a job's placeholder title / empty company from its page; mark it closed if taken down.
+
+    posting: an already-fetched job_page.Posting (fetched here when None).
+    Returns the Posting, or None when the page couldn't be read.
+    """
+    try:
+        from core import job_page
+    except ImportError:
+        from backend.core import job_page
+    if posting is None:
+        posting = job_page.fetch(url)
+    if posting is None:
+        return None
+    with FileLock(JOBS_LOCK):
+        jobs = load_json(JOBS_FILE, {})
+        job = jobs.get(url)
+        if job is None:
+            return posting
+        changed = False
+        if posting.title and job_page.is_placeholder(job.get("title")):
+            job["title"], changed = posting.title, True
+        if posting.company and not (job.get("company") or "").strip():
+            job["company"], changed = posting.company, True
+        if posting.closed and mark_closed and job.get("status") in ("pending", "failed", "needs_you"):
+            job["status"], job["error"], changed = "closed", posting.reason, True
+        if changed:
+            save_json(JOBS_FILE, jobs)
+    return posting
+
+
 _claim_lock = threading.Lock()
 
 
@@ -386,12 +417,16 @@ def _describe_work_mode(mode: str) -> str:
 
 
 def _describe_education(edu: dict) -> str:
-    """'B.S. in Computer Science from MIT (2027)', skipping empty parts."""
+    """'B.S. in Computer Science from MIT (started September 2023, graduation 2027)', skipping empty parts."""
     degree = edu.get("degree", "")
     major = edu.get("major", "")
     if major:
         degree = f"{degree} in {major}" if degree else major
-    return f"{degree} from {edu.get('school', '')} ({edu.get('graduation', '')})"
+    start = (edu.get("start_date") or "").strip()
+    graduation = (edu.get("graduation") or "").strip()
+    when = ", ".join(p for p in (f"started {start}" if start else "",
+                                  f"graduation {graduation}" if graduation and start else graduation) if p)
+    return f"{degree} from {edu.get('school', '')} ({when})"
 
 
 def normalize_question(q: str) -> str:
@@ -516,7 +551,9 @@ def build_memory_context(
         "- Navigation: 'Easy Apply opens a modal overlay, don't navigate away from the page'\n"
         "- Element interaction: 'The checkbox is inside a scrollable div, must scroll to find it'\n"
         "- Form strategy: 'This ATS splits the form into 4 steps: Personal → Resume → Questions → Review'\n"
-        "Report at least 2-3 learnings per application run."
+        "Report only learnings that are new (not already listed above) and would help the next "
+        "application on this site: at most 3 per run, each one once (in the step you learn it, not "
+        "repeated in later steps' memory)."
     )
     return "\n\n".join(parts)
 

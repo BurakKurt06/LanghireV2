@@ -68,3 +68,24 @@ def data_dir(tmp_path, monkeypatch):
     # Return the resolved data dir so tests can assert on files directly.
     import core.config as config
     return config.get_data_dir()
+
+
+@pytest.fixture(autouse=True)
+def _no_posting_fetch(request, monkeypatch):
+    """Never fetch real job pages: apply runs and job adds read a posting's page first.
+
+    Tests of job_page.fetch itself opt out with @pytest.mark.real_posting_fetch.
+    """
+    if request.node.get_closest_marker("real_posting_fetch"):
+        return
+    import core.job_page as job_page
+    monkeypatch.setattr(job_page, "fetch", lambda url: None)
+    try:
+        import backend.core.job_page as backend_job_page
+        monkeypatch.setattr(backend_job_page, "fetch", lambda url: None)
+    except ImportError:
+        pass
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_posting_fetch: let job_page.fetch run (with a fake transport)")

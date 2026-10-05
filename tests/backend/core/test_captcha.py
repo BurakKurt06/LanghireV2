@@ -217,6 +217,27 @@ class TestSolve:
 
 # ── handle(): the end-to-end policy ─────────────────────────────────────────
 class TestHandle:
+    async def test_invisible_hcaptcha_is_not_a_blocker(self, monkeypatch):
+        """Oracle's invisible hCaptcha runs by itself on submit: no solving, no abandoning."""
+        stub_evaluate(monkeypatch, {"type": captcha.HCAPTCHA_INVISIBLE, "sitekey": "k"})
+        monkeypatch.setattr(captcha, "_solve_sync", lambda key, ch: pytest.fail("must not solve"))
+        for enabled in (True, False):
+            assert await captcha.handle(FakeSession(), {"captcha_solver_enabled": enabled, "captcha_api_key": API_KEY}) is False
+
+    async def test_a_sites_own_human_check_needs_the_user(self, monkeypatch):
+        stub_evaluate(monkeypatch, {"type": captcha.HUMAN_CHECK, "sitekey": ""})
+        monkeypatch.setattr(captcha, "_solve_sync", lambda key, ch: pytest.fail("no solver can answer it"))
+        with pytest.raises(captcha.HumanCheckNeeded) as e:
+            await captcha.handle(FakeSession(), {"captcha_solver_enabled": True, "captcha_api_key": API_KEY})
+        assert "Trial mode" in e.value.reason
+
+    def test_detection_reads_the_site_key_from_any_hcaptcha_frame(self):
+        """The first frame is often the hidden checkbox-invisible one, without a key."""
+        js = captcha._DETECT_JS
+        assert "querySelectorAll('iframe[src*=\"hcaptcha.com\"]')" in js
+        assert "[?&#]sitekey=" in js
+        assert "hcaptcha_invisible" in js and "human_check" in js
+
     async def test_no_captcha_is_a_noop(self, monkeypatch):
         stub_evaluate(monkeypatch, None)
         assert await captcha.handle(FakeSession(), {"captcha_solver_enabled": True}) is False

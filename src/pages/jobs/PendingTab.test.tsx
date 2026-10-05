@@ -12,6 +12,7 @@ import {
   updateJobStatus,
   deleteJobs,
   tailorResumes,
+  saveJobNote,
   refineTailoredResume,
   getTailoredResumeContent,
 } from "../../lib/api";
@@ -53,6 +54,7 @@ vi.mock("../../lib/api", () => ({
   updateJobStatus: vi.fn(),
   deleteJobs: vi.fn(),
   tailorResumes: vi.fn(),
+  saveJobNote: vi.fn(),
   refineTailoredResume: vi.fn(),
   getTailoredResumeContent: vi.fn(),
 }));
@@ -66,6 +68,7 @@ const mockGetProfile = vi.mocked(getProfile);
 const mockUpdateJobStatus = vi.mocked(updateJobStatus);
 const mockDeleteJobs = vi.mocked(deleteJobs);
 const mockTailorResumes = vi.mocked(tailorResumes);
+const mockSaveJobNote = vi.mocked(saveJobNote);
 const mockRefineTailoredResume = vi.mocked(refineTailoredResume);
 const mockGetTailoredResumeContent = vi.mocked(getTailoredResumeContent);
 
@@ -267,9 +270,61 @@ describe("PendingTab", () => {
     await user.click(await screen.findByRole("radio", { name: "Trial run" }));
     await user.click(screen.getByRole("button", { name: "Got it, Start" }));
     await waitFor(() =>
-      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ review: true })),
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "trial" })),
     );
     expect(localStorage.getItem("langhire_apply_mode")).toBe("trial");
+  });
+
+  it("a note typed in the start dialog is saved on the job before it starts", async () => {
+    mockSaveJobNote.mockResolvedValue({ success: true });
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
+    await user.type(await screen.findByLabelText(/Note for the agent/), "Tick the terms box first");
+    await user.click(screen.getByRole("button", { name: "Got it, Start" }));
+    await waitFor(() => expect(mockStartApplying).toHaveBeenCalled());
+    expect(mockSaveJobNote).toHaveBeenCalledWith(pendingJob.url, "Tick the terms box first");
+    expect(mockSaveJobNote.mock.invocationCallOrder[0]).toBeLessThan(mockStartApplying.mock.invocationCallOrder[0]);
+  });
+
+  it("training mode is sent with the apply", async () => {
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
+    await user.click(await screen.findByRole("radio", { name: "Training" }));
+    expect(screen.getByText(/never submits, then closes it/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Got it, Start" }));
+    await waitFor(() =>
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "training" })),
+    );
+    expect(localStorage.getItem("langhire_apply_mode")).toBe("training");
+  });
+
+  it("marks a job a training run filled in", async () => {
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), practised_at: "2026-10-01T10:00:00Z" }] as never);
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    expect(await screen.findByText(/training run, not submitted/)).toBeInTheDocument();
+  });
+
+  it("a job that needs the user can be retried and explains why, without looking like an error", async () => {
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), status: "needs_you",
+      error: "This site asks you to confirm you're a real person." }] as never);
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    const reason = await screen.findByText(/confirm you're a real person/);
+    expect(reason.className).toContain("text-amber-700");
+    expect(screen.getByRole("button", { name: /jobItem\.retry/ })).toBeInTheDocument();
+    expect(screen.getAllByText("status.needsYou").length).toBeGreaterThan(0);
+  });
+
+  it("a closed posting can't be applied to", async () => {
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), status: "closed",
+      error: "The posting was taken down." }] as never);
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={{ ...stats, closed: 1 }} />);
+    expect(await screen.findByText("The posting was taken down.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /jobItem\.(apply|retry)$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /status\.closed \(1\)/ })).toBeInTheDocument();
   });
 
   it("full auto is the default", async () => {
@@ -280,7 +335,7 @@ describe("PendingTab", () => {
     expect(await screen.findByRole("radio", { name: "Full auto" })).toHaveAttribute("aria-checked", "true");
     await user.click(screen.getByRole("button", { name: "Got it, Start" }));
     await waitFor(() =>
-      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ review: false })),
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "auto" })),
     );
   });
 

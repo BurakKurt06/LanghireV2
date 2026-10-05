@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import AgentAttention from "./components/AgentAttention";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import Sidebar from "./components/layout/Sidebar";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -107,6 +108,7 @@ export default function App() {
   return (
     <div className="flex min-h-screen bg-background">
       <Sidebar />
+      <AgentAttention />
       <main className="flex-1 ml-60 px-10 py-8">
         <ErrorBoundary>
           <Suspense fallback={<PageLoader />}>

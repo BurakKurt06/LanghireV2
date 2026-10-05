@@ -7,12 +7,15 @@ import {
   pauseApplying,
   resumeApplying,
   reviewApplication,
+  answerHelp,
   getApplyStatus,
   getJobs,
   getMetricRuns,
   getSettings,
   exportJobsCsv,
+  saveJobsCsv,
 } from "../../lib/api";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 // i18n: identity translator so assertions can use raw keys.
 vi.mock("react-i18next", () => ({
@@ -26,22 +29,26 @@ vi.mock("../../lib/api", () => ({
   pauseApplying: vi.fn(),
   resumeApplying: vi.fn(),
   reviewApplication: vi.fn(),
+  answerHelp: vi.fn(),
   getApplyStatus: vi.fn(),
   getJobs: vi.fn(),
   getMetricRuns: vi.fn(),
   getSettings: vi.fn(),
   exportJobsCsv: vi.fn(),
+  saveJobsCsv: vi.fn(),
 }));
 
 const mockStopApplying = vi.mocked(stopApplying);
 const mockPauseApplying = vi.mocked(pauseApplying);
 const mockResumeApplying = vi.mocked(resumeApplying);
 const mockReviewApplication = vi.mocked(reviewApplication);
+const mockAnswerHelp = vi.mocked(answerHelp);
 const mockGetApplyStatus = vi.mocked(getApplyStatus);
 const mockGetJobs = vi.mocked(getJobs);
 const mockGetMetricRuns = vi.mocked(getMetricRuns);
 const mockGetSettings = vi.mocked(getSettings);
 const mockExportJobsCsv = vi.mocked(exportJobsCsv);
+const mockSaveJobsCsv = vi.mocked(saveJobsCsv);
 
 const idleApply = { running: false, mode: null, workers: 0, log: [], error: null, finished_at: null };
 
@@ -185,6 +192,30 @@ describe("HistoryTab", () => {
     expect(mockReviewApplication).toHaveBeenCalledWith("https://jobs.example/1", true);
   });
 
+  it("a stuck trial run shows a help card; the message goes with Continue", async () => {
+    const help = { url: "https://jobs.example/3", title: "Intern", company: "Cyberdyne", problem: "Save and Continue is disabled." };
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], help: [help] } as never);
+    mockAnswerHelp.mockResolvedValue({ success: true });
+    const user = userEvent.setup();
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+
+    expect(await screen.findByText("help.title")).toBeInTheDocument();
+    expect(screen.getByText("Save and Continue is disabled.")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("help.messageLabel"), "Tick the terms box first");
+    await user.click(screen.getByRole("button", { name: "help.continue" }));
+    expect(mockAnswerHelp).toHaveBeenCalledWith("https://jobs.example/3", "Tick the terms box first", false);
+  });
+
+  it("gives up on a stuck trial run", async () => {
+    const help = { url: "https://jobs.example/4", title: "Intern", company: "Cyberdyne", problem: "Stuck." };
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], help: [help] } as never);
+    mockAnswerHelp.mockResolvedValue({ success: true });
+    const user = userEvent.setup();
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+    await user.click(await screen.findByRole("button", { name: "help.giveUp" }));
+    expect(mockAnswerHelp).toHaveBeenCalledWith("https://jobs.example/4", "", true);
+  });
+
   it("skips an application waiting for review", async () => {
     const review = { url: "https://jobs.example/2", title: "Intern", company: "Acme", summary: "" };
     mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], reviews: [review] } as never);
@@ -211,40 +242,57 @@ describe("HistoryTab", () => {
     ).toBeInTheDocument();
   });
 
-  it("exports jobs as CSV and triggers a download when the button is clicked", async () => {
-    // jsdom lacks URL.createObjectURL / anchor download — stub them.
-    const createObjectURL = vi.fn(() => "blob:mock");
-    const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
-    const clickSpy = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
-
+  it("asks where to save the CSV and says where it went", async () => {
+    vi.mocked(saveDialog).mockResolvedValueOnce("C:/Users/me/Desktop/jobs.csv");
+    mockSaveJobsCsv.mockResolvedValue({ success: true, path: "C:/Users/me/Desktop/jobs.csv", rows: 2 } as never);
     const user = userEvent.setup();
     render(<HistoryTab onJobsChanged={onJobsChanged} />);
     await screen.findByText("Senior Engineer");
 
-    const exportBtn = screen.getByRole("button", { name: /controls\.exportCsv/ });
-    await user.click(exportBtn);
+    await user.click(screen.getByRole("button", { name: /controls\.exportCsv/ }));
+    await waitFor(() => expect(mockSaveJobsCsv).toHaveBeenCalledWith("C:/Users/me/Desktop/jobs.csv"));
+    expect(await screen.findByRole("status")).toHaveTextContent("controls.exportSaved");
+    expect(mockExportJobsCsv).not.toHaveBeenCalled();
+  });
 
-    await waitFor(() => expect(mockExportJobsCsv).toHaveBeenCalled());
+  it("does nothing when the save dialog is cancelled", async () => {
+    const user = userEvent.setup();
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+    await screen.findByText("Senior Engineer");
+    await user.click(screen.getByRole("button", { name: /controls\.exportCsv/ }));
+    await waitFor(() => expect(saveDialog).toHaveBeenCalled());
+    expect(mockSaveJobsCsv).not.toHaveBeenCalled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("outside the app it downloads the file and says so", async () => {
+    vi.mocked(saveDialog).mockRejectedValueOnce(new Error("not in Tauri"));
+    mockExportJobsCsv.mockResolvedValue("Job Title,Company" as never);
+    const createObjectURL = vi.fn(() => "blob:mock");
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL: vi.fn() });
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const user = userEvent.setup();
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+    await screen.findByText("Senior Engineer");
+
+    await user.click(screen.getByRole("button", { name: /controls\.exportCsv/ }));
+    await waitFor(() => expect(clickSpy).toHaveBeenCalled());
     expect(createObjectURL).toHaveBeenCalled();
-    expect(clickSpy).toHaveBeenCalled();
-
+    expect(await screen.findByRole("status")).toHaveTextContent("controls.exportDownloaded");
     clickSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
-  it("export button does not crash when the export request fails", async () => {
-    mockExportJobsCsv.mockRejectedValue(new Error("server error"));
+  it("shows the error when saving fails, and re-enables the button", async () => {
+    vi.mocked(saveDialog).mockResolvedValueOnce("C:/jobs.csv");
+    mockSaveJobsCsv.mockRejectedValue(new Error("disk full"));
     const user = userEvent.setup();
     render(<HistoryTab onJobsChanged={onJobsChanged} />);
     await screen.findByText("Senior Engineer");
 
     const exportBtn = screen.getByRole("button", { name: /controls\.exportCsv/ });
     await user.click(exportBtn);
-    await waitFor(() => expect(mockExportJobsCsv).toHaveBeenCalled());
-    // Button is re-enabled after failure.
+    expect(await screen.findByRole("status")).toHaveTextContent("controls.exportFailed");
     await waitFor(() => expect(exportBtn).not.toBeDisabled());
   });
 });

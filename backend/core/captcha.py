@@ -28,6 +28,9 @@ RECAPTCHA_V3 = "recaptcha_v3"
 HCAPTCHA = "hcaptcha"
 TURNSTILE = "turnstile"
 IMAGE_CAPTCHA = "image_captcha"
+# Detected but never sent to the solver:
+HCAPTCHA_INVISIBLE = "hcaptcha_invisible"  # runs by itself on submit; not a blocker
+HUMAN_CHECK = "human_check"  # a site's own "are you human" box; needs the user
 
 # Challenges that actually stand between the agent and a submitted form.
 #
@@ -50,6 +53,18 @@ class CaptchaUnsolved(Exception):
         self.challenge_type = challenge_type
         self.reason = reason
         super().__init__(f"CAPTCHA ({challenge_type}) could not be solved: {reason}")
+
+
+class HumanCheckNeeded(Exception):
+    """The site shows its own "are you human" check, which only the user can pass."""
+
+    challenge_type = HUMAN_CHECK
+
+    def __init__(self, page_url: str = ""):
+        self.page_url = page_url
+        self.reason = ("This site asks you to confirm you're a real person before it shows the application. "
+                       "Run this job in Trial mode and tick the box when the agent asks for help.")
+        super().__init__(self.reason)
 
 
 @dataclass
@@ -78,6 +93,13 @@ _DETECT_JS = r"""
     const r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0;
   };
+  const hiddenByAncestor = (el) => {
+    for (let p = el.parentElement; p; p = p.parentElement) {
+      const s = window.getComputedStyle(p);
+      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return true;
+    }
+    return false;
+  };
 
   // Cloudflare Turnstile
   const ts = document.querySelector('.cf-turnstile[data-sitekey], [data-sitekey][class*="turnstile"]');
@@ -99,10 +121,17 @@ _DETECT_JS = r"""
       action: '',
     };
   }
-  const hcFrame = document.querySelector('iframe[src*="hcaptcha.com"]');
-  if (hcFrame) {
-    const m = hcFrame.src.match(/[?&]sitekey=([^&]+)/);
-    return { type: 'hcaptcha', sitekey: m ? m[1] : '', action: '' };
+  // hCaptcha iframes: the site key may be in any of them (the first one is
+  // often the hidden "checkbox-invisible" frame, which has none). An
+  // invisible hCaptcha runs by itself on submit and usually passes without a
+  // puzzle; it only blocks once its challenge frame is actually showing.
+  const hcFrames = Array.from(document.querySelectorAll('iframe[src*="hcaptcha.com"]'));
+  if (hcFrames.length) {
+    const key = hcFrames.map((f) => (f.src.match(/[?&#]sitekey=([^&#]+)/) || [])[1]).find(Boolean) || '';
+    const checkbox = hcFrames.some((f) => /frame=checkbox(?!-invisible)/.test(f.src) && visible(f));
+    const challenge = hcFrames.some((f) => /frame=challenge/.test(f.src) && visible(f) && !hiddenByAncestor(f));
+    if (!checkbox && !challenge) return { type: 'hcaptcha_invisible', sitekey: key, action: '' };
+    return { type: 'hcaptcha', sitekey: key, action: '' };
   }
 
   // reCAPTCHA v3 / Enterprise — no visible checkbox, script carries render=<key>
@@ -133,6 +162,16 @@ _DETECT_JS = r"""
     return hay.includes('captcha') && visible(i);
   });
   if (img) return { type: 'image_captcha', sitekey: '', action: '', imgSrc: img.src };
+
+  // A site's own "are you human" page (e.g. Oleeo Protect's "Quick Check
+  // Needed"): a short page with a checkbox and no CAPTCHA service behind it.
+  // No solver can answer it; a person has to.
+  const body = (document.body && document.body.innerText) || '';
+  const humanText = /quick check needed|confirm you(?:'|’)?re a real person|i(?:'|’)?m not a robot|verify (?:that )?you(?:'|’)?re (?:a )?human|are you a robot/i;
+  if (body.length < 3000 && (humanText.test(document.title) || humanText.test(body))
+      && document.querySelector('input[type=checkbox], [role=checkbox]')) {
+    return { type: 'human_check', sitekey: '', action: '' };
+  }
 
   return null;
 })();
@@ -357,6 +396,10 @@ async def handle(browser_session, settings: dict) -> bool:
     challenge = await detect(browser_session)
     if challenge is None or not challenge.type:
         return False
+    if challenge.type == HCAPTCHA_INVISIBLE:
+        return False
+    if challenge.type == HUMAN_CHECK:
+        raise HumanCheckNeeded(challenge.page_url)
 
     if not settings.get("captcha_solver_enabled"):
         # Only a challenge that actually blocks submission ends the application.

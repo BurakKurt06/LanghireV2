@@ -81,6 +81,9 @@ class FakeHistory:
         return self._errors
 
 
+_run_fake_agent = [None]
+
+
 @pytest.fixture
 def run(data_dir, monkeypatch):
     """Run apply_to_job with everything external faked; returns (status, agent_kwargs, saved)."""
@@ -99,7 +102,12 @@ def run(data_dir, monkeypatch):
         def resume(self):
             self.paused = False
 
-        async def run(self):
+        async def run(self, **kwargs):
+            self.run_kwargs = kwargs
+            if FakeAgent.crash:
+                raise FakeAgent.crash
+            if FakeAgent.call_step:
+                await self.kwargs["register_new_step_callback"](None, None, 1)
             return self.history
 
         def stop(self):
@@ -112,7 +120,7 @@ def run(data_dir, monkeypatch):
         async def close(self):
             pass
 
-    async def fake_save(url, status, error=None):
+    async def fake_save(url, status, error=None, agent_words=False):
         saved.append((status, error))
 
     async def no_stealth(browser):
@@ -127,6 +135,9 @@ def run(data_dir, monkeypatch):
         detect_ats_platform=lambda domain: None,
     )
     FakeAgent.instances = []
+    FakeAgent.crash = None
+    FakeAgent.call_step = False
+    _run_fake_agent[0] = FakeAgent
     monkeypatch.setattr(apply_jobs, "Agent", FakeAgent)
     monkeypatch.setattr(apply_jobs, "_pause_state", {"paused": False})
     monkeypatch.setattr(apply_jobs, "BrowserSession", FakeBrowser)
@@ -324,7 +335,8 @@ def test_failure_reason(history, expected):
 def test_task_carries_the_form_rules(run):
     _, kwargs, _ = run()
     task = kwargs["task"]
-    assert "How did you hear about us" in task and "never LinkedIn" in task
+    assert "How did you hear about us" in task and "LinkedIn. Never an employee referral" in task
+    assert "type a keyword of the option you want" in task
     assert "hourly x 2080 = yearly" in task
     assert "Address Line 1 is the street address" in task
     assert "Never change a field that already holds a valid, sensible value" in task
@@ -425,3 +437,161 @@ def test_page_check_rules_always_and_review_rules_only_in_trial_runs(run):
     assert "REVIEW BEFORE SUBMITTING" in kwargs["task"]
     assert kwargs["step_timeout"] == apply_jobs.REVIEW_STEP_TIMEOUT
     assert "request_submit_review" in kwargs["tools"].registry.registry.actions
+
+
+def test_a_note_on_the_job_reaches_the_task(run, monkeypatch):
+    original = apply_jobs.apply_to_job
+
+    async def with_note(job, *args, **kwargs):
+        return await original({**job, "user_note": "Tick the terms box first"}, *args, **kwargs)
+
+    monkeypatch.setattr(apply_jobs, "apply_to_job", with_note)
+    _, kwargs, _ = run()
+    assert "NOTE FROM THE USER ABOUT THIS JOB" in kwargs["task"] and "Tick the terms box first" in kwargs["task"]
+
+
+def test_trial_runs_get_more_steps(run):
+    apply_jobs.set_trial_run(True)
+    try:
+        _, kwargs, _ = run()
+    finally:
+        apply_jobs.set_trial_run(False)
+    assert "maximum of 150 steps" in kwargs["task"]
+    _, kwargs, _ = run()
+    assert "maximum of 70 steps" in kwargs["task"]
+
+
+@pytest.mark.parametrize("agent_words,expected", [
+    (True, ("The page shows “Error: we could not save your application” after a timeout. " * 3).strip()),
+    (False, "Operation timed out. The page took too long to respond."),
+])
+def test_agents_own_explanation_is_saved_as_written(monkeypatch, agent_words, expected):
+    """Raw exceptions get friendlier text; the agent's explanation doesn't get rewritten."""
+    saved = {}
+    monkeypatch.setattr(apply_jobs, "update_job", lambda url, **fields: saved.update(fields))
+    text = "The page shows “Error: we could not save your application” after a timeout. " * 3
+    asyncio.run(apply_jobs.save_job_status("u", "failed", text, agent_words=agent_words))
+    assert saved["error"] == expected
+
+
+
+# ── training runs: fill in, never submit ────────────────────────────────────
+
+def test_training_run_never_submits_and_leaves_the_job_pending(run, monkeypatch):
+    updates = []
+    monkeypatch.setattr(apply_jobs, "update_job", lambda url, **fields: updates.append(fields))
+    apply_jobs.set_run_mode("training")
+    try:
+        status, kwargs, saved = run(history=FakeHistory(success=True))
+    finally:
+        apply_jobs.set_run_mode("auto")
+    assert status == "practised"
+    assert "TRAINING RUN (practice)" in kwargs["task"] and "NEVER click the final Submit" in kwargs["task"]
+    assert "REVIEW BEFORE SUBMITTING" not in kwargs["task"]
+    assert saved == []                                   # never marked applied
+    assert updates[-1]["status"] == "pending" and updates[-1]["practised_at"]
+
+
+def test_failed_training_run_is_a_normal_failure(run):
+    apply_jobs.set_run_mode("training")
+    try:
+        status, _, saved = run(history=FakeHistory(success=False, done_text="Couldn't open the form."))
+    finally:
+        apply_jobs.set_run_mode("auto")
+    assert status == "failed" and saved[-1] == ("failed", "Couldn't open the form.")
+
+
+@pytest.mark.parametrize("mode,trial,training", [
+    ("auto", False, False), ("trial", True, False), ("training", False, True), ("nonsense", False, False),
+])
+def test_run_modes(mode, trial, training):
+    apply_jobs.set_run_mode(mode)
+    try:
+        assert (apply_jobs.is_trial_run(), apply_jobs.is_training_run()) == (trial, training)
+    finally:
+        apply_jobs.set_run_mode("auto")
+
+
+# ── closed postings, human checks, crashes ──────────────────────────────────
+
+def _posting(**kw):
+    from core.job_page import Posting
+    return Posting(**kw)
+
+
+def test_a_closed_posting_ends_before_any_browser(run, monkeypatch):
+    monkeypatch.setattr(apply_jobs.config, "refresh_posting_details",
+                        lambda url, posting=None, mark_closed=True: _posting(closed=True, reason="The posting is gone (HTTP 404)."))
+    status, kwargs, saved = run()
+    assert status == "closed" and kwargs is None          # no agent was created
+    assert saved == [("closed", "The posting is gone (HTTP 404).")]
+
+
+def test_a_placeholder_title_gets_the_real_one(run, monkeypatch):
+    monkeypatch.setattr(apply_jobs.config, "refresh_posting_details",
+                        lambda url, posting=None, mark_closed=True: _posting(title="Data Intern", company="Northwind"))
+    job_title = {}
+    real = apply_jobs.apply_to_job
+
+    async def spy(job, *a, **k):
+        job["title"], job["company"] = "Pasted Link", ""
+        result = await real(job, *a, **k)
+        job_title.update(job)
+        return result
+
+    monkeypatch.setattr(apply_jobs, "apply_to_job", spy)
+    _run_fake_agent[0].history = FakeHistory()
+    asyncio.run(apply_jobs.apply_to_job({"url": GREENHOUSE}, GOOD_PROFILE, {}, [], easy_apply=False, worker_id=1))
+    assert (job_title["title"], job_title["company"]) == ("Data Intern", "Northwind")
+    task = _run_fake_agent[0].instances[-1].kwargs["task"]
+    assert '"title": "Data Intern", "company": "Northwind"' in task
+
+
+def test_agent_reporting_a_closed_posting_marks_it_closed(run):
+    status, _, saved = run(history=FakeHistory(success=False, done_text="POSTING CLOSED: Workday says the job is no longer available."))
+    assert status == "closed"
+    assert saved[-1] == ("closed", "Workday says the job is no longer available.")
+
+
+def test_a_sites_human_check_is_left_for_the_user(run, monkeypatch):
+    async def human_check(browser, settings):
+        raise apply_jobs._captcha.HumanCheckNeeded("https://soylent.example")
+
+    monkeypatch.setattr(apply_jobs._captcha, "handle", human_check)
+    monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *a: None)
+    _run_fake_agent[0].call_step = True
+    status, _, saved = run(history=FakeHistory(success=False, done_text="Blocked by a check."))
+    assert status == "needs_you"
+    assert saved[-1][0] == "needs_you" and "Trial mode" in saved[-1][1]
+
+
+def test_in_a_trial_run_the_agent_asks_for_help_with_the_human_check(run, monkeypatch):
+    async def human_check(browser, settings):
+        raise apply_jobs._captcha.HumanCheckNeeded()
+
+    monkeypatch.setattr(apply_jobs._captcha, "handle", human_check)
+    monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *a: None)
+    _run_fake_agent[0].call_step = True
+    apply_jobs.set_run_mode("trial")
+    try:
+        status, kwargs, _ = run(history=FakeHistory(success=True))
+    finally:
+        apply_jobs.set_run_mode("auto")
+    assert status == "applied"
+    assert "never tick it yourself, ask the user" in kwargs["task"]
+
+
+def test_an_unexpected_crash_is_retried_once(run, monkeypatch):
+    monkeypatch.setattr(apply_jobs, "_crash_retries", {})
+    _run_fake_agent[0].crash = TypeError("int() argument must be a string, a bytes-like object or a real number, not 'NoneType'")
+    first, _, saved = run()
+    assert first == "retry" and saved[-1] == ("pending", None)
+    _run_fake_agent[0].crash = TypeError("again")
+    second, _, saved = run()
+    assert second == "failed" and saved[-1] == ("failed", "again")
+
+
+def test_the_run_gets_our_step_limit_and_page_wait(run):
+    run()
+    agent = _run_fake_agent[0].instances[-1]
+    assert agent.run_kwargs == {"max_steps": 70, "on_step_start": apply_jobs.wait_for_page_content}

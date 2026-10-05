@@ -11,6 +11,7 @@ export interface Education {
   degree: string;
   major?: string; // absent in profiles saved before the field existed
   school: string;
+  start_date?: string; // absent in profiles saved before the field existed
   graduation: string;
 }
 
@@ -169,7 +170,7 @@ export interface Job {
   company: string;
   location: string;
   easy_apply: boolean | null;
-  status: "pending" | "in_progress" | "applied" | "failed" | "blocked";
+  status: JobStatus;
   source?: string;
   search_title?: string;
   collected_at?: string;
@@ -177,6 +178,10 @@ export interface Job {
   error?: string;
   description?: string;
   tailored_resume_path?: string;
+  /** The user's note for the agent, used on the next attempt. */
+  user_note?: string;
+  /** When a training run last filled this job in (without submitting). */
+  practised_at?: string;
 }
 
 // ── Resume Tailoring ─────────────────────────────────────────────────────
@@ -333,6 +338,8 @@ export interface ApplyStatus {
   paused?: boolean;
   /** Applications filled in and waiting for the user's approval to submit. */
   reviews?: PendingReview[];
+  /** Trial-run applications stuck and waiting for the user's help. */
+  help?: HelpRequest[];
   mode: string | null;
   workers: number;
   log: string[];
@@ -340,7 +347,8 @@ export interface ApplyStatus {
   finished_at: string | null;
 }
 
-export type JobStatus = "pending" | "in_progress" | "applied" | "failed" | "blocked";
+// closed: the posting was taken down. needs_you: a step only the user can do (a "confirm you're human" box).
+export type JobStatus = "pending" | "in_progress" | "applied" | "failed" | "blocked" | "closed" | "needs_you";
 
 export interface JobStats {
   total: number;
@@ -349,6 +357,8 @@ export interface JobStats {
   failed: number;
   blocked: number;
   in_progress: number;
+  closed?: number;
+  needs_you?: number;
 }
 
 export interface DashboardResponse {
@@ -375,6 +385,13 @@ export interface SetupStatus {
 }
 
 // ── Q&A Repository ───────────────────────────────────────────────────────
+export interface HelpRequest {
+  url: string;
+  title: string;
+  company: string;
+  problem: string;
+}
+
 export interface PendingReview {
   url: string;
   title: string;

@@ -22,16 +22,20 @@ import {
   pauseApplying,
   resumeApplying,
   reviewApplication,
+  answerHelp,
   getApplyStatus,
   getJobs,
   getMetricRuns,
   getSettings,
   exportJobsCsv,
+  saveJobsCsv,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import LogLine from "../../components/LogLine";
 import { useTranslation } from "react-i18next";
-import type { Job, RunMetric, AppSettings, PendingReview } from "../../lib/types";
+import type { Job, RunMetric, AppSettings, PendingReview, HelpRequest } from "../../lib/types";
+import { CircleAlert } from "lucide-react";
 
 interface AppliedJobRow {
   job: Job;
@@ -48,6 +52,8 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
   const [reviews, setReviews] = useState<PendingReview[]>([]);
+  const [helpRequests, setHelpRequests] = useState<HelpRequest[]>([]);
+  const [helpReplies, setHelpReplies] = useState<Record<string, string>>({});
   const [log, setLog] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const logRef = useRef<HTMLDivElement>(null);
@@ -63,6 +69,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
         setRunning(s.running);
         setPaused(!!s.paused);
         setReviews(s.reviews || []);
+        setHelpRequests(s.help || []);
         setLog(s.log || []);
       }),
       loadAppliedJobs(),
@@ -127,6 +134,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
             setRunning(s.running);
             setPaused(!!s.paused);
             setReviews(s.reviews || []);
+            setHelpRequests(s.help || []);
             setLog(s.log || []);
           }
         })
@@ -152,6 +160,12 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
     setPaused(false);
   };
 
+  const handleHelp = async (url: string, giveUp: boolean) => {
+    await answerHelp(url, helpReplies[url] || "", giveUp);
+    setHelpRequests((current) => current.filter((h) => h.url !== url));
+    setHelpReplies((current) => ({ ...current, [url]: "" }));
+  };
+
   const handleReview = async (url: string, approve: boolean) => {
     await reviewApplication(url, approve);
     setReviews((current) => current.filter((r) => r.url !== url));
@@ -163,34 +177,63 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
   };
 
   const [exporting, setExporting] = useState(false);
+  const [exportMessage, setExportMessage] = useState<{ text: string; error: boolean } | null>(null);
 
   // Allow the global Cmd/Ctrl+E shortcut to trigger an export from this tab.
+  // The listener calls the latest handleExport through a ref.
+  const exportRef = useRef<() => Promise<void>>(async () => {});
   useEffect(() => {
-    const onExport = () => { void handleExport(); };
+    const onExport = () => { void exportRef.current(); };
     window.addEventListener("langhire:export", onExport);
     return () => window.removeEventListener("langhire:export", onExport);
   }, []);
 
   const handleExport = async () => {
     setExporting(true);
+    setExportMessage(null);
     try {
-      const csv = await exportJobsCsv();
-      const blob = new Blob([csv], { type: "text/csv" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "langhirev2-jobs.csv";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      // In the app: ask where to save, so the file doesn't land silently in Downloads.
+      let path: string | null | undefined;
+      let hasDialog = true;
+      try {
+        path = await saveDialog({
+          defaultPath: "langhirev2-jobs.csv",
+          filters: [{ name: "CSV", extensions: ["csv"] }],
+        });
+      } catch {
+        hasDialog = false; // not running inside the app (browser preview)
+      }
+      if (hasDialog) {
+        if (!path) return; // cancelled
+        const res = await saveJobsCsv(path.toLowerCase().endsWith(".csv") ? path : `${path}.csv`);
+        setExportMessage({ text: t("controls.exportSaved", { path: res.path }), error: false });
+      } else {
+        const csv = await exportJobsCsv();
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "langhirev2-jobs.csv";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        setExportMessage({ text: t("controls.exportDownloaded"), error: false });
+      }
       trackEvent("jobs_exported_csv");
-    } catch {
-      /* surfaced via disabled state reset; non-critical */
+    } catch (e) {
+      setExportMessage({
+        text: t("controls.exportFailed", { error: e instanceof Error ? e.message : String(e) }),
+        error: true,
+      });
     } finally {
       setExporting(false);
     }
   };
+
+  useEffect(() => {
+    exportRef.current = handleExport;
+  });
 
   const toggleExpand = (url: string) => {
     setExpandedUrl(expandedUrl === url ? null : url);
@@ -249,6 +292,32 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
               {paused ? t("controls.pausedHint") : t("controls.pauseHint")}
             </p>
           )}
+          {running && helpRequests.map((help) => (
+            <div key={help.url} role="alert" className="rounded-2xl border border-amber-400 bg-amber-50 dark:bg-amber-500/10 p-4 mb-3">
+              <p className="text-sm font-semibold text-foreground inline-flex items-center gap-1.5">
+                <CircleAlert className="w-4 h-4 text-amber-600" />
+                {t("help.title", { title: help.title, company: help.company })}
+              </p>
+              <p className="text-xs text-foreground mt-2 whitespace-pre-wrap break-words">{help.problem}</p>
+              <p className="text-xs text-muted-foreground mt-2">{t("help.hint")}</p>
+              <textarea
+                aria-label={t("help.messageLabel")}
+                value={helpReplies[help.url] || ""}
+                onChange={(e) => setHelpReplies((current) => ({ ...current, [help.url]: e.target.value }))}
+                placeholder={t("help.messagePlaceholder")}
+                rows={2}
+                className="input-base text-sm mt-2"
+              />
+              <div className="flex gap-2 mt-2">
+                <button onClick={() => handleHelp(help.url, false)} className="btn-primary text-xs px-3 py-1.5">
+                  {t("help.continue")}
+                </button>
+                <button onClick={() => handleHelp(help.url, true)} className="btn-secondary text-xs px-3 py-1.5">
+                  {t("help.giveUp")}
+                </button>
+              </div>
+            </div>
+          ))}
           {running && reviews.map((review) => (
             <div key={review.url} role="alert" className="rounded-2xl border border-primary/40 bg-primary/5 p-4 mb-3">
               <p className="text-sm font-semibold text-foreground">
@@ -302,6 +371,14 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
               {t("controls.exportCsv", "Export CSV")}
             </button>
           </div>
+          {exportMessage && (
+            <p
+              role="status"
+              className={`-mt-2 mb-3 text-[13px] break-all ${exportMessage.error ? "text-destructive" : "text-muted-foreground"}`}
+            >
+              {exportMessage.text}
+            </p>
+          )}
 
           <div className="divide-y divide-border rounded-xl border border-border overflow-hidden">
             {appliedJobs.map((row) => {

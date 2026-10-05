@@ -238,6 +238,19 @@ class TestChatModel:
         assert request.headers["chatgpt-account-id"] == "acct-1"
         assert request.headers["originator"] == "codex_cli_rs"
 
+    def test_one_cache_key_and_session_per_model_object(self, codex):
+        """The backend only caches the repeated prompt prefix with both the key and the session header."""
+        reply = (200, _sse({"type": "response.output_text.delta", "delta": "ok"}, {"type": "response.completed", "response": {}}))
+        codex["reply"] = reply
+        llm = chatgpt_llm.ChatChatGPT()
+        asyncio.run(llm.ainvoke(_messages()))
+        asyncio.run(llm.ainvoke(_messages()))
+        first, second = codex["requests"][:2]
+        assert json.loads(first.content)["prompt_cache_key"] == llm.session_id
+        assert json.loads(second.content)["prompt_cache_key"] == llm.session_id
+        assert first.headers["session_id"] == second.headers["session_id"] == llm.session_id
+        assert chatgpt_llm.ChatChatGPT().session_id != llm.session_id
+
     def test_text_only_in_the_final_event(self, codex):
         codex["reply"] = (200, _sse({"type": "response.completed", "response": {"output": [
             {"type": "message", "content": [{"type": "output_text", "text": "hello"}]}]}}))

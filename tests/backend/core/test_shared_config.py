@@ -484,3 +484,27 @@ def test_screening_answers_reach_the_agent(base_profile, no_op_store):
 
 def test_no_screening_section_when_empty(base_profile, no_op_store):
     assert "SCREENING ANSWERS" not in sc.build_memory_context(base_profile, qa={})
+
+
+@pytest.mark.parametrize("edu,expected", [
+    ({"degree": "B.S.", "major": "Computer Science", "school": "State University", "graduation": "May 2028"},
+     "B.S. in Computer Science from State University (May 2028)"),
+    ({"degree": "B.S.", "major": "Computer Science", "school": "State University", "start_date": "September 2024", "graduation": "May 2028"},
+     "B.S. in Computer Science from State University (started September 2024, graduation May 2028)"),
+    ({"degree": "B.S.", "school": "State University", "start_date": "September 2024"},
+     "B.S. from State University (started September 2024)"),
+])
+def test_education_includes_the_start_date(edu, expected):
+    assert sc._describe_education(edu) == expected
+
+
+def test_default_profile_has_an_education_start_date():
+    from core.config import DEFAULT_PROFILE
+    assert "start_date" in DEFAULT_PROFILE["education"]
+
+
+def test_learning_instructions_ask_for_few_new_learnings():
+    from core import shared_config
+    import inspect
+    source = inspect.getsource(shared_config.build_memory_context)
+    assert "at most 3 per run" in source and "at least 2-3" not in source

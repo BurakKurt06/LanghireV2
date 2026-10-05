@@ -1,11 +1,15 @@
-/** "Full auto" or "Trial run" (wait for approval before each submit), remembered between runs. */
-export type ApplyMode = "auto" | "trial";
+/**
+ * "Full auto", "Trial run" (wait for approval before each submit) or "Training"
+ * (fill everything in, never submit), remembered between runs.
+ */
+export type ApplyMode = "auto" | "trial" | "training";
 
 const STORAGE_KEY = "langhire_apply_mode";
 
 export function loadApplyMode(): ApplyMode {
   try {
-    return localStorage.getItem(STORAGE_KEY) === "trial" ? "trial" : "auto";
+    const stored = localStorage.getItem(STORAGE_KEY);
+    return stored === "trial" || stored === "training" ? stored : "auto";
   } catch {
     return "auto";
   }

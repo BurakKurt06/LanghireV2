@@ -8,7 +8,11 @@
   },
   "controls": {
     "title": "Application Controls",
-    "loginInfo": "<strong>Login:</strong> A browser will open and check LinkedIn & Gmail. If you're not logged in, the agent will wait for you to log in manually — then proceed automatically.",
+    "loginInfo": "<strong>Sign-ins:</strong> Sign in to Gmail (for verification codes) and LinkedIn once in Settings → Accounts; every run uses those sign-ins.",
+    "exportCsv": "Export CSV",
+    "exportSaved": "Saved to {{path}}",
+    "exportDownloaded": "Saved to your Downloads folder as langhirev2-jobs.csv",
+    "exportFailed": "Export failed: {{error}}",
     "limitLabel": "Limit (optional)",
     "limitPlaceholder": "No limit — apply to all",
     "limitHelp": "Leave blank to apply to all {{count}} pending jobs",
@@ -38,5 +42,14 @@
     "hint": "Check the application in the browser and fix anything that's wrong. Your changes are kept and saved as answers. Then approve it, or skip it to leave it unsent.",
     "approve": "Approve & submit",
     "skip": "Skip, don't submit"
-  }
+  },
+  "help": {
+    "title": "Needs your help: {{title}} at {{company}}",
+    "hint": "The browser stays open. Fix it there if you can, and/or tell the agent what to do, then Continue. Your message is also kept for this job's later attempts.",
+    "messageLabel": "Message for the agent",
+    "messagePlaceholder": "e.g. The Save and Continue button needs the terms checkbox ticked first",
+    "continue": "Continue",
+    "giveUp": "Give up"
+  },
+  "attention": "The agent needs you ({{count}})"
 }

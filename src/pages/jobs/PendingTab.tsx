@@ -21,6 +21,8 @@ import {
   ChevronRight,
   Sparkles,
   Send,
+  Lock,
+  Hand,
 } from "lucide-react";
 import {
   getJobs,
@@ -32,6 +34,7 @@ import {
   updateJobStatus,
   deleteJobs,
   tailorResumes,
+  saveJobNote,
   refineTailoredResume,
   getTailoredResumeContent,
 } from "../../lib/api";
@@ -48,6 +51,8 @@ const STATUS_ICONS: Record<JobStatus, typeof CheckCircle> = {
   failed: XCircle,
   blocked: Ban,
   in_progress: Loader2,
+  closed: Lock,
+  needs_you: Hand,
 };
 
 const STATUS_STYLES: Record<JobStatus, { color: string; bg: string }> = {
@@ -56,7 +61,12 @@ const STATUS_STYLES: Record<JobStatus, { color: string; bg: string }> = {
   failed: { color: "text-destructive", bg: "bg-[#FFF0F0]" },
   blocked: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
   in_progress: { color: "text-primary", bg: "bg-[#FFF0F3]" },
+  closed: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
+  needs_you: { color: "text-amber-700", bg: "bg-amber-50" },
 };
+
+// Jobs that Apply / Retry can start.
+const STARTABLE = (status: JobStatus) => status === "pending" || status === "failed" || status === "needs_you";
 
 interface PendingTabProps {
   onJobsChanged: () => void;
@@ -101,6 +111,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   const [applyingUrl, setApplyingUrl] = useState<string | null>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [applyMode, setApplyMode] = useState<ApplyMode>(loadApplyMode);
+  // A note for the agent on the job being started (e.g. how to get past its last error).
+  const [applyNote, setApplyNote] = useState("");
   const changeApplyMode = (mode: ApplyMode) => {
     setApplyMode(mode);
     saveApplyMode(mode);
@@ -142,6 +154,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     failed: t("status.failed"),
     blocked: t("status.blocked"),
     in_progress: t("status.inProgress"),
+    closed: t("status.closed"),
+    needs_you: t("status.needsYou"),
   };
 
   const fetchJobs = (isBackgroundRefresh = false) => {
@@ -257,6 +271,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   const handleApplySingle = (jobUrl: string) => {
     setPendingApplyUrl(jobUrl);
+    setApplyNote(jobs.find((j) => j.url === jobUrl)?.user_note ?? "");
     setShowConfirmDialog(true);
   };
 
@@ -264,12 +279,16 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     setShowConfirmDialog(false);
     if (!pendingApplyUrl) return;
     try {
+      const job = jobs.find((j) => j.url === pendingApplyUrl);
+      if (applyNote.trim() !== (job?.user_note ?? "").trim()) {
+        await saveJobNote(pendingApplyUrl, applyNote);
+      }
       await tailorBeforeApplying([pendingApplyUrl]);
       const res = await startApplying({
         job_url: pendingApplyUrl,
         workers: 1,
         mode: "all",
-        review: applyMode === "trial",
+        run_mode: applyMode,
       });
       if (!res.success) {
         alert(res.message);
@@ -343,7 +362,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   // Multi-select helpers
   const selectableJobs = jobs.filter(
-    (j) => j.status === "pending" || j.status === "failed"
+    (j) => STARTABLE(j.status)
   );
   const allSelectableSelected =
     selectableJobs.length > 0 &&
@@ -376,7 +395,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         job_urls: [...selectedJobs],
         workers: 1,
         mode: "all",
-        review: applyMode === "trial",
+        run_mode: applyMode,
       });
       if (!res.success) {
         alert(res.message);
@@ -569,7 +588,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           { value: "", label: t("filter.all"), count: stats.total - (stats.applied || 0) },
           { value: "pending", label: t("status.pending"), count: stats.pending },
           { value: "failed", label: t("status.failed"), count: stats.failed },
+          { value: "needs_you", label: t("status.needsYou"), count: stats.needs_you ?? 0 },
           { value: "blocked", label: t("status.blocked"), count: stats.blocked },
+          { value: "closed", label: t("status.closed"), count: stats.closed ?? 0 },
         ].map(({ value, label, count }) => (
           <button
             key={value}
@@ -642,7 +663,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             const icon = STATUS_ICONS[job.status] || STATUS_ICONS.pending;
             const styles = STATUS_STYLES[job.status] || STATUS_STYLES.pending;
             const StatusIcon = icon;
-            const isSelectable = job.status === "pending" || job.status === "failed";
+            const isSelectable = STARTABLE(job.status);
             const hasTailoredResume = !!job.tailored_resume_path;
             const isExpanded = expandedJob === job.url;
             return (
@@ -680,11 +701,16 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                           {job.company || t("jobItem.unknown")} ·{" "}
                           {job.location || "—"}
                         </p>
-                        {job.error && (
+                        {job.error && (job.status === "closed" || job.status === "needs_you" ? (
+                          // Not an error: why it's closed, or what the user needs to do.
+                          <p className="text-[13px] text-amber-700 mt-1 whitespace-pre-wrap break-words select-text">
+                            {job.error}
+                          </p>
+                        ) : (
                           <p className="text-[13px] text-destructive mt-1 whitespace-pre-wrap break-words select-text">
                             {t("jobItem.error", { error: job.error })}
                           </p>
-                        )}
+                        ))}
                         {job.collected_at && (
                           <p className="text-[11px] text-muted-foreground mt-1">
                             {t("jobItem.collected", {
@@ -694,6 +720,11 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                               t("jobItem.applied", {
                                 date: new Date(job.applied_at).toLocaleDateString(),
                               })}
+                          </p>
+                        )}
+                        {job.practised_at && job.status === "pending" && (
+                          <p className="text-[11px] text-muted-foreground mt-1">
+                            Practised {new Date(job.practised_at).toLocaleDateString()} (training run, not submitted)
                           </p>
                         )}
                         {/* Clickable expand button for tailored jobs */}
@@ -719,7 +750,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                         <StatusIcon className="w-3 h-3" />{" "}
                         {STATUS_LABELS[job.status] || STATUS_LABELS.pending}
                       </span>
-                      {(job.status === "pending" || job.status === "failed") && (
+                      {STARTABLE(job.status) && (
                         <>
                           <button
                             onClick={() => handleGenerateCoverLetter(job)}
@@ -734,7 +765,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                             title={
                               applyingUrl
                                 ? t("jobItem.applyRunningTitle")
-                                : job.status === "failed"
+                                : job.status !== "pending"
                                 ? t("jobItem.retryTitle")
                                 : t("jobItem.applyTitle")
                             }
@@ -747,7 +778,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                             )}
                             {applyingUrl === job.url
                               ? t("jobItem.applying")
-                              : job.status === "failed"
+                              : job.status !== "pending"
                               ? t("jobItem.retry")
                               : t("jobItem.apply")}
                           </button>
@@ -773,7 +804,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                             onClick={(e) => e.stopPropagation()}
                           >
                             {(
-                              ["pending", "applied", "failed", "blocked"] as const
+                              ["pending", "applied", "failed", "blocked", "closed"] as const
                             ).map((s) => (
                               <button
                                 key={s}
@@ -961,6 +992,24 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         }}
       >
         <ApplyModeToggle value={applyMode} onChange={changeApplyMode} />
+        {pendingApplyUrl && (
+          <div>
+            <label htmlFor="apply-note" className="block text-sm font-semibold text-foreground mb-1.5">
+              Note for the agent <span className="font-normal text-muted-foreground">(optional)</span>
+            </label>
+            <textarea
+              id="apply-note"
+              value={applyNote}
+              onChange={(e) => setApplyNote(e.target.value)}
+              rows={3}
+              className="input-base text-sm"
+              placeholder="e.g. On the last page, tick the terms checkbox before Save and Continue"
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Told to the agent at the start of this job, and kept for later attempts.
+            </p>
+          </div>
+        )}
       </AutomationDialog>
 
       {/* Cover Letter Modal */}

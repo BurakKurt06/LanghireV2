@@ -45,6 +45,8 @@
     "applied": "Applied",
     "failed": "Failed",
     "blocked": "Blocked",
-    "inProgress": "In Progress"
+    "inProgress": "In Progress",
+    "closed": "Closed",
+    "needsYou": "Needs you"
   }
 }

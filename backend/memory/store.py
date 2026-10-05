@@ -313,6 +313,24 @@ class MemoryStore:
         normalized = f"{domain}|{category}|{content.lower().strip()}"
         return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
+    # Word overlap at or above this makes a new memory a copy of an old one.
+    NEAR_DUPLICATE_OVERLAP = 0.5
+
+    def _near_duplicate(self, conn, content: str, domain: str, category: str):
+        """An existing memory for the same site and category saying nearly the same thing, or None."""
+        words = self._normalize_qa(content)
+        rows = conn.execute(
+            "SELECT id, confidence, access_count, content FROM memories "
+            "WHERE website_domain = ? AND category = ?",
+            (domain, category),
+        ).fetchall()
+        best, best_overlap = None, 0.0
+        for row in rows:
+            overlap = self._token_overlap(words, self._normalize_qa(row["content"]))
+            if overlap >= self.NEAR_DUPLICATE_OVERLAP and overlap > best_overlap:
+                best, best_overlap = row, overlap
+        return best
+
     # ── Core CRUD ─────────────────────────────────────────────────────────
 
     def add(
@@ -339,11 +357,13 @@ class MemoryStore:
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
 
-        # Check for duplicate
+        # Check for duplicate: the same text, or a near-copy of a memory for the
+        # same site and category (agents reworded the same tip run after run:
+        # 200 memories held ~20 topics with 4+ near-copies each).
         existing = conn.execute(
             "SELECT id, confidence, access_count FROM memories WHERE content_hash = ?",
             (content_hash,),
-        ).fetchone()
+        ).fetchone() or self._near_duplicate(conn, content, website_domain, category)
 
         if existing:
             new_confidence = min(1.0, existing["confidence"] + 0.05)

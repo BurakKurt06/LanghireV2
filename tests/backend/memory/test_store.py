@@ -238,8 +238,10 @@ def test_search_filters_by_category_and_ats(store):
 
 def test_search_respects_limit(store):
     """The limit caps the number of returned rows."""
-    for i in range(5):
-        store.add(f"item {i}", "x.com", "navigation")
+    tips = ["Click Apply at the top", "Upload the resume first", "Wait for the form to render",
+            "Dismiss the cookie banner", "Use Save and Continue to advance"]
+    for tip in tips:
+        store.add(tip, "x.com", "navigation")
     assert len(store.search(website_domain="x.com", limit=3)) == 3
 
 
@@ -682,3 +684,20 @@ def test_users_answers_come_first_in_the_prompt(store):
         store.qa_add(f"Agent question number {i}?", "a")
     store.qa_set_answer("What is your GPA exactly?", "3.6", source="user")
     assert list(store.qa_get_all_for_prompt(limit=1)) == ["What is your GPA exactly?"]
+
+
+def test_a_reworded_copy_reinforces_instead_of_adding(store):
+    """Agents rewrote the same tip run after run; a near-copy for the same site/category is one memory."""
+    assert store.add("The salary prompt requires an annual or monthly expectation, while the profile only provides an hourly range",
+                     "jj.wd5.myworkdayjobs.com", "form_strategy") is True
+    assert store.add("The salary prompt asks annual or monthly figures while the profile states only an hourly range",
+                     "jj.wd5.myworkdayjobs.com", "form_strategy") is False
+    assert len(store.search(website_domain="jj.wd5.myworkdayjobs.com", success_only=False)) == 1
+
+
+def test_different_tips_or_sites_stay_separate(store):
+    tip = "Click Apply, then choose Autofill with Resume"
+    assert store.add(tip, "a.myworkdayjobs.com", "navigation") is True
+    assert store.add(tip, "b.myworkdayjobs.com", "navigation") is True        # another site
+    assert store.add(tip, "a.myworkdayjobs.com", "form_strategy") is True     # another category
+    assert store.add("Dismiss the cookie banner before scrolling", "a.myworkdayjobs.com", "navigation") is True

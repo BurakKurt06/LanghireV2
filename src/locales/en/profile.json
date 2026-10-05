@@ -51,6 +51,8 @@
     "degree": "Degree",
     "major": "Major",
     "school": "School",
+    "startDate": "Start date",
+    "startDatePlaceholder": "e.g. September 2024",
     "graduation": "Graduation"
   },
   "salary": {

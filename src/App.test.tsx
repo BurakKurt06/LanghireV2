@@ -35,6 +35,7 @@ vi.mock("./lib/analytics", () => ({
 vi.mock("./lib/api", () => ({
   getSetupStatus: vi.fn(),
   getSettings: vi.fn(),
+  getApplyStatus: vi.fn(() => Promise.resolve({ running: false, log: [] })),
 }));
 
 // ── Heavy children: stub Sidebar + SetupWizard, and lazy pages ────────────────

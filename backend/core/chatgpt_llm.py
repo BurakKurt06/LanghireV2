@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 
 import httpx
 
@@ -22,6 +23,12 @@ class ChatChatGPT:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.timeout = timeout
+        # One id per model object (one per application): sent as the prompt
+        # cache key and session header, the way the Codex CLI does. Without
+        # both, the backend served nothing from cache; with them, a repeated
+        # 9K-token prefix came back ~98% cached. Every step of a run repeats
+        # the same system prompt and instructions (~11K tokens).
+        self.session_id = str(uuid.uuid4())
 
     @property
     def provider(self) -> str:
@@ -52,6 +59,7 @@ class ChatChatGPT:
             "store": False,
             "stream": True,
             "include": [],
+            "prompt_cache_key": self.session_id,
         }
         if self.reasoning_effort:
             body["reasoning"] = {"effort": self.reasoning_effort}
@@ -90,7 +98,8 @@ class ChatChatGPT:
     async def _stream(self, body: dict, access: str, account: str):
         from browser_use.llm.exceptions import ModelProviderError, ModelRateLimitError
 
-        headers = {**chatgpt_auth.request_headers(access, account), "Accept": "text/event-stream"}
+        headers = {**chatgpt_auth.request_headers(access, account), "Accept": "text/event-stream",
+                   "session_id": self.session_id, "conversation_id": self.session_id}
         parts, usage = [], None
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=20)) as client:

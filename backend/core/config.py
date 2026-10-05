@@ -64,7 +64,7 @@ DEFAULT_PROFILE = {
     "willing_to_relocate": False,
     "preferred_work_mode": "hybrid",
     "years_of_experience": 0,
-    "education": {"degree": "", "major": "", "school": "", "graduation": ""},
+    "education": {"degree": "", "major": "", "school": "", "start_date": "", "graduation": ""},
     "current_role": "",
     "target_job_titles": [],
     "target_locations": [],

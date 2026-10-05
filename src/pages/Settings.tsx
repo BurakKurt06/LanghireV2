@@ -7,6 +7,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
 import { PageHeader, LoadingSpinner, Section, PasswordInput } from "../components/ui";
 import TagInput from "../components/ui/TagInput";
+import LoginCards from "../components/LoginCards";
 import type { PluginConfig, InstalledBrowser } from "../lib/types";
 
 export default function SettingsPage() {
@@ -196,6 +197,11 @@ export default function SettingsPage() {
           </button>
         </div>
         <p className="text-[13px] text-muted-foreground mt-2">PDF resume file used for job applications</p>
+      </Section>
+
+      {/* Gmail / LinkedIn sign-in for the agent's browser */}
+      <Section title="Accounts">
+        <LoginCards />
       </Section>
 
       {/* Sensitive Data */}

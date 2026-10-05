@@ -1039,3 +1039,167 @@ class TestApplyReview:
         auth_client.post("/apply/start", json={"mode": "all"})
         assert not apply_jobs.is_trial_run()
         main._apply_status["running"] = False
+
+
+class TestHelpAndNotes:
+    def test_help_reply_reaches_the_waiting_agent(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        replies = []
+        monkeypatch.setattr(apply_jobs, "answer_help", lambda url, msg, give_up: replies.append((url, msg, give_up)) or True)
+        main._apply_status.update({"running": True, "log": []})
+        try:
+            body = {"url": "u", "message": "Tick the box", "give_up": False}
+            assert auth_client.post("/apply/help", json=body).json() == {"success": True}
+            assert replies == [("u", "Tick the box", False)]
+            assert "Continuing" in main._apply_status["log"][-1]
+        finally:
+            main._apply_status["running"] = False
+
+    def test_status_lists_help_requests(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        pending = [{"url": "u", "title": "Intern", "company": "Cyberdyne", "problem": "stuck"}]
+        monkeypatch.setattr(apply_jobs, "pending_help", lambda: pending)
+        main._apply_status.update({"running": True, "log": []})
+        try:
+            assert auth_client.get("/apply/status").json()["help"] == pending
+        finally:
+            main._apply_status["running"] = False
+
+    def test_note_is_saved_on_the_job(self, auth_client):
+        auth_client.post("/jobs/add", json={"url": "https://boards.greenhouse.io/acme/jobs/9", "title": "Intern", "company": "Acme"})
+        url = "https://boards.greenhouse.io/acme/jobs/9"
+        assert auth_client.put("/jobs/note", json={"url": url, "note": "  Tick the box  "}).json() == {"success": True}
+        job = next(j for j in auth_client.get("/jobs").json() if j["url"] == url)
+        assert job["user_note"] == "Tick the box"
+
+    def test_note_for_an_unknown_job(self, auth_client):
+        assert auth_client.put("/jobs/note", json={"url": "https://nope.example/1", "note": "x"}).status_code == 404
+
+
+def test_start_passes_the_run_mode(auth_client, monkeypatch):
+    from cli import apply_jobs
+    monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
+    monkeypatch.setattr(main, "_run_async_in_thread", lambda make_coro, status: None)
+    try:
+        auth_client.post("/apply/start", json={"mode": "all", "run_mode": "training"})
+        assert apply_jobs.is_training_run()
+        main._apply_status["running"] = False
+        auth_client.post("/apply/start", json={"mode": "all", "review": True})   # older callers
+        assert apply_jobs.is_trial_run()
+    finally:
+        main._apply_status["running"] = False
+        apply_jobs.set_run_mode("auto")
+
+
+# ── New statuses, CSV export, posting details, sign-in window ──────────────
+class TestFailureFixes:
+    def test_stats_count_closed_and_needs_you(self, auth_client):
+        import core.shared_config as shared_config
+        for i, status in enumerate(["closed", "needs_you", "needs_you"]):
+            url = f"https://jobs.example/{i}"
+            auth_client.post("/jobs/add", json={"url": url, "title": "Intern"})
+            shared_config.update_job(url, status=status)
+        stats = auth_client.get("/jobs/stats").json()
+        assert (stats["closed"], stats["needs_you"]) == (1, 2)
+
+    @pytest.mark.parametrize("status", ["closed", "needs_you"])
+    def test_status_can_be_set_by_hand(self, auth_client, status):
+        url = "https://jobs.example/hand"
+        auth_client.post("/jobs/add", json={"url": url})
+        assert auth_client.put("/jobs/status", json={"url": url, "status": status}).json()["status"] == status
+
+    def test_needs_you_jobs_can_be_retried(self):
+        assert "needs_you" in main.RETRYABLE_STATUSES and "closed" not in main.RETRYABLE_STATUSES
+
+    def test_csv_has_bom_new_columns_and_safe_cells(self, auth_client):
+        import core.shared_config as shared_config
+        url = "https://jobs.example/csv"
+        auth_client.post("/jobs/add", json={"url": url, "title": "=HYPERLINK(\"x\")", "company": "Café Ltd"})
+        shared_config.update_job(url, status="failed", error="@Create Account blocked", practised_at="2026-10-04T10:00:00Z")
+        resp = auth_client.get("/jobs/export")
+        assert resp.content.startswith("\ufeff".encode("utf-8"))
+        text = resp.content.decode("utf-8-sig")
+        header = text.splitlines()[0]
+        for column in ("Last Attempt", "Practised (Training Run)", "Reason", "Duration (s)", "Steps"):
+            assert column in header
+        assert "'=HYPERLINK" in text and "'@Create Account" in text and "Café Ltd" in text
+
+    def test_csv_includes_the_last_runs_time_and_duration(self, auth_client):
+        url = "https://jobs.example/ran"
+        auth_client.post("/jobs/add", json={"url": url, "title": "Intern"})
+        metrics = main._get_metrics_store()
+        from datetime import datetime, timezone
+        metrics.record_run(job_url=url, job_title="Intern", company="Acme", website_domain="jobs.example",
+                           ats_platform=None, success=False,
+                           started_at=datetime(2026, 10, 4, 14, 0, 0, tzinfo=timezone.utc),
+                           finished_at=datetime(2026, 10, 4, 14, 2, 0, 400000, tzinfo=timezone.utc), step_count=17)
+        row = [r for r in auth_client.get("/jobs/export").content.decode("utf-8-sig").splitlines() if url in r][0]
+        assert row.startswith("2026-10-04T14:00:00+00:00") and ",120,17," in row
+
+    def test_save_csv_to_a_chosen_path(self, auth_client, tmp_path):
+        target = tmp_path / "out" / "jobs.csv"
+        resp = auth_client.post("/jobs/export/save", json={"path": str(target)})
+        assert resp.json()["success"] and target.read_bytes().startswith("\ufeff".encode("utf-8"))
+
+    def test_save_csv_needs_a_csv_name(self, auth_client, tmp_path):
+        resp = auth_client.post("/jobs/export/save", json={"path": str(tmp_path / "jobs.exe")})
+        assert resp.status_code == 400
+
+    def test_pasted_links_get_real_titles_and_closed_postings(self, auth_client, monkeypatch):
+        import core.job_page as job_page
+        import core.shared_config as shared_config
+        pages = {"https://jobs.example/a": job_page.Posting(title="Finance Intern", company="Northwind"),
+                 "https://jobs.example/b": job_page.Posting(closed=True, reason="The posting is gone (HTTP 404).")}
+        monkeypatch.setattr(job_page, "fetch", lambda url: pages.get(url))
+        for url in pages:
+            shared_config.refresh_posting_details  # noqa: B018 (imported for the patch above)
+        auth_client.post("/jobs/add-bulk", json={"text": "https://jobs.example/a\nhttps://jobs.example/b"})
+        # The background task ran on the TestClient's loop; run it directly too, to be deterministic.
+        for url in pages:
+            shared_config.refresh_posting_details(url)
+        jobs = shared_config.read_jobs()
+        assert (jobs["https://jobs.example/a"]["title"], jobs["https://jobs.example/a"]["company"]) == ("Finance Intern", "Northwind")
+        assert jobs["https://jobs.example/b"]["status"] == "closed"
+
+    def test_a_real_title_is_never_overwritten(self, auth_client, monkeypatch):
+        import core.job_page as job_page
+        import core.shared_config as shared_config
+        monkeypatch.setattr(job_page, "fetch", lambda url: job_page.Posting(title="Other", company="Other Co"))
+        auth_client.post("/jobs/add", json={"url": "https://jobs.example/c", "title": "Mine", "company": "My Co"})
+        shared_config.refresh_posting_details("https://jobs.example/c")
+        job = shared_config.read_jobs()["https://jobs.example/c"]
+        assert (job["title"], job["company"]) == ("Mine", "My Co")
+
+    def test_sign_in_window_blocks_applying_and_shows_in_status(self, auth_client, monkeypatch):
+        class Running:
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(main, "_login_process", Running())
+        assert auth_client.get("/auth/status").json()["login_window_open"] is True
+        resp = auth_client.post("/apply/start", json={"mode": "all"}).json()
+        assert resp["success"] is False and "sign-in window" in resp["message"]
+        resp = auth_client.post("/auth/login/gmail").json()
+        assert resp["success"] is False and "already open" in resp["message"]
+
+    def test_sign_in_opens_a_plain_browser_with_the_agent_profile(self, auth_client, monkeypatch):
+        launched = {}
+
+        class Proc:
+            def poll(self):
+                return None
+
+        def fake_popen(args, **kwargs):
+            launched["args"] = args
+            return Proc()
+
+        monkeypatch.setattr(main, "_login_process", None)
+        monkeypatch.setattr(main.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(main, "_find_playwright_chromium", lambda: "C:/chromium/chrome.exe")
+        resp = auth_client.post("/auth/login/gmail").json()
+        assert resp["success"] is True
+        args = launched["args"]
+        assert args[0] == "C:/chromium/chrome.exe"
+        assert any(a.startswith("--user-data-dir=") for a in args)
+        assert args[-1].startswith("https://accounts.google.com/")
+        assert not any("remote-debugging" in a or "enable-automation" in a for a in args)

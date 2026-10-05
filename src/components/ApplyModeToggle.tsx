@@ -7,7 +7,7 @@ interface ApplyModeToggleProps {
   compact?: boolean;
 }
 
-/** Full auto, or a trial run that waits for the user's OK before each Submit. */
+/** Full auto, a trial run that waits for the user's OK before each Submit, or training (never submits). */
 export default function ApplyModeToggle({ value, onChange, compact }: ApplyModeToggleProps) {
   const option = (mode: ApplyMode, label: string) => (
     <button
@@ -28,11 +28,14 @@ export default function ApplyModeToggle({ value, onChange, compact }: ApplyModeT
       <div role="radiogroup" aria-label="Apply mode" className="inline-flex gap-1 p-1 rounded-xl border border-border">
         {option("auto", "Full auto")}
         {option("trial", "Trial run")}
+        {option("training", "Training")}
       </div>
       {!compact && (
         <p className="text-xs text-muted-foreground">
           {value === "trial"
             ? "Fills in each application, then waits before Submit so you can check it (History tab: Approve & submit, or Skip)."
+            : value === "training"
+            ? "Practice: fills in each application up to the final Submit, never submits, then closes it. Jobs stay pending; answers and site tips are saved for the real run."
             : "Fills in and submits each application on its own."}
         </p>
       )}

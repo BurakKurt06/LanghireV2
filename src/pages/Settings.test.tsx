@@ -39,6 +39,8 @@ vi.mock("../lib/analytics", () => ({
 }));
 
 vi.mock("../lib/api", () => ({
+  getAuthStatus: vi.fn(async () => ({ linkedin: { logged_in: false }, gmail: { logged_in: true } })),
+  launchLogin: vi.fn(),
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
   getPlugins: vi.fn(),
@@ -112,6 +114,13 @@ describe("SettingsPage", () => {
         { id: "msedge", name: "Microsoft Edge", path: "C:/msedge.exe", is_default: true },
       ],
     } as never);
+  });
+
+  it("has an Accounts section to sign in to Gmail and LinkedIn once", async () => {
+    render(<SettingsPage />);
+    expect(await screen.findByText("Accounts")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Sign in to LinkedIn/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Sign in again/ })).toBeInTheDocument(); // Gmail already signed in
   });
 
   it("lists installed browsers, marks the default, and saves the choice", async () => {

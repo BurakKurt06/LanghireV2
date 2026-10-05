@@ -224,3 +224,164 @@ def test_snapshot_without_a_page_is_empty():
             return None
 
     assert asyncio.run(form_snapshot.snapshot(NoPage())) == {}
+
+
+# ── trial runs ask for help instead of giving up ────────────────────────────
+
+def _wait_help(monkeypatch, call, reply, agent=None, before=None, after=None, notes=None):
+    """Run a trial-run action that waits for help, answer it, return its result."""
+    snapshots = iter([before or {}, after or {}])
+
+    async def fake_snapshot(session):
+        return next(snapshots)
+
+    monkeypatch.setattr(apply_jobs.form_snapshot, "snapshot", fake_snapshot)
+    monkeypatch.setattr(apply_jobs, "update_job", lambda url, **kw: (notes if notes is not None else []).append(kw))
+    tools = apply_jobs.build_tools(JOB, "acme", True, {"agent": agent}, 1)
+
+    async def go():
+        task = asyncio.create_task(call(tools))
+        while not apply_jobs.pending_help():
+            if task.done():  # the action failed before asking: surface its error
+                return task.result()
+            await asyncio.sleep(0.01)
+        assert apply_jobs.pending_help()[0]["url"] == JOB["url"]
+        assert apply_jobs.answer_help(JOB["url"], *reply)
+        return await task
+
+    result = asyncio.run(go())
+    assert apply_jobs.pending_help() == []
+    return result
+
+
+def _ask(problem):
+    return lambda tools: _action(tools, "ask_user_for_help")(
+        params=apply_jobs.HelpRequest(problem=problem), browser_session=object())
+
+
+def test_help_with_a_message_continues_and_pins_the_message(monkeypatch, store):
+    agent, notes = _FakeAgent(), []
+    result = _wait_help(monkeypatch, _ask("Save and Continue is disabled."),
+                        ("Tick the terms box first", False), agent=agent, notes=notes)
+    assert not result.is_done
+    assert 'Their message: "Tick the terms box first"' in result.extracted_content
+    assert "MESSAGES FROM THE USER DURING THIS RUN" in agent.system_text()
+    assert "- Tick the terms box first" in agent.system_text()
+    assert notes == [{"user_note": "Tick the terms box first"}]          # kept for retries
+
+
+def test_help_give_up_ends_the_run(monkeypatch):
+    result = _wait_help(monkeypatch, _ask("Stuck on the dropdown."), ("", True))
+    assert result.is_done and result.success is False
+    assert "Stuck on the dropdown. (you chose Give up)" in result.extracted_content
+
+
+def test_trial_run_done_with_failure_asks_for_help_instead(monkeypatch, tmp_path):
+    from browser_use.filesystem.file_system import FileSystem
+    from browser_use.tools.views import DoneAction
+
+    def finish_failed(tools):
+        return _action(tools, "done")(params=DoneAction(text="Could not advance.", success=False),
+                                      file_system=FileSystem(tmp_path), browser_session=object())
+
+    result = _wait_help(monkeypatch, finish_failed, ("I fixed it, go on", False))
+    assert not result.is_done and "I fixed it, go on" in result.extracted_content
+
+
+def test_trial_run_done_with_success_still_finishes(tmp_path):
+    from browser_use.filesystem.file_system import FileSystem
+    from browser_use.tools.views import DoneAction
+    tools = apply_jobs.build_tools(JOB, "acme", True, {}, 1)
+    result = asyncio.run(_action(tools, "done")(
+        params=DoneAction(text="Submitted.", success=True), file_system=FileSystem(tmp_path), browser_session=object()))
+    assert result.is_done and result.success is True
+
+
+def test_full_auto_keeps_the_normal_done_and_has_no_help_action():
+    actions = apply_jobs.build_tools(JOB, "acme", False, {}, 1).registry.registry.actions
+    assert "ask_user_for_help" not in actions
+    assert "success=false does not end" not in actions["done"].description
+
+
+def test_user_note_instructions():
+    assert apply_jobs.user_note_instructions("") == ""
+    assert "NOTE FROM THE USER ABOUT THIS JOB" in apply_jobs.user_note_instructions("Tick the terms box")
+
+
+# ── giving up too early (Full auto / Training) ──────────────────────────────
+
+def _done(tools, tmp_path, text, success=False):
+    from browser_use.filesystem.file_system import FileSystem
+    from browser_use.tools.views import DoneAction
+    return asyncio.run(_action(tools, "done")(params=DoneAction(text=text, success=success), file_system=FileSystem(tmp_path)))
+
+
+def _agent_at_step(n):
+    return SimpleNamespace(state=SimpleNamespace(n_steps=n))
+
+
+def test_an_early_give_up_is_sent_back_once(tmp_path):
+    agent_ref = {"agent": _agent_at_step(10), "max_steps": 70}
+    tools = apply_jobs.build_tools(JOB, "acme", False, agent_ref, 1)
+    first = _done(tools, tmp_path, "The Create Account page did not advance.")
+    assert not first.is_done
+    assert "used only 10 of 70 steps" in first.extracted_content and "Sign In" in first.extracted_content
+    second = _done(tools, tmp_path, "Still stuck on Create Account.")
+    assert second.is_done and second.success is False
+
+
+@pytest.mark.parametrize("text", [
+    "POSTING CLOSED: the page says this job is no longer available.",
+    "Gmail sign-in required to read the verification code: sign in to Gmail in Settings.",
+    "The site shows a CAPTCHA I can't get past.",
+])
+def test_hard_stops_end_the_run_even_early(tmp_path, text):
+    tools = apply_jobs.build_tools(JOB, "acme", False, {"agent": _agent_at_step(3), "max_steps": 70}, 1)
+    result = _done(tools, tmp_path, text)
+    assert result.is_done and result.success is False
+
+
+def test_a_late_give_up_ends_the_run(tmp_path):
+    tools = apply_jobs.build_tools(JOB, "acme", False, {"agent": _agent_at_step(40), "max_steps": 70}, 1)
+    assert _done(tools, tmp_path, "Stuck.").is_done
+
+
+def test_success_is_never_sent_back(tmp_path):
+    tools = apply_jobs.build_tools(JOB, "acme", False, {"agent": _agent_at_step(2), "max_steps": 70}, 1)
+    result = _done(tools, tmp_path, "Submitted.", success=True)
+    assert result.is_done and result.success is True
+
+
+def test_resume_rules_cover_every_job_and_education():
+    text = apply_jobs.resume_instructions("WORK EXPERIENCE\nACME | Intern\nEDUCATION\nState University")
+    assert "Add EVERY entry under the job sections" in text
+    assert "never delete the education section" in text and "record_guesses" in text
+
+
+def test_markers_are_stripped_from_what_the_user_sees():
+    text = ('I could not continue. @@LEARNING: {"domain":"x","category":"navigation","insight":"Apply opens a modal."}'
+            '\n@@QUESTION: {"question": "Q", "answer": "A", "type": "text"}')
+    assert apply_jobs.strip_markers(text) == "I could not continue."
+
+
+def test_page_wait_returns_once_the_page_has_content():
+    lengths = iter([0, 12, 500])
+
+    class Page:
+        async def evaluate(self, js):
+            return next(lengths)
+
+    class Session:
+        async def get_current_page(self):
+            return Page()
+
+    asyncio.run(apply_jobs.wait_for_page_content(SimpleNamespace(browser_session=Session())))
+    assert next(lengths, "used up") == "used up"
+
+
+def test_page_wait_never_breaks_a_step():
+    class Session:
+        async def get_current_page(self):
+            raise RuntimeError("no page")
+
+    asyncio.run(apply_jobs.wait_for_page_content(SimpleNamespace(browser_session=Session())))

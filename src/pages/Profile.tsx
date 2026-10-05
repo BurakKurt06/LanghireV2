@@ -18,7 +18,7 @@ const defaultProfile: CandidateProfile = {
   willing_to_relocate: false,
   preferred_work_mode: "hybrid",
   years_of_experience: 0,
-  education: { degree: "", major: "", school: "", graduation: "" },
+  education: { degree: "", major: "", school: "", start_date: "", graduation: "" },
   current_role: "",
   target_job_titles: [],
   target_locations: [],
@@ -283,6 +283,7 @@ export default function Profile() {
           <Input label={t("education.degree")} value={profile.education.degree} onChange={(v) => updateNested("education", "degree", v)} />
           <Input label={t("education.major")} value={profile.education.major ?? ""} onChange={(v) => updateNested("education", "major", v)} />
           <Input label={t("education.school")} value={profile.education.school} onChange={(v) => updateNested("education", "school", v)} />
+          <Input label={t("education.startDate")} value={profile.education.start_date ?? ""} placeholder={t("education.startDatePlaceholder")} onChange={(v) => updateNested("education", "start_date", v)} />
           <Input label={t("education.graduation")} value={profile.education.graduation} onChange={(v) => updateNested("education", "graduation", v)} />
         </div>
       </Section>
