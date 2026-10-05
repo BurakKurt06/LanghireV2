@@ -6,7 +6,7 @@
 
 <p align="center">
   AI-powered job application automation for Windows.<br />
-  A private, independent fork of <a href="https://github.com/jaimaann/LangHire">LangHire</a> (MIT).
+  An independent fork of <a href="https://github.com/jaimaann/LangHire">LangHire</a> (MIT).
 </p>
 
 ---
@@ -19,8 +19,8 @@ and fill in applications. It is a **personal fork**, not a distribution:
 - **Windows x64 only.** The installer is an NSIS `.exe`; macOS and Linux targets
   were removed from the bundle config and CI. Cross-platform code paths inside
   the app were deliberately left intact.
-- **Not connected to upstream.** There is no `origin` remote and no merge path
-  configured. Picking up a future upstream change means doing it by hand.
+- **Not synced with upstream.** Changes from the original project are not merged
+  in automatically; picking one up means doing it by hand.
 - **English only.** The other 12 languages, the language picker and the
   translated READMEs were removed. UI strings still live in
   `src/locales/en/*.json` and are read through `t()`.
