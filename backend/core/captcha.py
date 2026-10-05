@@ -30,7 +30,7 @@ TURNSTILE = "turnstile"
 IMAGE_CAPTCHA = "image_captcha"
 # Detected but never sent to the solver:
 HCAPTCHA_INVISIBLE = "hcaptcha_invisible"  # runs by itself on submit; not a blocker
-HUMAN_CHECK = "human_check"  # a site's own "are you human" box; needs the user
+HUMAN_CHECK = "human_check"  # a site's own "are you human" box: ticked with a real click
 
 # Challenges that actually stand between the agent and a submitted form.
 #
@@ -62,8 +62,8 @@ class HumanCheckNeeded(Exception):
 
     def __init__(self, page_url: str = ""):
         self.page_url = page_url
-        self.reason = ("This site asks you to confirm you're a real person before it shows the application. "
-                       "Run this job in Trial mode and tick the box when the agent asks for help.")
+        self.reason = ("This site asks you to confirm you're a real person, and ticking its box automatically "
+                       "didn't get past it. Run this job in Trial mode and tick the box when the agent asks for help.")
         super().__init__(self.reason)
 
 
@@ -186,6 +186,95 @@ async def _evaluate(browser_session, expression: str):
         session_id=cdp.session_id,
     )
     return (result or {}).get("result", {}).get("value")
+
+
+# ── A site's own "I'm not a robot" box ──────────────────────────────────────
+# Pages like Oleeo Protect's "Quick Check Needed" are a plain checkbox and a
+# Continue button, with no CAPTCHA service behind them. They are ticked here
+# with real mouse events (a JavaScript click is what such pages look for and
+# ignore), at most HUMAN_CHECK_ATTEMPTS times per application.
+HUMAN_CHECK_ATTEMPTS = 2
+HUMAN_CHECK_WAIT_SECONDS = 10
+
+_HUMAN_CHECK_TARGETS_JS = r"""
+(() => {
+  const shown = (el) => {
+    if (!el) return false;
+    const s = getComputedStyle(el), r = el.getBoundingClientRect();
+    return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+  };
+  const center = (el) => {
+    el.scrollIntoView({block: 'center', inline: 'center'});
+    const r = el.getBoundingClientRect();
+    return [r.left + r.width / 2, r.top + r.height / 2];
+  };
+  const boxes = Array.from(document.querySelectorAll('input[type=checkbox], [role=checkbox]'));
+  const near = (el) => ((el.closest('label') || el.parentElement || el).innerText || '') + ' ' +
+                       ((el.id && document.querySelector('label[for="' + CSS.escape(el.id) + '"]') || {}).innerText || '');
+  const box = boxes.find((b) => /robot|human|real person/i.test(near(b))) || boxes[0];
+  if (!box) return null;
+  const checked = box.checked === true || box.getAttribute('aria-checked') === 'true';
+  // An invisible input: click what the user sees (its label, else its wrapper).
+  const label = box.id ? document.querySelector('label[for="' + CSS.escape(box.id) + '"]') : null;
+  const target = shown(box) ? box : (shown(label) ? label : box.closest('label') || box.parentElement);
+  const boxAt = target ? center(target) : null;
+  const buttons = Array.from(document.querySelectorAll('button, input[type=submit], input[type=button], a, [role=button]'))
+    .filter((b) => shown(b) && /^(continue|submit|verify|proceed|next|i'?m human|confirm)\b/i.test(((b.innerText || b.value || '') + '').trim()));
+  return { checked, box: boxAt, button: buttons.length ? center(buttons[0]) : null };
+})()
+"""
+
+
+async def _real_click(browser_session, x: float, y: float) -> None:
+    """A real mouse click (move, press, release) at viewport coordinates."""
+    import random
+    cdp = await browser_session.get_or_create_cdp_session()
+    send = cdp.cdp_client.send.Input.dispatchMouseEvent
+    await send(params={"type": "mouseMoved", "x": x, "y": y}, session_id=cdp.session_id)
+    await asyncio.sleep(random.uniform(0.08, 0.25))
+    await send(params={"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, session_id=cdp.session_id)
+    await asyncio.sleep(random.uniform(0.05, 0.15))
+    await send(params={"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}, session_id=cdp.session_id)
+
+
+async def solve_human_check(browser_session) -> bool:
+    """Tick a site's own "I'm not a robot" box and press Continue. True once the check is gone.
+
+    Never raises. Counts attempts on the browser session, so a check that
+    won't pass is only tried HUMAN_CHECK_ATTEMPTS times per application.
+    """
+    import random
+    tried = getattr(browser_session, "_langhire_human_check_tries", 0)
+    if tried >= HUMAN_CHECK_ATTEMPTS:
+        return False
+    try:
+        browser_session._langhire_human_check_tries = tried + 1
+    except Exception:
+        pass
+    try:
+        targets = await _evaluate(browser_session, _HUMAN_CHECK_TARGETS_JS)
+        if not isinstance(targets, dict):
+            return False
+        await asyncio.sleep(random.uniform(0.6, 1.4))  # a person reads the page first
+        if not targets.get("checked") and targets.get("box"):
+            await _real_click(browser_session, *targets["box"])
+            await asyncio.sleep(random.uniform(0.7, 1.5))
+        if targets.get("button"):
+            # Re-read: ticking the box can move or reveal the button.
+            again = await _evaluate(browser_session, _HUMAN_CHECK_TARGETS_JS)
+            button = (again or {}).get("button") if isinstance(again, dict) else None
+            await _real_click(browser_session, *(button or targets["button"]))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + HUMAN_CHECK_WAIT_SECONDS
+        while loop.time() < deadline:
+            await asyncio.sleep(1)
+            found = await detect(browser_session)
+            if found is None or found.type != HUMAN_CHECK:
+                print("    🤖 Ticked the site's \"I'm not a robot\" check")
+                return True
+    except Exception:
+        return False
+    return False
 
 
 async def detect(browser_session) -> Challenge | None:
@@ -399,6 +488,8 @@ async def handle(browser_session, settings: dict) -> bool:
     if challenge.type == HCAPTCHA_INVISIBLE:
         return False
     if challenge.type == HUMAN_CHECK:
+        if await solve_human_check(browser_session):
+            return True
         raise HumanCheckNeeded(challenge.page_url)
 
     if not settings.get("captcha_solver_enabled"):

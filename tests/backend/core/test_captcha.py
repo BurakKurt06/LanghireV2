@@ -5,6 +5,8 @@ stubbed. Covers each supported challenge type, the 2-attempt cap, the
 switch-off short-circuit, the non-blocking reCAPTCHA v3 carve-out, and that
 the API key never leaks into an error message.
 """
+import asyncio
+
 import pytest
 
 import core.captcha as captcha
@@ -21,6 +23,13 @@ from core.captcha import (
 )
 
 API_KEY = "super-secret-2captcha-key"
+
+
+_real_sleep = asyncio.sleep
+
+
+async def _no_sleep(seconds):
+    await _real_sleep(0)
 
 
 class FakeSession:
@@ -224,12 +233,52 @@ class TestHandle:
         for enabled in (True, False):
             assert await captcha.handle(FakeSession(), {"captcha_solver_enabled": enabled, "captcha_api_key": API_KEY}) is False
 
-    async def test_a_sites_own_human_check_needs_the_user(self, monkeypatch):
-        stub_evaluate(monkeypatch, {"type": captcha.HUMAN_CHECK, "sitekey": ""})
-        monkeypatch.setattr(captcha, "_solve_sync", lambda key, ch: pytest.fail("no solver can answer it"))
-        with pytest.raises(captcha.HumanCheckNeeded) as e:
-            await captcha.handle(FakeSession(), {"captcha_solver_enabled": True, "captcha_api_key": API_KEY})
+    async def test_a_simple_human_check_is_ticked_with_real_clicks(self, monkeypatch):
+        """Tick the box, press Continue, and carry on once the check page is gone."""
+        page = {"passed": False}
+        clicks = []
+
+        async def fake_eval(session, expression):
+            if expression is captcha._HUMAN_CHECK_TARGETS_JS:
+                return {"checked": False, "box": [50, 120], "button": [60, 160]}
+            if expression.strip().startswith("window.location.href"):
+                return "https://soylent.example/check"
+            return None if page["passed"] else {"type": captcha.HUMAN_CHECK, "sitekey": ""}
+
+        async def fake_click(session, x, y):
+            clicks.append((x, y))
+            if (x, y) == (60, 160):
+                page["passed"] = True
+
+        monkeypatch.setattr(captcha, "_evaluate", fake_eval)
+        monkeypatch.setattr(captcha, "_real_click", fake_click)
+        monkeypatch.setattr(captcha.asyncio, "sleep", _no_sleep)
+        monkeypatch.setattr(captcha, "_solve_sync", lambda key, ch: pytest.fail("no 2Captcha for a plain checkbox"))
+        assert await captcha.handle(FakeSession(), {"captcha_solver_enabled": False}) is True
+        assert clicks == [(50, 120), (60, 160)]
+
+    async def test_a_human_check_that_wont_pass_needs_the_user(self, monkeypatch):
+        clicks = []
+
+        async def fake_eval(session, expression):
+            if expression is captcha._HUMAN_CHECK_TARGETS_JS:
+                return {"checked": False, "box": [50, 120], "button": [60, 160]}
+            return {"type": captcha.HUMAN_CHECK, "sitekey": ""}
+
+        async def fake_click(session, x, y):
+            clicks.append((x, y))
+
+        monkeypatch.setattr(captcha, "_evaluate", fake_eval)
+        monkeypatch.setattr(captcha, "_real_click", fake_click)
+        monkeypatch.setattr(captcha.asyncio, "sleep", _no_sleep)
+        monkeypatch.setattr(captcha, "HUMAN_CHECK_WAIT_SECONDS", 0)
+        session = FakeSession()
+        for _ in range(captcha.HUMAN_CHECK_ATTEMPTS + 1):
+            with pytest.raises(captcha.HumanCheckNeeded) as e:
+                await captcha.handle(session, {"captcha_solver_enabled": True, "captcha_api_key": API_KEY})
         assert "Trial mode" in e.value.reason
+        # Only HUMAN_CHECK_ATTEMPTS tries per application, then it stops clicking.
+        assert len(clicks) == 2 * captcha.HUMAN_CHECK_ATTEMPTS
 
     def test_detection_reads_the_site_key_from_any_hcaptcha_frame(self):
         """The first frame is often the hidden checkbox-invisible one, without a key."""
@@ -325,3 +374,10 @@ class TestPolicyConstants:
 
     def test_invisible_v3_is_not_blocking(self):
         assert RECAPTCHA_V3 not in BLOCKING_TYPES
+
+
+def test_human_check_js_has_no_stray_control_characters():
+    """A \b written through a shell once became a backspace and the Continue button was never found."""
+    js = captcha._HUMAN_CHECK_TARGETS_JS
+    assert not any(ord(c) < 32 and c not in "\n\t" for c in js)
+    assert "confirm)" + chr(92) + "b/i" in js

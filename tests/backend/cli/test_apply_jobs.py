@@ -578,7 +578,7 @@ def test_in_a_trial_run_the_agent_asks_for_help_with_the_human_check(run, monkey
     finally:
         apply_jobs.set_run_mode("auto")
     assert status == "applied"
-    assert "never tick it yourself, ask the user" in kwargs["task"]
+    assert "the app ticks it for you; if it's still there, ask the user" in kwargs["task"]
 
 
 def test_an_unexpected_crash_is_retried_once(run, monkeypatch):
@@ -594,4 +594,4 @@ def test_an_unexpected_crash_is_retried_once(run, monkeypatch):
 def test_the_run_gets_our_step_limit_and_page_wait(run):
     run()
     agent = _run_fake_agent[0].instances[-1]
-    assert agent.run_kwargs == {"max_steps": 70, "on_step_start": apply_jobs.wait_for_page_content}
+    assert agent.run_kwargs == {"max_steps": 70, "on_step_start": apply_jobs.before_step}

@@ -541,6 +541,18 @@ PAGE_WAIT_SECONDS = 10
 _PAGE_TEXT_JS = "() => ((document.body && document.body.innerText) || '').trim().length"
 
 
+async def before_step(agent) -> None:
+    """Before each AI step: let a blank page finish loading, then tick a simple
+    "I'm not a robot" check, so the AI doesn't spend a request on either."""
+    await wait_for_page_content(agent)
+    try:
+        found = await _captcha.detect(agent.browser_session)
+        if found is not None and found.type == _captcha.HUMAN_CHECK:
+            await _captcha.solve_human_check(agent.browser_session)
+    except Exception:
+        pass
+
+
 async def wait_for_page_content(agent) -> None:
     """Before each step: give a blank, still-loading page a few seconds, in code.
 
@@ -583,7 +595,7 @@ REVIEW_RULES = (
     "TRIAL RUN: never give up on your own. When you're stuck (an element won't respond, a page won't "
     "advance, something is unclear), call ask_user_for_help with the problem; the browser stays open "
     "and the user fixes it or tells you what to do. The same for a page asking you to confirm you're a "
-    "real person ('I'm not a robot', 'Quick Check Needed'): never tick it yourself, ask the user.\n\n"
+    "real person ('I'm not a robot', 'Quick Check Needed'): the app ticks it for you; if it's still there, ask the user.\n\n"
 )
 
 # A failed done() whose text starts with this marks the job "closed", not "failed".
@@ -1100,7 +1112,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         agent.pause()
 
     try:
-        result = await agent.run(max_steps=MAX_STEPS, on_step_start=wait_for_page_content)
+        result = await agent.run(max_steps=MAX_STEPS, on_step_start=before_step)
 
         # A blocking CAPTCHA we could not solve ends the application here,
         # regardless of what the agent reported, so the next job can start.
