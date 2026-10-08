@@ -46,10 +46,20 @@
     "noticePeriod": "Notice Period",
     "noticePeriodPlaceholder": "Select..."
   },
+  "searchArea": {
+    "title": "Search area",
+    "hint": "Jobs outside this area are skipped before anything opens (remote jobs always count). Measured from the ZIP below, or your address ZIP if empty.",
+    "centerZip": "Centre ZIP",
+    "radius": "Distance",
+    "under": "Under {{miles}} miles",
+    "any": "Nationwide (any)"
+  },
   "education": {
     "title": "Education",
     "degree": "Degree",
     "major": "Major",
+    "majorAlternative": "Field of study if yours isn't listed",
+    "majorAlternativePlaceholder": "e.g. Finance",
     "school": "School",
     "startDate": "Start date",
     "startDatePlaceholder": "e.g. September 2024",

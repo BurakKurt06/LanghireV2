@@ -66,6 +66,8 @@ async def lifespan(app: FastAPI):
     _ensure_chromium_async()
     # Start parent-process watchdog (self-terminate if Tauri app dies)
     _start_parent_watchdog()
+    # Scheduled / requested Gmail checks (never during an application run)
+    _start_inbox_scheduler()
     yield
     # Graceful shutdown: stop running operations
     import traceback
@@ -285,6 +287,9 @@ def _start_parent_watchdog():
     _log.info(f"Parent watchdog started (monitoring PID {parent_pid})")
 
 
+INTERRUPTED_NOTE = "Interrupted: the app closed during this application. It will be tried again on the next run."
+
+
 def _recover_stale_jobs():
     """Reset jobs stuck in 'in_progress' back to 'pending' (crash recovery)."""
     try:
@@ -296,6 +301,7 @@ def _recover_stale_jobs():
     for url, job in jobs.items():
         if job.get("status") == "in_progress":
             job["status"] = "pending"
+            job["error"] = INTERRUPTED_NOTE
             recovered += 1
     if recovered:
         write_jobs(jobs)
@@ -1052,7 +1058,7 @@ _apply_thread: threading.Thread | None = None
 
 
 # Jobs the Apply / Retry buttons may (re)start.
-RETRYABLE_STATUSES = ("pending", "failed", "needs_you")
+RETRYABLE_STATUSES = ("pending", "failed", "needs_you", "skipped")
 
 
 @app.post("/apply/start")
@@ -1066,6 +1072,9 @@ async def start_applying(body: ApplyRequest):
         # Both would use the same browser profile, and killing the window could
         # lose a sign-in that isn't saved to disk yet.
         return {"success": False, "message": "Close the sign-in window first, then start applying."}
+    if _inbox_checking():
+        # Starting kills every browser process, the Gmail check's included.
+        return {"success": False, "message": "The Inbox is checking Gmail right now. Start again in a moment."}
 
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
@@ -1118,8 +1127,10 @@ async def start_applying(body: ApplyRequest):
                 return
             # Reset to pending so the worker can claim it
             from core.shared_config import update_job as _update_job
-            _update_job(target_job_url, status="pending", error=None)
-            target["status"] = "pending"
+            # Applying to a Skipped job by hand overrides the fit check.
+            override = target.get("status") == "skipped" or target.get("fit_override", False)
+            _update_job(target_job_url, status="pending", error=None, fit_override=override)
+            target["status"], target["fit_override"] = "pending", override
             pending = [target]
         elif target_job_urls:
             # Batch apply: only apply to the specific selected jobs
@@ -1128,8 +1139,9 @@ async def start_applying(body: ApplyRequest):
             for url in target_job_urls:
                 j = jobs.get(url)
                 if j and j.get("status") in RETRYABLE_STATUSES:
-                    _update_job(url, status="pending", error=None)
-                    j["status"] = "pending"
+                    override = j.get("status") == "skipped" or j.get("fit_override", False)
+                    _update_job(url, status="pending", error=None, fit_override=override)
+                    j["status"], j["fit_override"] = "pending", override
                     pending.append(j)
         elif easy_apply_filter is None:
             pending = [j for j in jobs.values() if j.get("status") == "pending"]
@@ -1196,6 +1208,36 @@ async def stop_applying():
 def _set_apply_paused(paused: bool) -> None:
     from cli import apply_jobs
     apply_jobs.set_paused(paused)
+
+
+def _run_mode() -> str:
+    try:
+        from cli import apply_jobs as _aj
+        return _aj._run_options["mode"]
+    except Exception:
+        return "auto"
+
+
+def _current_jobs() -> list[dict]:
+    try:
+        from cli import apply_jobs as _aj
+        return _aj.current_jobs()
+    except Exception:
+        return []
+
+
+@app.post("/apply/skip")
+async def skip_current_job(body: dict):
+    """Stop the application to one job and move on to the next (the job stays pending)."""
+    url = str(body.get("url") or "")
+    if not _apply_status.get("running") or not url:
+        return {"success": False}
+    from cli import apply_jobs as _aj
+    ok = _aj.skip_job(url)
+    if ok:
+        with _status_lock:
+            _apply_status["log"].append("⏭️ Skipping this job: moving on to the next one.")
+    return {"success": ok}
 
 
 @app.post("/apply/pause")
@@ -1265,6 +1307,8 @@ async def apply_status():
             "paused": _apply_status.get("running", False) and _apply_paused(),
             "reviews": _pending_reviews() if _apply_status.get("running") else [],
             "help": _pending_help() if _apply_status.get("running") else [],
+            "current": _current_jobs() if _apply_status.get("running") else [],
+            "run_mode": _run_mode() if _apply_status.get("running") else None,
             "mode": _apply_status.get("mode"),
             "workers": _apply_status.get("workers", 1),
             "log": list(_apply_status.get("log", [])[-100:]),
@@ -1303,7 +1347,7 @@ async def get_jobs(
 async def get_job_stats():
     jobs = _load_jobs()
     stats = {"total": len(jobs), "pending": 0, "applied": 0, "failed": 0, "blocked": 0, "in_progress": 0,
-             "closed": 0, "needs_you": 0}
+             "closed": 0, "needs_you": 0, "skipped": 0}
     for j in jobs.values():
         s = j.get("status", "pending")
         if s in stats:
@@ -1400,7 +1444,7 @@ async def update_job_status(body: dict):
     new_status = body.get("status", "").strip()
     if not url:
         return _api_error("missing_field", "Job URL is required", 400)
-    valid_statuses = ("pending", "applied", "failed", "blocked", "closed", "needs_you")
+    valid_statuses = ("pending", "applied", "failed", "blocked", "closed", "needs_you", "skipped")
     if new_status not in valid_statuses:
         return _api_error("invalid_status", f"Status must be one of: {', '.join(valid_statuses)}", 400)
 
@@ -1447,6 +1491,8 @@ async def add_job_manually(body: dict):
         "title": body.get("title", "").strip() or "Manually Added",
         "company": body.get("company", "").strip() or "",
         "location": body.get("location", "").strip() or "",
+        # A title or company typed by the user is never renamed automatically.
+        **({"name_source": "user"} if (body.get("title") or body.get("company") or "").strip() else {}),
         "easy_apply": None,
         "status": "pending",
         "source": body.get("source", "manual"),
@@ -1605,6 +1651,100 @@ def _get_browser_profile_dir() -> str:
     return str(profile)
 
 
+# ── Inbox (Gmail check, prep sheets) ──────────────────────────────────────
+def _inbox_busy() -> bool:
+    """The Gmail check shares the agents' browser profile: never during a run or a sign-in."""
+    return bool(_apply_status.get("running") or _collection_status.get("running")
+                or (_login_process is not None and _login_process.poll() is None))
+
+
+def _inbox_checking() -> bool:
+    try:
+        from core import inbox
+        return bool(inbox._state.get("checking"))
+    except Exception:
+        return False
+
+
+def _performance_mode() -> bool:
+    return bool(load_settings().get("performance_mode"))
+
+
+def _inbox_check_now() -> dict:
+    """One full Gmail check (runs in the scheduler thread, with its own event loop)."""
+    from core import inbox
+    from core.llm_factory import create_llm
+    import core.shared_config as shared
+    llm_settings = load_llm_settings()
+    if not llm_settings.get("provider"):
+        return {"error": "No AI model set up. Choose one in LLM Settings first.", "new": 0}
+    llm = create_llm(llm_settings)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(inbox.run_check(llm, shared.build_browser_kwargs(), shared.read_jobs, shared.update_job))
+    finally:
+        loop.close()
+
+
+def _start_inbox_scheduler() -> None:
+    try:
+        from core import inbox
+        inbox.start_scheduler(_inbox_busy, _inbox_check_now)
+    except Exception as e:
+        _log.warning(f"Inbox scheduler didn't start: {e}")
+
+
+@app.get("/inbox")
+async def get_inbox():
+    from core import inbox
+    return {**inbox.status(), "busy": _inbox_busy(), "performance_mode": _performance_mode()}
+
+
+@app.post("/inbox/check")
+async def check_inbox():
+    """Check Gmail now (or as soon as the current application run ends)."""
+    from core import inbox
+    if not load_llm_settings().get("provider"):
+        return _api_error("no_llm", "No AI model set up. Choose one in LLM Settings first.")
+    inbox.request_check()
+    return {"success": True}
+
+
+@app.put("/inbox/schedule")
+async def set_inbox_schedule(body: dict):
+    from core import inbox
+    if not inbox.set_schedule(str(body.get("schedule") or "")):
+        return _api_error("invalid_schedule", "Schedule must be off, daily or weekly", 400)
+    return {"success": True, "schedule": body["schedule"]}
+
+
+@app.post("/inbox/prep")
+async def make_prep_sheet(body: dict):
+    """Write an interview prep sheet for one email (only when the user asks)."""
+    from core import inbox, job_page
+    from core.llm_factory import create_llm, _friendly_llm_error
+    from core.shared_config import read_jobs
+    if _performance_mode():
+        return _api_error("performance_mode", "Prep sheets are off in performance mode (Settings).", 400)
+    email = inbox.find(str(body.get("id") or ""))
+    if email is None:
+        return _api_error("not_found", "Email not found", 404)
+    llm_settings = load_llm_settings()
+    if not llm_settings.get("provider"):
+        return _api_error("no_llm", "No AI model set up. Choose one in LLM Settings first.")
+    job = read_jobs().get(email.get("job_url") or "") if email.get("job_url") else None
+    posting = await asyncio.to_thread(job_page.fetch, job["url"]) if job else None
+    from cli.apply_jobs import resume_text
+    resume = resume_text(load_settings().get("resume_path") or "")
+    try:
+        text = await inbox.write_prep_sheet(create_llm(llm_settings), email, job,
+                                            getattr(posting, "description", "") or "", resume, load_profile())
+    except Exception as e:
+        return _api_error("llm_error", f"Couldn't write the prep sheet: {_friendly_llm_error(str(e), getattr(e, 'status_code', None))}", 500)
+    inbox.save_prep(email["id"], text)
+    return {"success": True, "prep": text}
+
+
 @app.get("/auth/status")
 async def auth_status():
     """Check if LinkedIn and Gmail sessions are valid by inspecting cookies."""
@@ -1673,6 +1813,8 @@ async def auth_login(service: str):
         return {"success": False, "message": "A sign-in window is already open. Finish there, then close it."}
     if _apply_status.get("running"):
         return {"success": False, "message": "Applications are running in this browser profile. Stop them first, then sign in."}
+    if _inbox_checking():
+        return {"success": False, "message": "The Inbox is checking Gmail right now. Try again in a moment."}
 
     urls = {
         "linkedin": "https://www.linkedin.com/login",

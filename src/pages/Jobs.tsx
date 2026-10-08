@@ -49,7 +49,7 @@ export default function Jobs() {
 
   const tabs: { id: TabId; label: string; icon: typeof Search; count?: number }[] = [
     { id: "collect", label: "Collect", icon: Search, count: stats.total },
-    { id: "pending", label: "Review & Apply", icon: Play, count: stats.pending + stats.failed },
+    { id: "pending", label: "Review & Apply", icon: Play, count: stats.pending + stats.failed + (stats.needs_you ?? 0) },
     { id: "history", label: "History", icon: CheckCircle, count: stats.applied },
   ];
 

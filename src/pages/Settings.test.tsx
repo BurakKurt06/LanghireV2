@@ -411,4 +411,28 @@ describe("SettingsPage", () => {
       expect(screen.queryByText("language.title")).not.toBeInTheDocument();
     });
   });
+
+  it("saves performance mode, the fit check, cover-letter boxes and other documents", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    const perf = await screen.findByRole("switch", { name: "Performance mode" });
+    const fit = screen.getByRole("switch", { name: "Fit check before applying" });
+    expect(fit).toBeChecked();
+    await user.click(perf);
+    expect(fit).toBeDisabled();
+    expect(fit).not.toBeChecked();
+    await user.click(screen.getByRole("switch", { name: "Fill cover-letter boxes" }));
+    await user.click(screen.getByRole("button", { name: "+ Add document" }));
+    await user.type(screen.getByRole("textbox", { name: "Document name" }), "Transcript");
+    await user.type(screen.getByRole("textbox", { name: "Document file" }), "C:/docs/transcript.pdf");
+    await user.click(screen.getByRole("button", { name: /Save Settings/ }));
+    await waitFor(() =>
+      expect(mockSaveSettings).toHaveBeenCalledWith(expect.objectContaining({
+        performance_mode: true,
+        fit_check_enabled: true,
+        cover_letter_boxes: true,
+        other_documents: [{ label: "Transcript", path: "C:/docs/transcript.pdf" }],
+      })),
+    );
+  });
 });

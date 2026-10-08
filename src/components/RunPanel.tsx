@@ -1,0 +1,164 @@
+import { useEffect, useState } from "react";
+import { Pause, Play, SkipForward, Square, CircleAlert, Check, X } from "lucide-react";
+import {
+  getApplyStatus,
+  pauseApplying,
+  resumeApplying,
+  stopApplying,
+  skipJob,
+  answerHelp,
+  reviewApplication,
+} from "../lib/api";
+import type { ApplyStatus } from "../lib/types";
+
+const POLL_MS = 2000;
+const MODE_LABELS: Record<string, string> = { auto: "Full auto", trial: "Trial run", training: "Training" };
+
+function elapsed(startedAt: string, now: number): string {
+  const secs = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
+  const m = Math.floor(secs / 60);
+  return `${m}:${String(secs % 60).padStart(2, "0")}`;
+}
+
+/** Run controls in the sidebar (Discord-style), shown on every page while applications run. */
+export default function RunPanel() {
+  const [status, setStatus] = useState<ApplyStatus | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const poll = () =>
+      getApplyStatus()
+        .then((s) => {
+          if (active) setStatus(s);
+        })
+        .catch(() => {});
+    poll();
+    const timer = setInterval(() => {
+      poll();
+      setNow(Date.now());
+    }, POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  if (!status?.running) return null;
+
+  const job = status.current?.[0];
+  const help = status.help?.[0];
+  const review = status.reviews?.[0];
+  const paused = Boolean(status.paused);
+  const mode = MODE_LABELS[status.run_mode || "auto"] || "Full auto";
+
+  const act = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await fn();
+      setStatus(await getApplyStatus());
+    } catch {
+      /* the next poll shows the real state */
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section aria-label="Run controls" className="mx-3 mb-3 rounded-xl border border-border bg-secondary/40 p-3 text-[12px]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="inline-flex items-center gap-1.5 font-semibold text-foreground">
+          <span className={`h-2 w-2 rounded-full ${paused ? "bg-amber-500" : "animate-pulse bg-success"}`} />
+          {paused ? "Paused" : "Applying"}
+        </span>
+        <span className="rounded-full bg-background px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">{mode}</span>
+      </div>
+
+      {job ? (
+        <div className="mt-2">
+          <p className="truncate font-semibold text-foreground" title={job.title}>{job.title || "Untitled"}</p>
+          <p className="truncate text-muted-foreground" title={job.company}>{job.company || "Unknown company"}</p>
+          <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-background">
+            <div
+              className="h-full rounded-full bg-primary transition-all"
+              style={{ width: `${Math.min(100, Math.round((job.step / Math.max(1, job.max_steps)) * 100))}%` }}
+            />
+          </div>
+          <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
+            <span>Step {job.step}</span>
+            <span>{elapsed(job.started_at, now)}</span>
+          </div>
+        </div>
+      ) : (
+        <p className="mt-2 text-muted-foreground">Starting…</p>
+      )}
+
+      {help && (
+        <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2">
+          <p className="flex items-start gap-1 font-semibold text-amber-600">
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" /> Needs you
+          </p>
+          <p className="mt-1 line-clamp-3 text-foreground" title={help.problem}>{help.problem}</p>
+          <textarea
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            rows={2}
+            aria-label="Message to the agent"
+            placeholder="Optional: tell the agent what to do"
+            className="input-base mt-1.5 !text-[12px]"
+          />
+          <div className="mt-1.5 flex gap-1.5">
+            <button disabled={busy} onClick={() => act(async () => { await answerHelp(help.url, message, false); setMessage(""); })}
+              className="btn-primary flex-1 !px-2 !py-1 !text-[11px]">Continue</button>
+            <button disabled={busy} onClick={() => act(() => answerHelp(help.url, "", true))}
+              className="btn-secondary flex-1 !px-2 !py-1 !text-[11px]">Give up</button>
+          </div>
+        </div>
+      )}
+
+      {!help && review && (
+        <div className="mt-2 rounded-lg border border-primary/40 bg-primary/10 p-2">
+          <p className="font-semibold text-foreground">Ready to submit</p>
+          <div className="mt-1.5 flex gap-1.5">
+            <button disabled={busy} onClick={() => act(() => reviewApplication(review.url, true))}
+              className="btn-primary flex-1 !px-2 !py-1 !text-[11px]"><Check className="h-3 w-3" /> Approve</button>
+            <button disabled={busy} onClick={() => act(() => reviewApplication(review.url, false))}
+              className="btn-secondary flex-1 !px-2 !py-1 !text-[11px]"><X className="h-3 w-3" /> Skip</button>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-2 flex justify-between gap-1">
+        <button
+          disabled={busy}
+          onClick={() => act(paused ? resumeApplying : pauseApplying)}
+          className="btn-secondary flex-1 !px-2 !py-1 !text-[11px]"
+          title={paused ? "Resume: the agent re-reads the page and keeps your changes" : "Pause after the current action, so you can fix something"}
+        >
+          {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+          {paused ? "Resume" : "Pause"}
+        </button>
+        <button
+          disabled={busy || !job}
+          onClick={() => job && act(() => skipJob(job.url))}
+          className="btn-secondary !px-2 !py-1 !text-[11px]"
+          title="Skip this job and go to the next one (it stays in your list)"
+          aria-label="Skip this job"
+        >
+          <SkipForward className="h-3.5 w-3.5" />
+        </button>
+        <button
+          disabled={busy}
+          onClick={() => act(stopApplying)}
+          className="btn-secondary !px-2 !py-1 !text-[11px] hover:!text-destructive"
+          title="Stop the whole run"
+          aria-label="Stop"
+        >
+          <Square className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </section>
+  );
+}

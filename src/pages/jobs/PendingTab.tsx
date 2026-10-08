@@ -23,6 +23,7 @@ import {
   Send,
   Lock,
   Hand,
+  SkipForward,
 } from "lucide-react";
 import {
   getJobs,
@@ -42,6 +43,7 @@ import { markStart, measureAndTrack } from "../../lib/perf";
 import type { Job, JobStatus, JobStats, TailorOptions } from "../../lib/types";
 import AutomationDialog from "../../components/AutomationDialog";
 import ApplyModeToggle from "../../components/ApplyModeToggle";
+import InboxBadge from "../../components/InboxBadge";
 import { loadApplyMode, saveApplyMode, type ApplyMode } from "../../lib/applyMode";
 import { useTranslation } from "react-i18next";
 
@@ -53,6 +55,7 @@ const STATUS_ICONS: Record<JobStatus, typeof CheckCircle> = {
   in_progress: Loader2,
   closed: Lock,
   needs_you: Hand,
+  skipped: SkipForward,
 };
 
 const STATUS_STYLES: Record<JobStatus, { color: string; bg: string }> = {
@@ -63,10 +66,12 @@ const STATUS_STYLES: Record<JobStatus, { color: string; bg: string }> = {
   in_progress: { color: "text-primary", bg: "bg-[#FFF0F3]" },
   closed: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
   needs_you: { color: "text-amber-700", bg: "bg-amber-50" },
+  skipped: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
 };
 
 // Jobs that Apply / Retry can start.
-const STARTABLE = (status: JobStatus) => status === "pending" || status === "failed" || status === "needs_you";
+const STARTABLE = (status: JobStatus) =>
+  status === "pending" || status === "failed" || status === "needs_you" || status === "skipped";
 
 interface PendingTabProps {
   onJobsChanged: () => void;
@@ -156,6 +161,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     in_progress: t("status.inProgress"),
     closed: t("status.closed"),
     needs_you: t("status.needsYou"),
+    skipped: t("status.skipped"),
   };
 
   const fetchJobs = (isBackgroundRefresh = false) => {
@@ -361,8 +367,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   };
 
   // Multi-select helpers
+  // "Select all" leaves out Skipped jobs: applying to one overrides the fit
+  // check, so that should be a deliberate choice (its own checkbox or Apply).
   const selectableJobs = jobs.filter(
-    (j) => STARTABLE(j.status)
+    (j) => STARTABLE(j.status) && j.status !== "skipped"
   );
   const allSelectableSelected =
     selectableJobs.length > 0 &&
@@ -590,6 +598,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           { value: "failed", label: t("status.failed"), count: stats.failed },
           { value: "needs_you", label: t("status.needsYou"), count: stats.needs_you ?? 0 },
           { value: "blocked", label: t("status.blocked"), count: stats.blocked },
+          { value: "skipped", label: t("status.skipped"), count: stats.skipped ?? 0 },
           { value: "closed", label: t("status.closed"), count: stats.closed ?? 0 },
         ].map(({ value, label, count }) => (
           <button
@@ -701,16 +710,14 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                           {job.company || t("jobItem.unknown")} ·{" "}
                           {job.location || "—"}
                         </p>
-                        {job.error && (job.status === "closed" || job.status === "needs_you" ? (
-                          // Not an error: why it's closed, or what the user needs to do.
-                          <p className="text-[13px] text-amber-700 mt-1 whitespace-pre-wrap break-words select-text">
-                            {job.error}
-                          </p>
-                        ) : (
-                          <p className="text-[13px] text-destructive mt-1 whitespace-pre-wrap break-words select-text">
-                            {t("jobItem.error", { error: job.error })}
-                          </p>
-                        ))}
+                        {job.error && (
+                          <JobReason
+                            text={job.error}
+                            // Not an error: why it's closed or skipped, or what the user needs to do.
+                            neutral={job.status === "closed" || job.status === "needs_you" || job.status === "pending" || job.status === "skipped"}
+                            prefix={t("jobItem.errorPrefix")}
+                          />
+                        )}
                         {job.collected_at && (
                           <p className="text-[11px] text-muted-foreground mt-1">
                             {t("jobItem.collected", {
@@ -722,6 +729,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                               })}
                           </p>
                         )}
+                        <InboxBadge status={job.inbox_status} subject={job.inbox_subject} />
                         {job.practised_at && job.status === "pending" && (
                           <p className="text-[11px] text-muted-foreground mt-1">
                             Practised {new Date(job.practised_at).toLocaleDateString()} (training run, not submitted)
@@ -1125,6 +1133,23 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/** A job's failure (or skip) reason: a short first line becomes a bold title above the paragraph. */
+function JobReason({ text, neutral, prefix }: { text: string; neutral: boolean; prefix: string }) {
+  const newline = text.indexOf("\n");
+  const first = newline > 0 ? text.slice(0, newline).trim() : "";
+  const hasTitle = first.length > 0 && first.length <= 90 && !/[.:]$/.test(first);
+  const title = hasTitle ? first.replace(/^#+\s*|\*\*/g, "") : "";
+  const body = hasTitle ? text.slice(newline + 1).trim() : text;
+  const color = neutral ? "text-amber-700" : "text-destructive";
+  return (
+    <div className={`text-[13px] mt-1 whitespace-pre-wrap break-words select-text ${color}`}>
+      {title && <p className="font-semibold">{neutral ? title : `${prefix}${title}`}</p>}
+      <p>{!title && !neutral ? `${prefix}${body}` : body}</p>
     </div>
   );
 }

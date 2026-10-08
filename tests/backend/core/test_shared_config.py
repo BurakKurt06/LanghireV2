@@ -478,7 +478,7 @@ def test_screening_answers_reach_the_agent(base_profile, no_op_store):
     base_profile["screening"] = {"start_date": "May 2027", "gpa": "3.6", "gender": "", "linkedin_url": "https://linkedin.com/in/ada"}
     ctx = sc.build_memory_context(base_profile, qa={})
     assert "SCREENING ANSWERS (the candidate's own answers):" in ctx
-    assert "Earliest start date: May 2027\nGPA: 3.6\nLinkedIn profile URL: https://linkedin.com/in/ada" in ctx
+    assert "Start date: May 2027\nGPA: 3.6\nLinkedIn profile URL: https://linkedin.com/in/ada" in ctx
     assert "Gender" not in ctx.split("SCREENING ANSWERS")[1].split("\n\n")[0]
 
 
@@ -518,3 +518,67 @@ def test_learning_instructions_ask_for_few_new_learnings():
 ])
 def test_name_is_split_for_first_and_last_name_fields(name, expected):
     assert sc._describe_name(name) == expected
+
+
+
+# ── batch 1 ────────────────────────────────────────────────────────────────
+import datetime as _dt
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("Immediately", "Summer -> 05/15/YEAR; Fall -> 08/15/YEAR; Spring/Winter -> 01/02/YEAR. For any other job, today: 10/08/2026."),
+    ("ASAP", "today: 10/08/2026"),
+    ("June 1, 2027", "Start date: June 1, 2027"),
+])
+def test_start_date_rule(value, expected):
+    assert expected in sc.describe_start_date(value, "MM/DD/YYYY", _dt.date(2026, 10, 8))
+
+
+def test_empty_start_date_says_nothing():
+    assert "Start date" not in sc._describe_screening({"start_date": "", "gpa": "3.0"})
+
+
+def test_major_alternative_reaches_the_agent(base_profile, no_op_store):
+    base_profile["education"]["major_alternative"] = "Finance"
+    assert "Field of study if yours isn't listed: Finance" in sc.build_memory_context(base_profile, {})
+
+
+def test_performance_mode_drops_per_step_learning_notes(base_profile, no_op_store):
+    with_notes = sc.build_memory_context(base_profile, {})
+    without = sc.build_memory_context(base_profile, {}, learnings=False)
+    assert "SELF-LEARNING" in with_notes and "SELF-LEARNING" not in without
+    assert "@@QUESTION" in without                                   # Q&A saving stays
+
+
+def _jobs_file(data_dir, monkeypatch, jobs):
+    import json as _json
+    path = data_dir / "jobs.json"
+    path.write_text(_json.dumps(jobs), encoding="utf-8")
+    monkeypatch.setattr(sc, "JOBS_FILE", path)
+    monkeypatch.setattr(sc, "JOBS_LOCK", str(path) + ".lock")
+    return path
+
+
+def test_set_job_names_never_touches_user_names(data_dir, monkeypatch):
+    import json as _json
+    path = _jobs_file(data_dir, monkeypatch, {"u1": {"title": "Pasted Link", "company": ""},
+                                              "u2": {"title": "Mine", "company": "My Co", "name_source": "user"}})
+    assert sc.set_job_names("u1", "Data Intern", "Contoso Brokerage Services LLC") is True
+    assert sc.set_job_names("u2", "Other", "Other Co") is False
+    jobs = _json.loads(path.read_text(encoding="utf-8"))
+    assert (jobs["u1"]["title"], jobs["u1"]["company"], jobs["u1"]["name_source"]) == ("Data Intern", "Contoso Brokerage Services", "agent")
+    assert (jobs["u2"]["title"], jobs["u2"]["company"]) == ("Mine", "My Co")
+
+
+def test_refresh_renames_page_names_but_not_agent_names(data_dir, monkeypatch):
+    import json as _json
+    from core.job_page import Posting
+    path = _jobs_file(data_dir, monkeypatch, {
+        "u1": {"title": "About the Firm", "company": "NWND Cooperative Northwind", "source": "pasted"},
+        "u2": {"title": "Quant Intern", "company": "Stark Global", "name_source": "agent"},
+    })
+    sc.refresh_posting_details("u1", Posting(title="Analyst Intern", company="Northwind", locations=["New York, NY"]))
+    sc.refresh_posting_details("u2", Posting(title="Something else", company="Stark Global, LLC"))
+    jobs = _json.loads(path.read_text(encoding="utf-8"))
+    assert (jobs["u1"]["title"], jobs["u1"]["company"], jobs["u1"]["location"]) == ("Analyst Intern", "Northwind", "New York, NY")
+    assert (jobs["u2"]["title"], jobs["u2"]["company"]) == ("Quant Intern", "Stark Global")

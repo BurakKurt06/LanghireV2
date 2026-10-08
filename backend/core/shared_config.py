@@ -240,6 +240,47 @@ def update_job(url: str, **fields):
             save_json(JOBS_FILE, jobs)
 
 
+def _first_place(location_texts: list[str]) -> str:
+    """'New York, NY' for the first location the geo table can place ("" if none)."""
+    try:
+        from core import geo
+    except ImportError:
+        from backend.core import geo
+    for text in location_texts:
+        try:
+            place = geo.resolve(text)
+        except Exception:
+            return ""
+        if place.get("remote"):
+            return "Remote"
+        if place.get("place"):
+            return place["place"]
+    return ""
+
+
+def set_job_names(url: str, title: str = "", company: str = "", source: str = "agent") -> bool:
+    """Name a job (role / company) unless the user named it. True when something changed."""
+    try:
+        from core import job_page
+    except ImportError:
+        from backend.core import job_page
+    title, company = (title or "").strip()[:200], job_page.clean_company(company or "")[:120]
+    with FileLock(JOBS_LOCK):
+        jobs = load_json(JOBS_FILE, {})
+        job = jobs.get(url)
+        if job is None or job.get("name_source") == "user":
+            return False
+        changed = False
+        if title and not job_page.is_placeholder(title) and job.get("title") != title:
+            job["title"], changed = title, True
+        if company and not job_page.is_placeholder(company) and job.get("company") != company:
+            job["company"], changed = company, True
+        if changed:
+            job["name_source"] = source
+            save_json(JOBS_FILE, jobs)
+        return changed
+
+
 def refresh_posting_details(url: str, posting=None, mark_closed: bool = True):
     """Fill a job's placeholder title / empty company from its page; mark it closed if taken down.
 
@@ -260,11 +301,20 @@ def refresh_posting_details(url: str, posting=None, mark_closed: bool = True):
         if job is None:
             return posting
         changed = False
-        if posting.title and job_page.is_placeholder(job.get("title")):
-            job["title"], changed = posting.title, True
-        if posting.company and not (job.get("company") or "").strip():
-            job["company"], changed = posting.company, True
-        if posting.closed and mark_closed and job.get("status") in ("pending", "failed", "needs_you"):
+        source = job.get("name_source")
+        auto = source in (None, "page")  # never overwrite the user's or the agent's names
+        if posting.title and auto and (job_page.is_placeholder(job.get("title"))
+                                       or (source == "page" and job.get("title") != posting.title)):
+            job["title"], job["name_source"], changed = posting.title, "page", True
+        if posting.company and auto and job.get("company") != posting.company and (
+                not (job.get("company") or "").strip() or job.get("company") == "Unknown"
+                or source == "page" or job.get("source") == "pasted"):
+            job["company"], job["name_source"], changed = posting.company, "page", True
+        if posting.locations and not (job.get("location") or "").strip():
+            place = _first_place(posting.locations)
+            if place:
+                job["location"], changed = place, True
+        if posting.closed and mark_closed and job.get("status") in ("pending", "failed", "needs_you", "skipped"):
             job["status"], job["error"], changed = "closed", posting.reason, True
         if changed:
             save_json(JOBS_FILE, jobs)
@@ -360,11 +410,37 @@ SCREENING_LABELS = {
 }
 
 
-def _describe_screening(screening: dict) -> str:
-    return "\n".join(
-        f"{label}: {screening[key]}" for key, label in SCREENING_LABELS.items()
-        if str(screening.get(key) or "").strip()
-    )
+_IMMEDIATE = re.compile(r"^\s*(immediately|asap|now|right away|any ?time)\s*$", re.I)
+
+
+def describe_start_date(value: str, date_format: str = "MM/DD/YYYY", today=None) -> str:
+    """The "Start date" rule the agent follows.
+
+    The user's rule for "available immediately": a season internship or co-op
+    gets about two weeks before that season usually starts, in the posting's
+    year (Summer -> May 15, Fall -> Aug 15, Spring/Winter -> Jan 2); any other
+    job gets today's date.
+    """
+    import datetime as _dt
+    today = today or _dt.date.today()
+    fmt = (date_format.upper().replace("YYYY", "%Y").replace("MM", "%m").replace("DD", "%d"))
+    if value and not _IMMEDIATE.match(value):
+        return f"Start date: {value}"
+    seasons = "; ".join(f"{season} -> {_dt.date(2000, m, d).strftime(fmt).replace('2000', 'YEAR')}"
+                        for season, m, d in (("Summer", 5, 15), ("Fall", 8, 15), ("Spring/Winter", 1, 2)))
+    return ("Start date: available immediately. For a season internship or co-op, use the posting's year "
+            f"(YEAR) with: {seasons}. For any other job, today: {today.strftime(fmt)}.")
+
+
+def _describe_screening(screening: dict, date_format: str = "MM/DD/YYYY") -> str:
+    lines = []
+    for key, label in SCREENING_LABELS.items():
+        value = str(screening.get(key) or "").strip()
+        if key == "start_date" and value:
+            lines.append(describe_start_date(value, date_format))
+        elif value:
+            lines.append(f"{label}: {value}")
+    return "\n".join(lines)
 
 
 def _describe_name(name: str) -> str:
@@ -450,8 +526,13 @@ def build_memory_context(
     qa: dict,
     applied_labels: list[str] | None = None,
     job_url: str | None = None,
+    learnings: bool = True,
 ) -> str:
-    """Build the system message context with candidate profile, Q&A bank, and per-website learnings."""
+    """Build the system message context with candidate profile, Q&A bank, and per-website learnings.
+
+    learnings=False (performance mode): no per-step @@LEARNING notes. Saved
+    tips are still sent, and the end-of-run summary still adds new ones.
+    """
     parts = []
     profile = _with_profile_defaults(profile)
 
@@ -475,6 +556,8 @@ def build_memory_context(
         f"Willing to Relocate: {profile['willing_to_relocate']}, Preferred Work Mode: {_describe_work_mode(profile['preferred_work_mode'])}",
         f"Years of Experience: {profile['years_of_experience']}",
         f"Education: {_describe_education(profile['education'])}",
+        *([f"Field of study if yours isn't listed: {profile['education']['major_alternative']}"]
+          if (profile['education'].get('major_alternative') or '').strip() else []),
         f"Current Role: {profile['current_role']}",
         f"Target Roles: {', '.join(profile['target_job_titles'])}",
         f"Target Locations: {', '.join(profile['target_locations'])}",
@@ -491,7 +574,7 @@ def build_memory_context(
 
     parts.append("\n".join(profile_lines))
 
-    screening = _describe_screening(profile.get('screening') or {})
+    screening = _describe_screening(profile.get('screening') or {}, date_format)
     if screening:
         parts.append("SCREENING ANSWERS (the candidate's own answers):\n" + screening)
 
@@ -553,10 +636,16 @@ def build_memory_context(
             print(f"    🧠 Injecting {mem_count} memories for {domain}")
             parts.append(store.format_for_prompt(memories))
 
-    parts.append(
+    tracking = (
         "TRACKING INSTRUCTIONS:\n"
         "After each successful application: @@JOB_APPLIED: {\"title\": \"...\", \"company\": \"...\", \"location\": \"...\"}\n"
-        "For each form question encountered: @@QUESTION: {\"question\": \"...\", \"answer\": \"...\", \"type\": \"text|dropdown|radio|checkbox\"}\n\n"
+        "For each form question encountered: @@QUESTION: {\"question\": \"...\", \"answer\": \"...\", \"type\": \"text|dropdown|radio|checkbox\"}"
+    )
+    if not learnings:
+        parts.append(tracking)
+        return "\n\n".join(parts)
+    parts.append(
+        tracking + "\n\n"
         "SELF-LEARNING — report observations about THIS WEBSITE's UI/flow as you navigate:\n"
         "@@LEARNING: {\"domain\": \"<website domain>\", \"category\": \"navigation|form_strategy|element_interaction|failure_recovery|site_structure|qa_pattern\", \"insight\": \"<specific actionable observation>\"}\n"
         "Examples of good learnings:\n"

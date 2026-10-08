@@ -313,7 +313,7 @@ describe("PendingTab", () => {
       error: "This site asks you to confirm you're a real person." }] as never);
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
     const reason = await screen.findByText(/confirm you're a real person/);
-    expect(reason.className).toContain("text-amber-700");
+    expect(reason.closest("div")?.className).toContain("text-amber-700");
     expect(screen.getByRole("button", { name: /jobItem\.retry/ })).toBeInTheDocument();
     expect(screen.getAllByText("status.needsYou").length).toBeGreaterThan(0);
   });
@@ -471,5 +471,37 @@ describe("PendingTab", () => {
     // Tailored job shows the "Tailored" badge.
     const tailoredRow = screen.getByText("Staff Engineer").closest("div");
     expect(within(tailoredRow!.parentElement as HTMLElement).getByText("Tailored")).toBeInTheDocument();
+  });
+
+  it("shows a failure's first line as a bold title above the paragraph", async () => {
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(failedJob),
+      error: "Stopped at Review: Field of Study\nThe form had no Statistics option." }] as never);
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    const title = await screen.findByText(/Stopped at Review: Field of Study/);
+    expect(title.className).toContain("font-semibold");
+    expect(screen.getByText("The form had no Statistics option.")).toBeInTheDocument();
+  });
+
+  it("a skipped job shows why and can still be applied to", async () => {
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), status: "skipped",
+      error: "Requires an MBA\nThe posting is for MBA students only." }] as never);
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={{ ...stats, skipped: 1 }} />);
+    expect(await screen.findByText("Requires an MBA")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /jobItem\.retry/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /status\.skipped \(1\)/ })).toBeInTheDocument();
+  });
+
+  it("Select All leaves out skipped jobs (applying to one overrides the fit check)", async () => {
+    const skipped = { ...structuredClone(pendingJob), url: "https://job.example/skipped", title: "MBA Associate",
+      status: "skipped" as const, error: "Requires an MBA\nMBA students only." };
+    mockGetJobs.mockResolvedValue([structuredClone(pendingJob), skipped] as never);
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("MBA Associate");
+    await user.click(screen.getByRole("button", { name: /Select All \(\s*1\)/ }));
+    await user.click(await screen.findByRole("button", { name: /Apply to 1 job/ }));
+    await waitFor(() =>
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ job_urls: [pendingJob.url] })),
+    );
   });
 });

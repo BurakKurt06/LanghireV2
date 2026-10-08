@@ -33,6 +33,7 @@ import {
 import { trackEvent } from "../../lib/analytics";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import LogLine from "../../components/LogLine";
+import InboxBadge from "../../components/InboxBadge";
 import { useTranslation } from "react-i18next";
 import type { Job, RunMetric, AppSettings, PendingReview, HelpRequest } from "../../lib/types";
 import { CircleAlert } from "lucide-react";
@@ -410,6 +411,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
                       <p className="text-sm font-medium text-foreground truncate">
                         {row.job.title || "Untitled"}
                       </p>
+                      <InboxBadge status={row.job.inbox_status} subject={row.job.inbox_subject} />
                       <p className="text-[12px] text-muted-foreground truncate">
                         {row.job.company || "Unknown company"}
                       </p>

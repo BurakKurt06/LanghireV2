@@ -10,6 +10,7 @@ export interface Address {
 export interface Education {
   degree: string;
   major?: string; // absent in profiles saved before the field existed
+  major_alternative?: string; // picked when a form's list doesn't offer the major
   school: string;
   start_date?: string; // absent in profiles saved before the field existed
   graduation: string;
@@ -60,6 +61,14 @@ export interface CandidateProfile {
   date_format: string;
   notes: string;
   screening?: ScreeningAnswers;
+  /** Where to apply: jobs outside the radius around the ZIP are skipped (remote always counts). */
+  search_area?: SearchArea;
+}
+
+export interface SearchArea {
+  /** Empty: the address ZIP. */
+  center_zip: string;
+  radius: "25" | "50" | "100" | "any";
 }
 
 // ── LLM Settings ──────────────────────────────────────────────────────────
@@ -153,6 +162,19 @@ export interface AppSettings {
   browser?: string;
   /** Executable used when browser is "custom". */
   browser_path?: string;
+  /** Extra files the agent may upload (transcript, ...). */
+  other_documents?: OtherDocument[];
+  /** Turns off optional AI work (fit check, agent job naming, per-step learnings, prep sheets). */
+  performance_mode?: boolean;
+  /** AI fit check before applying. Default true. */
+  fit_check_enabled?: boolean;
+  /** Write cover letters into cover-letter boxes. Default false. */
+  cover_letter_boxes?: boolean;
+}
+
+export interface OtherDocument {
+  label: string;
+  path: string;
 }
 
 /** A Chromium-based browser found on this machine (GET /browsers). */
@@ -182,6 +204,9 @@ export interface Job {
   user_note?: string;
   /** When a training run last filled this job in (without submitting). */
   practised_at?: string;
+  /** From the Inbox page's Gmail check: what the employer's latest email said. */
+  inbox_status?: string;
+  inbox_subject?: string;
 }
 
 // ── Resume Tailoring ─────────────────────────────────────────────────────
@@ -332,6 +357,46 @@ export interface CollectionStatus {
   finished_at: string | null;
 }
 
+export type InboxCategory = "applied" | "assessment" | "interview" | "offer" | "rejected";
+
+export interface InboxEmail {
+  id: string;
+  date: string;
+  sender: string;
+  sender_email: string;
+  subject: string;
+  snippet: string;
+  text?: string;
+  category: InboxCategory;
+  company: string;
+  role: string;
+  gmail_url: string;
+  job_url: string | null;
+  prep?: string;
+}
+
+export interface InboxStatus {
+  checking: boolean;
+  requested: boolean;
+  status: string;
+  error: string;
+  schedule: "off" | "daily" | "weekly";
+  last_checked: string | null;
+  emails: InboxEmail[];
+  busy: boolean;
+  performance_mode: boolean;
+}
+
+export interface CurrentJob {
+  worker: number;
+  url: string;
+  title: string;
+  company: string;
+  step: number;
+  max_steps: number;
+  started_at: string;
+}
+
 export interface ApplyStatus {
   running: boolean;
   /** Paused from the app so the user can take over the browser. */
@@ -340,6 +405,10 @@ export interface ApplyStatus {
   reviews?: PendingReview[];
   /** Trial-run applications stuck and waiting for the user's help. */
   help?: HelpRequest[];
+  /** The job each worker is on right now. */
+  current?: CurrentJob[];
+  /** "auto" | "trial" | "training" while running. */
+  run_mode?: string | null;
   mode: string | null;
   workers: number;
   log: string[];
@@ -348,7 +417,8 @@ export interface ApplyStatus {
 }
 
 // closed: the posting was taken down. needs_you: a step only the user can do (a "confirm you're human" box).
-export type JobStatus = "pending" | "in_progress" | "applied" | "failed" | "blocked" | "closed" | "needs_you";
+// skipped: the fit check found a hard requirement the user doesn't meet (they can still apply by hand).
+export type JobStatus = "pending" | "in_progress" | "applied" | "failed" | "blocked" | "closed" | "needs_you" | "skipped";
 
 export interface JobStats {
   total: number;
@@ -359,6 +429,7 @@ export interface JobStats {
   in_progress: number;
   closed?: number;
   needs_you?: number;
+  skipped?: number;
 }
 
 export interface DashboardResponse {

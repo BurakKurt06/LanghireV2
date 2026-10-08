@@ -1203,3 +1203,113 @@ class TestFailureFixes:
         assert any(a.startswith("--user-data-dir=") for a in args)
         assert args[-1].startswith("https://accounts.google.com/")
         assert not any("remote-debugging" in a or "enable-automation" in a for a in args)
+
+
+
+class TestBatch1Api:
+    def test_status_reports_current_job_and_mode(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        monkeypatch.setitem(main._apply_status, "running", True)
+        monkeypatch.setattr(apply_jobs, "_current", {1: {"url": "u", "title": "Intern", "company": "Acme", "step": 4,
+                                                         "max_steps": 70, "started_at": "2026-10-08T10:00:00+00:00"}})
+        monkeypatch.setitem(apply_jobs._run_options, "mode", "training")
+        status = auth_client.get("/apply/status").json()
+        assert status["current"][0]["title"] == "Intern" and status["current"][0]["worker"] == 1
+        assert status["run_mode"] == "training"
+
+    def test_skip_endpoint(self, auth_client, monkeypatch):
+        from cli import apply_jobs
+        monkeypatch.setitem(main._apply_status, "running", True)
+        monkeypatch.setitem(main._apply_status, "log", [])
+        monkeypatch.setattr(apply_jobs, "skip_job", lambda url: url == "u")
+        assert auth_client.post("/apply/skip", json={"url": "u"}).json()["success"] is True
+        assert auth_client.post("/apply/skip", json={"url": "x"}).json()["success"] is False
+
+    def test_interrupted_jobs_get_a_note(self, auth_client):
+        import core.shared_config as shared_config
+        auth_client.post("/jobs/add", json={"url": "https://jobs.example/i", "title": "Intern"})
+        shared_config.update_job("https://jobs.example/i", status="in_progress")
+        main._recover_stale_jobs()
+        job = shared_config.read_jobs()["https://jobs.example/i"]
+        assert job["status"] == "pending" and job["error"] == main.INTERRUPTED_NOTE
+
+    def test_typed_names_are_the_users(self, auth_client):
+        import core.shared_config as shared_config
+        auth_client.post("/jobs/add", json={"url": "https://jobs.example/t", "title": "My Title"})
+        auth_client.post("/jobs/add", json={"url": "https://jobs.example/n"})
+        jobs = shared_config.read_jobs()
+        assert jobs["https://jobs.example/t"]["name_source"] == "user"
+        assert "name_source" not in jobs["https://jobs.example/n"]
+
+    def test_skipped_status_counts_and_can_be_set(self, auth_client):
+        auth_client.post("/jobs/add", json={"url": "https://jobs.example/s"})
+        assert auth_client.put("/jobs/status", json={"url": "https://jobs.example/s", "status": "skipped"}).json()["status"] == "skipped"
+        assert auth_client.get("/jobs/stats").json()["skipped"] == 1
+        assert "skipped" in main.RETRYABLE_STATUSES
+
+
+
+class TestInboxApi:
+    @pytest.fixture(autouse=True)
+    def _inbox_dir(self, data_dir, monkeypatch):
+        from core import inbox
+        monkeypatch.setattr(inbox, "get_data_dir", lambda: data_dir)
+        inbox._state.update(checking=False, requested=False, status="", error="")
+
+    def test_get_inbox(self, auth_client):
+        data = auth_client.get("/inbox").json()
+        assert data["emails"] == [] and data["schedule"] == "off" and data["performance_mode"] is False
+        assert data["busy"] is False
+
+    def test_check_needs_a_model_then_queues(self, auth_client, monkeypatch):
+        monkeypatch.setattr(main, "load_llm_settings", lambda: {})
+        assert auth_client.post("/inbox/check").status_code == 400
+        monkeypatch.setattr(main, "load_llm_settings", lambda: {"provider": "chatgpt"})
+        assert auth_client.post("/inbox/check").json()["success"] is True
+        from core import inbox
+        assert inbox._state["requested"] is True
+
+    def test_schedule(self, auth_client):
+        assert auth_client.put("/inbox/schedule", json={"schedule": "daily"}).json()["schedule"] == "daily"
+        assert auth_client.get("/inbox").json()["schedule"] == "daily"
+        assert auth_client.put("/inbox/schedule", json={"schedule": "hourly"}).status_code == 400
+
+    def test_busy_during_a_run_or_sign_in(self, monkeypatch):
+        monkeypatch.setitem(main._apply_status, "running", True)
+        assert main._inbox_busy() is True
+        monkeypatch.setitem(main._apply_status, "running", False)
+        monkeypatch.setattr(main, "_login_process", None)
+        assert main._inbox_busy() is False
+
+    def test_prep_sheet_is_off_in_performance_mode(self, auth_client, monkeypatch):
+        from core import inbox
+        inbox.save({"emails": [{"id": "x", "category": "interview", "company": "Stark", "role": "Quant", "text": "call"}],
+                    "schedule": "off", "last_checked": None})
+        monkeypatch.setattr(main, "load_settings", lambda: {"performance_mode": True})
+        assert auth_client.post("/inbox/prep", json={"id": "x"}).status_code == 400
+
+    def test_prep_sheet_is_written_and_stored(self, auth_client, monkeypatch):
+        from core import inbox
+        inbox.save({"emails": [{"id": "x", "category": "interview", "company": "Stark", "role": "Quant", "text": "call"}],
+                    "schedule": "off", "last_checked": None})
+        monkeypatch.setattr(main, "load_settings", lambda: {})
+        monkeypatch.setattr(main, "load_llm_settings", lambda: {"provider": "chatgpt"})
+
+        async def sheet(*a, **k):
+            return "THE INTERVIEW\n- 30 minutes"
+
+        monkeypatch.setattr(inbox, "write_prep_sheet", sheet)
+        import core.llm_factory as lf
+        monkeypatch.setattr(lf, "create_llm", lambda s: object())
+        resp = auth_client.post("/inbox/prep", json={"id": "x"}).json()
+        assert resp["prep"] == "THE INTERVIEW\n- 30 minutes" and inbox.find("x")["prep"] == resp["prep"]
+        assert auth_client.post("/inbox/prep", json={"id": "nope"}).status_code == 404
+
+    def test_no_run_or_sign_in_while_gmail_is_being_checked(self, auth_client, monkeypatch):
+        from core import inbox
+        monkeypatch.setitem(inbox._state, "checking", True)
+        monkeypatch.setattr(main, "_login_process", None)
+        resp = auth_client.post("/apply/start", json={"mode": "all"}).json()
+        assert resp["success"] is False and "checking Gmail" in resp["message"]
+        resp = auth_client.post("/auth/login/gmail").json()
+        assert resp["success"] is False and "checking Gmail" in resp["message"]

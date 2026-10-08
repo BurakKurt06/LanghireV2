@@ -18,7 +18,7 @@ const defaultProfile: CandidateProfile = {
   willing_to_relocate: false,
   preferred_work_mode: "hybrid",
   years_of_experience: 0,
-  education: { degree: "", major: "", school: "", start_date: "", graduation: "" },
+  education: { degree: "", major: "", major_alternative: "", school: "", start_date: "", graduation: "" },
   current_role: "",
   target_job_titles: [],
   target_locations: [],
@@ -35,6 +35,7 @@ const defaultProfile: CandidateProfile = {
     start_date: "", gpa: "", linkedin_url: "", portfolio_url: "",
     gender: "", race_ethnicity: "", veteran_status: "", disability_status: "",
   },
+  search_area: { center_zip: "", radius: "any" },
 };
 
 export default function Profile() {
@@ -58,6 +59,8 @@ export default function Profile() {
         ...defaultProfile,
         ...data,
         screening: { ...defaultProfile.screening!, ...(data.screening || {}) },
+        search_area: { ...defaultProfile.search_area!, ...(data.search_area || {}) },
+        education: { ...defaultProfile.education, ...(data.education || {}) },
       })),
       getCountries().then((data) => {
         setCountries(data.countries);
@@ -90,7 +93,7 @@ export default function Profile() {
     setSaved(false);
   };
 
-  const updateNested = (parent: keyof Pick<CandidateProfile, "address" | "education" | "salary_expectation" | "screening">, field: string, value: unknown) => {
+  const updateNested = (parent: keyof Pick<CandidateProfile, "address" | "education" | "salary_expectation" | "screening" | "search_area">, field: string, value: unknown) => {
     setProfile((p) => {
       const current = p[parent];
       if (typeof current === "object" && current !== null) {
@@ -277,11 +280,39 @@ export default function Profile() {
         </div>
       </Section>
 
+      {/* Search area */}
+      <Section title={t("searchArea.title")}>
+        <p className="text-[13px] text-muted-foreground mb-3">{t("searchArea.hint")}</p>
+        <div className="grid grid-cols-2 gap-4">
+          <Input
+            label={t("searchArea.centerZip")}
+            value={profile.search_area?.center_zip ?? ""}
+            placeholder={profile.address.zip || "e.g. 10001"}
+            onChange={(v) => updateNested("search_area", "center_zip", v)}
+          />
+          <div>
+            <label htmlFor="search-radius" className="block text-sm font-semibold text-foreground mb-1.5">{t("searchArea.radius")}</label>
+            <select
+              id="search-radius"
+              value={profile.search_area?.radius ?? "any"}
+              onChange={(e) => updateNested("search_area", "radius", e.target.value)}
+              className="input-base"
+            >
+              <option value="25">{t("searchArea.under", { miles: 25 })}</option>
+              <option value="50">{t("searchArea.under", { miles: 50 })}</option>
+              <option value="100">{t("searchArea.under", { miles: 100 })}</option>
+              <option value="any">{t("searchArea.any")}</option>
+            </select>
+          </div>
+        </div>
+      </Section>
+
       {/* Education */}
       <Section title={t("education.title")}>
         <div className="grid grid-cols-2 gap-4">
           <Input label={t("education.degree")} value={profile.education.degree} onChange={(v) => updateNested("education", "degree", v)} />
           <Input label={t("education.major")} value={profile.education.major ?? ""} onChange={(v) => updateNested("education", "major", v)} />
+          <Input label={t("education.majorAlternative")} value={profile.education.major_alternative ?? ""} placeholder={t("education.majorAlternativePlaceholder")} onChange={(v) => updateNested("education", "major_alternative", v)} />
           <Input label={t("education.school")} value={profile.education.school} onChange={(v) => updateNested("education", "school", v)} />
           <Input label={t("education.startDate")} value={profile.education.start_date ?? ""} placeholder={t("education.startDatePlaceholder")} onChange={(v) => updateNested("education", "start_date", v)} />
           <Input label={t("education.graduation")} value={profile.education.graduation} onChange={(v) => updateNested("education", "graduation", v)} />

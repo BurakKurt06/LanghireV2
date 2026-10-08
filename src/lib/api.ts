@@ -4,6 +4,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  InboxStatus,
   CandidateProfile,
   LLMSettings,
   AppSettings,
@@ -334,6 +335,27 @@ export async function saveJobNote(url: string, note: string) {
 
 export async function reviewApplication(url: string, approve: boolean) {
   return request<{ success: boolean }>("/apply/review", { method: "POST", body: JSON.stringify({ url, approve }) });
+}
+
+// ── Inbox (Gmail check) ───────────────────────────────────────────────────
+export async function getInbox() {
+  return request<InboxStatus>("/inbox");
+}
+
+export async function checkInbox() {
+  return request<{ success: boolean }>("/inbox/check", { method: "POST" });
+}
+
+export async function setInboxSchedule(schedule: InboxStatus["schedule"]) {
+  return request<{ success: boolean }>("/inbox/schedule", { method: "PUT", body: JSON.stringify({ schedule }) });
+}
+
+export async function makePrepSheet(id: string) {
+  return request<{ success: boolean; prep: string }>("/inbox/prep", { method: "POST", body: JSON.stringify({ id }) });
+}
+
+export async function skipJob(url: string) {
+  return request<{ success: boolean }>("/apply/skip", { method: "POST", body: JSON.stringify({ url }) });
 }
 
 export async function getApplyStatus() {

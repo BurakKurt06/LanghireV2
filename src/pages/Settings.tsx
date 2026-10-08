@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 import { PageHeader, LoadingSpinner, Section, PasswordInput } from "../components/ui";
 import TagInput from "../components/ui/TagInput";
 import LoginCards from "../components/LoginCards";
-import type { PluginConfig, InstalledBrowser } from "../lib/types";
+import type { PluginConfig, InstalledBrowser, OtherDocument } from "../lib/types";
 
 export default function SettingsPage() {
   const { t } = useTranslation("settings");
@@ -34,11 +34,19 @@ export default function SettingsPage() {
   const [browser, setBrowser] = useState("");
   const [browserPath, setBrowserPath] = useState("");
   const [browsers, setBrowsers] = useState<InstalledBrowser[]>([]);
+  const [otherDocuments, setOtherDocuments] = useState<OtherDocument[]>([]);
+  const [performanceMode, setPerformanceMode] = useState(false);
+  const [fitCheckEnabled, setFitCheckEnabled] = useState(true);
+  const [coverLetterBoxes, setCoverLetterBoxes] = useState(false);
 
   useEffect(() => {
     Promise.all([
       getSettings().then((data) => {
         setResumePath(data.resume_path || "");
+        setOtherDocuments(data.other_documents || []);
+        setPerformanceMode(data.performance_mode === true);
+        setFitCheckEnabled(data.fit_check_enabled !== false);
+        setCoverLetterBoxes(data.cover_letter_boxes === true);
         setBlockedDomains(data.blocked_domains || []);
         setMaxFailures(data.max_failures || 8);
         setTelemetryEnabled(data.telemetry_enabled !== false);
@@ -129,6 +137,10 @@ export default function SettingsPage() {
         captcha_api_key: captchaApiKey,
         browser,
         browser_path: browserPath,
+        other_documents: otherDocuments.filter((d) => d.path.trim()),
+        performance_mode: performanceMode,
+        fit_check_enabled: fitCheckEnabled,
+        cover_letter_boxes: coverLetterBoxes,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -197,6 +209,85 @@ export default function SettingsPage() {
           </button>
         </div>
         <p className="text-[13px] text-muted-foreground mt-2">PDF resume file used for job applications</p>
+
+        <div className="mt-5">
+          <p className="text-sm font-semibold text-foreground">Other documents</p>
+          <p className="text-[13px] text-muted-foreground mt-1 mb-2">
+            Files the agent may upload when a form asks for them, like a transcript or a writing sample.
+            When a form requires a file you haven't added, the job is marked "Needs you".
+          </p>
+          {otherDocuments.map((doc, i) => (
+            <div key={i} className="flex gap-2 mb-2">
+              <input
+                value={doc.label}
+                aria-label="Document name"
+                placeholder="e.g. Transcript"
+                onChange={(e) => setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, label: e.target.value } : d)))}
+                className="input-base !w-44"
+              />
+              <input
+                value={doc.path}
+                aria-label="Document file"
+                placeholder="/path/to/file.pdf"
+                onChange={(e) => setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, path: e.target.value } : d)))}
+                className="input-base flex-1"
+              />
+              <button onClick={async () => {
+                  const file = await open({ filters: [{ name: "Documents", extensions: ["pdf", "doc", "docx", "txt"] }] });
+                  if (file) setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, path: file as string } : d)));
+                }}
+                className="btn-secondary">
+                <FolderOpen className="w-4 h-4" /> Browse
+              </button>
+              <button
+                onClick={() => setOtherDocuments(otherDocuments.filter((_, j) => j !== i))}
+                className="p-2 text-muted-foreground hover:text-destructive"
+                aria-label={`Remove ${doc.label || "document"}`}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          ))}
+          <button onClick={() => setOtherDocuments([...otherDocuments, { label: "", path: "" }])} className="btn-secondary text-xs">
+            + Add document
+          </button>
+        </div>
+      </Section>
+
+      {/* AI features */}
+      <Section title="AI Features">
+        <SettingSwitch
+          label="Performance mode"
+          checked={performanceMode}
+          onChange={setPerformanceMode}
+          description={
+            "Turns off optional AI work that doesn't change your answers: the fit check, job naming by the agent, " +
+            "the agent's per-step learning notes and interview prep sheets. Screenshots, form checks and your " +
+            "saved answers stay on, so applications are filled just as carefully. In a test it saved one AI " +
+            "request and about 10 seconds per application, and also skips the one automatic retry after a failure."
+          }
+        />
+        <SettingSwitch
+          label="Fit check before applying"
+          checked={fitCheckEnabled && !performanceMode}
+          disabled={performanceMode}
+          onChange={setFitCheckEnabled}
+          description={
+            "Reads each posting first (one small AI request) and skips jobs with a hard requirement you don't meet: " +
+            "degree level (MBA / Master's / PhD only), graduation year, citizenship or clearance, or location outside " +
+            "your search area. Skipped jobs show the reason, and you can still apply by hand." +
+            (performanceMode ? " Off while performance mode is on." : "")
+          }
+        />
+        <SettingSwitch
+          label="Fill cover-letter boxes"
+          checked={coverLetterBoxes}
+          onChange={setCoverLetterBoxes}
+          description={
+            "When a form has a cover letter box or upload, write a short letter for that job from your profile, " +
+            "resume and the posting. Plain text, no formatting, no AI-sounding phrases."
+          }
+        />
       </Section>
 
       {/* Gmail / LinkedIn sign-in for the agent's browser */}
@@ -520,6 +611,32 @@ export default function SettingsPage() {
           <Upload className="w-4 h-4" /> Import Plugin
         </button>
       </Section>
+    </div>
+  );
+}
+
+
+function SettingSwitch({ label, description, checked, onChange, disabled = false }: {
+  label: string; description: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between py-2">
+      <div>
+        <p className="text-sm font-semibold text-foreground">{label}</p>
+        <p className="text-[13px] text-muted-foreground mt-1">{description}</p>
+      </div>
+      <label className={`relative inline-flex items-center flex-shrink-0 ml-4 ${disabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}>
+        <input
+          type="checkbox"
+          role="switch"
+          aria-label={label}
+          checked={checked}
+          disabled={disabled}
+          onChange={(e) => onChange(e.target.checked)}
+          className="sr-only peer"
+        />
+        <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+      </label>
     </div>
   );
 }

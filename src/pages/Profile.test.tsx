@@ -224,4 +224,21 @@ describe("Profile page", () => {
     expect(await screen.findByRole("button", { name: "save" })).toBeInTheDocument();
     expect(screen.getByText("English")).toBeInTheDocument();
   });
+
+  it("sets a search area and a field-of-study fallback", async () => {
+    mockGetProfile.mockResolvedValue({ ...sampleProfile, address: { street: "", city: "", state: "", zip: "10001", country: "USA" } } as CandidateProfile);
+    const user = userEvent.setup();
+    render(<Profile />);
+    expect(await screen.findByText("searchArea.title")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("10001")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("searchArea.radius"), "50");
+    await user.type(screen.getByPlaceholderText("education.majorAlternativePlaceholder"), "Finance");
+    await user.click(screen.getByRole("button", { name: "save" }));
+    await waitFor(() =>
+      expect(mockSaveProfile).toHaveBeenCalledWith(expect.objectContaining({
+        search_area: { center_zip: "", radius: "50" },
+        education: expect.objectContaining({ major_alternative: "Finance" }),
+      })),
+    );
+  });
 });

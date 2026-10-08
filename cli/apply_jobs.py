@@ -42,7 +42,7 @@ try:
     from memory.metrics import MetricsStore
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import core.captcha as _captcha
-    from core import click_patch, form_snapshot, job_page
+    from core import ai_extras, click_patch, form_check, form_snapshot, geo, job_page
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import (
@@ -57,7 +57,7 @@ except ImportError:
     from backend.memory.metrics import MetricsStore
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import backend.core.captcha as _captcha
-    from backend.core import click_patch, form_snapshot, job_page
+    from backend.core import ai_extras, click_patch, form_check, form_snapshot, geo, job_page
 
 # Workday's checkboxes, radio buttons and buttons need real mouse clicks.
 click_patch.apply()
@@ -159,6 +159,35 @@ def failure_reason(result) -> str:
         return result.final_result()
     errors = [e for e in result.errors() if e]
     return errors[-1] if errors else "Agent reported failure"
+
+
+# ── What is running, for the sidebar run controls ───────────────────────────
+# worker id -> {"url", "title", "company", "step", "max_steps", "started_at"}
+_current: dict[int, dict] = {}
+# Jobs the user chose to skip mid-run (they stay pending, with a note).
+_skip_requested: set[str] = set()
+SKIPPED_BY_YOU_NOTE = "Skipped by you during the run. It stays in the list; apply again any time."
+
+
+def current_jobs() -> list[dict]:
+    return [dict(job, worker=w) for w, job in sorted(_current.items())]
+
+
+def skip_job(url: str) -> bool:
+    """Stop the application to `url` and move on to the next job (called from the app)."""
+    agent = next((a for a in list(_running_agents) if getattr(a, "_langhire_url", None) == url), None)
+    if agent is None:
+        return False
+    _skip_requested.add(url)
+    # A run waiting for the user's help or review ends at once.
+    answer_help(url, "", True)
+    decide_review(url, False)
+    loop = getattr(agent, "_langhire_loop", None)
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(agent.stop)
+    else:
+        agent.stop()
+    return True
 
 
 # ── Pause / resume from the app ─────────────────────────────────────────────
@@ -323,10 +352,21 @@ def is_training_run() -> bool:
     return _run_options["mode"] == "training"
 
 
+NAME_JOB_RULE = (
+    "JOB NAME: when you first see the posting, call set_job_details with the role and the employer's "
+    "everyday name as the page shows it (e.g. 'Contoso', not 'Contoso Brokerage Services LLC'), in the "
+    "same step as your other actions.\n\n"
+)
+COVER_LETTER_RULE = (
+    "COVER LETTERS: when a form has a cover letter text box, or asks to upload a cover letter, call "
+    "write_cover_letter once and use its text (paste it as is) or its PDF path. Never write one yourself.\n\n"
+)
+
 TRAINING_RULES = (
     "TRAINING RUN (practice): fill in every page exactly as for a real application, but NEVER click "
     "the final Submit / Apply button. When only that button is left, call done with success=true and a "
-    "short summary of what you filled in, without clicking it.\n\n"
+    "short summary of what you filled in, without clicking it. Reaching that point is a success even if "
+    "you noted small doubts: list them in the summary.\n\n"
 )
 
 
@@ -361,6 +401,11 @@ def decide_review(url: str, approve: bool) -> bool:
     return True
 
 
+class JobDetails(BaseModel):
+    role: str = Field(description="The job title as the posting shows it")
+    company: str = Field(description="The employer's everyday name, e.g. 'Contoso' (not the legal entity)")
+
+
 class GuessedAnswer(BaseModel):
     question: str = Field(description="The question exactly as the form shows it")
     answer: str = Field(description="The answer you gave")
@@ -380,10 +425,98 @@ class SubmitReview(BaseModel):
     summary: str = Field(description="One short paragraph: what you filled in and anything you were unsure of")
 
 
+def guard_next_clicks(tools: Tools, agent_ref: dict, worker_id: int) -> None:
+    """Don't let Next / Continue / Submit be clicked while required questions are unanswered.
+
+    The agent is told which ones are missing instead. The same set of missing
+    questions only blocks once, so a field misread as required can never stop a run.
+    """
+    click = tools._click_by_index
+
+    async def guarded(params, browser_session):
+        try:
+            node = await browser_session.get_element_by_index(params.index) if params.index is not None else None
+            label = ""
+            if node is not None:
+                label = (node.get_all_children_text() or node.attributes.get("aria-label")
+                         or node.attributes.get("value") or "").strip()
+            if form_check.is_advance_button(label):
+                data = await form_check.scan(browser_session)
+                missing = form_check.missing_required(data)
+                key = tuple(f["label"] for f in missing)
+                if missing and len(data.get("fields", [])) >= form_check.MIN_FIELDS and agent_ref.get("blocked_next") != key:
+                    agent_ref["blocked_next"] = key
+                    names = "; ".join(form_check._describe(f) for f in missing)
+                    print(f"  ✋ [W{worker_id}] Held back '{label[:30]}': {len(missing)} required question(s) unanswered")
+                    return ActionResult(error=(
+                        f"Not clicked '{label[:40]}': these required questions on this page are still unanswered "
+                        f"(top to bottom): {names}. Answer them, then click it again."))
+        except Exception:
+            pass
+        return await click(params, browser_session)
+
+    tools._click_by_index = guarded
+
+
+def add_form_check_each_step(agent, profile: dict | None = None) -> None:
+    """Put the page's FORM CHECK note into every step's prompt (after the page; cheap, cache-friendly)."""
+    from browser_use.llm.messages import UserMessage
+    original = getattr(agent, "_inject_budget_warning", None)
+    if original is None:
+        return
+
+    async def with_form_check(step_info=None):
+        await original(step_info)
+        try:
+            note = form_check.checklist_text(await form_check.scan(agent.browser_session), profile)
+            if note:
+                agent._message_manager._add_context_message(UserMessage(content=note))
+        except Exception:
+            pass
+
+    agent._inject_budget_warning = with_form_check
+
+
 def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id: int) -> Tools:
     """The agent's actions for one application: the defaults plus ours."""
     tools = Tools()
     url, title, company = job["url"], job.get("title", ""), job.get("company", "")
+    guard_next_clicks(tools, agent_ref, worker_id)
+
+    saved = read_jobs().get(url) or {}
+    # Only when the page didn't already give a good name (saves the tokens otherwise).
+    unnamed = job_page.is_placeholder(job.get("title")) or not (job.get("company") or "").strip()
+    if unnamed and not performance_mode() and saved.get("name_source") != "user":
+        @tools.action(
+            "Record the job's role and the employer's everyday name, as the posting shows them. Call it once.",
+            param_model=JobDetails,
+        )
+        async def set_job_details(params: JobDetails):
+            changed = await asyncio.to_thread(config.set_job_names, url, params.role, params.company, "agent")
+            if changed:
+                print(f"  🏷️  [W{worker_id}] Named: {params.role} at {params.company}")
+            _current.get(worker_id, {}).update(title=params.role or title, company=params.company or company)
+            return ActionResult(extracted_content="Noted.")
+
+    if cover_letter_boxes_on():
+        @tools.action(
+            "Write a cover letter for this job (plain text, the candidate's own voice). Returns the text to "
+            "paste into a cover letter box and the path of a PDF version for upload fields.",
+        )
+        async def write_cover_letter():
+            if agent_ref.get("cover_letter"):
+                return ActionResult(extracted_content=agent_ref["cover_letter"])
+            try:
+                text = await ai_extras.write_cover_letter(
+                    config.get_llm(), agent_ref.get("profile") or {}, agent_ref.get("resume_text") or "",
+                    title, company, agent_ref.get("posting_description") or "")
+                ai_extras.write_pdf(text, agent_ref["cover_letter_pdf"])
+            except Exception as e:
+                return ActionResult(error=f"Couldn't write a cover letter: {e}")
+            print(f"  ✉️  [W{worker_id}] Wrote a cover letter for {title} at {company}")
+            agent_ref["cover_letter"] = (f"COVER LETTER TEXT (paste exactly):\n{text}\n\n"
+                                         f"PDF for upload fields: {agent_ref['cover_letter_pdf']}")
+            return ActionResult(extracted_content=agent_ref["cover_letter"])
 
     @tools.action(
         "Log the answers you had to guess: questions the profile, resume, saved answers and the "
@@ -516,6 +649,10 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
 
 
 PAGE_CHECK_RULES = (
+    "FILL TOP TO BOTTOM: on each page start at the first question and work down in order, one question "
+    "after another; don't jump between the top and the bottom. Each step's FORM CHECK note lists the "
+    "required questions still unanswered on this page (a red * means required even when the element list "
+    "doesn't say so): answer all of them before moving on.\n"
     "PAGE BY PAGE: before clicking Next, Continue, Save and Continue or Submit, check every field on the "
     "current page:\n"
     "- Every answer must come from the candidate profile, the resume, the saved answers, the user's "
@@ -573,6 +710,67 @@ async def wait_for_page_content(agent) -> None:
         pass
 
 
+def performance_mode() -> bool:
+    """Settings -> Performance mode: optional AI work off (answers stay the same)."""
+    return bool(config.load_runtime_settings().get("performance_mode"))
+
+
+def fit_check_on() -> bool:
+    settings = config.load_runtime_settings()
+    return settings.get("fit_check_enabled", True) is not False and not settings.get("performance_mode")
+
+
+def cover_letter_boxes_on() -> bool:
+    return bool(config.load_runtime_settings().get("cover_letter_boxes"))
+
+
+def search_area(profile: dict) -> tuple[str, str]:
+    """(centre ZIP, radius "25" | "50" | "100" | "any") from Profile -> Search area."""
+    area = profile.get("search_area") or {}
+    center = (area.get("center_zip") or (profile.get("address") or {}).get("zip") or "").strip()
+    return center, str(area.get("radius") or "any")
+
+
+def previous_failure_instructions(text: str) -> str:
+    if not text:
+        return ""
+    return ("THE LAST ATTEMPT AT THIS JOB FAILED. Its own report:\n"
+            f"{text[:1500]}\n"
+            "Read it, work out what went wrong, and get past that point a different way this time (another "
+            "control, the keyboard, Edit links, Sign In instead of Create Account, ...).\n\n")
+
+
+def _is_workday(url: str) -> bool:
+    host = (_urlparse_host(url) or "").lower()
+    return "myworkdayjobs.com" in host or "myworkdaysite.com" in host
+
+
+def _urlparse_host(url: str) -> str:
+    from urllib.parse import urlparse
+    return urlparse(url).hostname or ""
+
+
+def safe_folder_name(name: str) -> str:
+    """A folder name Windows accepts: "apply_X_Early Careers: Health" -> "apply_X_Early_Careers__Health"."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).replace(" ", "_").strip(". ")
+    return cleaned[:80] or "apply"
+
+
+def other_documents() -> list[dict]:
+    """Extra files from Settings -> Other documents ([{"label", "path"}]) that exist on disk."""
+    from pathlib import Path as _Path
+    docs = config.load_runtime_settings().get("other_documents") or []
+    return [d for d in docs if isinstance(d, dict) and d.get("path") and _Path(d["path"]).is_file()]
+
+
+def documents_instructions(documents: list[dict]) -> str:
+    if not documents:
+        return ""
+    lines = "\n".join(f"- {d.get('label') or 'Document'}: {d['path']}" for d in documents)
+    return ("OTHER DOCUMENTS you may upload when a form asks for them (use the exact path):\n"
+            f"{lines}\n\n")
+
+
 def user_note_instructions(note: str) -> str:
     if not note:
         return ""
@@ -600,6 +798,8 @@ REVIEW_RULES = (
 
 # A failed done() whose text starts with this marks the job "closed", not "failed".
 POSTING_CLOSED_PREFIX = "POSTING CLOSED:"
+# ... and this one marks it "needs_you" (something only the user can provide).
+NEEDS_YOU_PREFIX = "NEEDS YOU:"
 
 # A first done(success=false) before this many steps is sent back once with
 # ideas to try: agents gave up after 10-16 steps, one claiming "this is the
@@ -607,7 +807,7 @@ POSTING_CLOSED_PREFIX = "POSTING CLOSED:"
 EARLY_GIVE_UP_STEPS = 25
 
 # Reasons that end a run however early they come.
-_HARD_STOPS = (POSTING_CLOSED_PREFIX.lower(), "sign-in required", "real person", "not a robot",
+_HARD_STOPS = (POSTING_CLOSED_PREFIX.lower(), NEEDS_YOU_PREFIX.lower(), "sign-in required", "real person", "not a robot",
                "human check", "captcha")
 
 
@@ -648,6 +848,21 @@ FORM_RULES = (
     "- Address fields: copy them from the profile's Address line. Address Line 1 is the street address "
     "(never the town or city, even if the resume shows only a town); City, State and ZIP go in their own "
     "fields; leave Address Line 2 empty unless the profile has one.\n"
+    "- Field of study / major / discipline: the profile's Education major (it wins over the resume). If that "
+    "isn't one of the options, use the "
+    "profile's 'Field of study if yours isn't listed'; if there is none, the closest broad field. Log it with "
+    "record_guesses. Never leave it blank or 'No Response'.\n"
+    "- Desired / available start date: follow the profile's 'Start date' line exactly.\n"
+    "- Type phone numbers, emails and ZIP codes exactly as the profile shows them, and clear the field first "
+    "if it already holds something else.\n"
+    "- AT THE REVIEW PAGE: if something is wrong, use that section's Edit link (or Back), fix it, return and "
+    "submit. Small imperfections are never a reason to stop: a dropdown without the exact option gets the "
+    "closest one (logged with record_guesses), a resume pre-fill detail gets corrected or left if harmless. "
+    "Only stop when the application truly can't be finished (a required document you don't have, a page that "
+    "won't load).\n"
+    "- A required upload you don't have (transcript, writing sample, portfolio, ...) and no matching file among "
+    "your available files: call done with success=false and text starting with 'NEEDS YOU: missing document: "
+    "<what>'.\n"
     "- The user may be watching and fixing fields by hand. Never change a field that already holds a "
     "valid, sensible value just because you would have entered something else. Only change fields that "
     "are empty, show a validation error, or clearly contradict the profile or resume. If the page moved "
@@ -807,6 +1022,29 @@ async def save_new_qa(new_questions: dict, source_domain: str = ""):
             save_json(QA_FILE, qa)
 
 
+async def check_fit(posting, profile: dict, title: str, company: str) -> str | None:
+    """Why to skip this job ("<title>\n<reason>"), or None to apply.
+
+    The location check is code (free; on in every mode). The AI fit check is
+    one small request, off in performance mode or when turned off in Settings.
+    """
+    center, radius = search_area(profile)
+    location_note = ""
+    if posting is not None and radius != "any" and center:
+        texts = posting.locations + (["Remote"] if posting.remote else [])
+        verdict, detail = geo.check(texts, center, radius)
+        if verdict == "out":
+            return f"Outside your search area\n{detail}"
+        if verdict == "unknown":
+            location_note = f"within {radius} miles of ZIP {center} (remote jobs are fine)"
+    if posting is None or not fit_check_on() or not (posting.description or "").strip():
+        return None
+    result = await ai_extras.fit_check(config.get_llm(), title, company, posting.description, profile, location_note)
+    if result is not None and result.skip and result.reason.strip():
+        return f"{(result.title or 'Not a fit').strip()}\n{result.reason.strip()}"
+    return None
+
+
 async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[str], easy_apply: bool, worker_id: int, resume_path_override: str | None = None) -> str:
     """Apply to a single job. Returns final status."""
     url = job["url"]
@@ -844,11 +1082,21 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         await save_job_status(url, "closed", posting.reason, agent_words=True)
         print(f"  🔒 [W{worker_id}] Closed: {title} at {company} — {posting.reason}")
         return "closed"
+    saved = read_jobs().get(url) or {}
+    title = job["title"] = saved.get("title") or title
+    company = job["company"] = saved.get("company") or company
     if posting is not None:
         if posting.title and job_page.is_placeholder(title):
             title = job["title"] = posting.title
         if posting.company and (company or "").strip() in ("", "Unknown"):
             company = job["company"] = posting.company
+
+    if not saved.get("fit_override") and not job.get("fit_override"):
+        skip = await check_fit(posting, profile, title, company)
+        if skip is not None:
+            await save_job_status(url, "skipped", skip, agent_words=True)
+            print(f"  🚫 [W{worker_id}] Skipped: {title} at {company} — {skip.splitlines()[0]}")
+            return "skipped"
 
     # Always refresh credentials before each job to avoid mid-run expiry
     refresh_credentials()
@@ -869,6 +1117,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     memory = build_memory_context(
         {**profile, "email": agent_sensitive_data["email"]}, qa,
         same_company_applications(applied_labels, company), job_url=url,
+        learnings=not performance_mode(),
     )
     run_started_at = datetime.now(timezone.utc)
 
@@ -1004,7 +1253,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     _agent_log_start("apply", f"{title} at {company}")
 
     # A trial run has the user at hand to get it unstuck, so it gets more room.
-    MAX_STEPS = 150 if is_trial_run() else 70
+    MAX_STEPS = 150 if is_trial_run() else (100 if _is_workday(url) else 70)
     _step_count = {"n": 0}
     _agent_ref = {"agent": None, "max_steps": MAX_STEPS}
     # Set when a blocking CAPTCHA cannot be solved, so the run can be ended and
@@ -1014,6 +1263,8 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     async def _on_step_with_limit(browser_state, agent_output, step_num):
         _agent_on_step(browser_state, agent_output, step_num)
         _step_count["n"] += 1
+        if worker_id in _current:
+            _current[worker_id]["step"] = _step_count["n"]
         if _step_count["n"] >= MAX_STEPS:
             raise Exception(f"Reached maximum of {MAX_STEPS} steps — stopping to avoid wasting tokens")
 
@@ -1044,6 +1295,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             # Detection problems must never break an otherwise-fine run.
             pass
 
+    documents = other_documents()
     user_note = (job.get("user_note") or "").strip()
     job_domain = (_urlparse(url).hostname or "").removeprefix("www.")
     review = is_trial_run()
@@ -1052,12 +1304,21 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         print(f"  🎓 [W{worker_id}] Training run: fills everything in, never submits")
     if review:
         print(f"  👀 [W{worker_id}] Trial run: it will wait for your review before submitting")
+    _agent_ref["cover_letter_pdf"] = LOGS_DIR.parent / "cover_letters" / (safe_folder_name(f"{company}_{title}")[:60] + ".pdf")
+    _agent_ref["cover_letter_pdf"].parent.mkdir(parents=True, exist_ok=True)
+    _agent_ref["profile"] = profile
+    _agent_ref["posting_description"] = getattr(posting, "description", "") if posting is not None else ""
+    _agent_ref["resume_text"] = resume_text(resume_path)
     tools = build_tools(job, job_domain, review, _agent_ref, worker_id)
 
     agent = Agent(
         task=(
             f"{apply_instructions}\n\n"
             f"{user_note_instructions(user_note)}"
+            f"{documents_instructions(documents)}"
+            f"{previous_failure_instructions(job.get('previous_failure', ''))}"
+            f"{NAME_JOB_RULE if 'set_job_details' in tools.registry.registry.actions else ''}"
+            f"{COVER_LETTER_RULE if 'write_cover_letter' in tools.registry.registry.actions else ''}"
             f"{resume_instructions(resume_text(resume_path))}"
             f"{FORM_RULES}"
             f"{PAGE_CHECK_RULES}"
@@ -1069,7 +1330,10 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             f"- Do NOT repeat the same failing action more than 3 times — switch strategies.\n"
             f"- If you've been stuck on the same form field for more than 5 steps, switch to a completely different approach (or skip the field if it's optional).\n"
             f"- If the posting itself is gone (page not found, job closed, no longer accepting applications), call done with success=false and text starting with '{POSTING_CLOSED_PREFIX}'.\n"
-            f"- You have a maximum of {MAX_STEPS} steps total. Budget your steps wisely.\n\n"
+            f"- You have a maximum of {MAX_STEPS} steps total. Budget your steps wisely.\n"
+            f"- When you report a failure (done with success=false), start the text with a short title of at most "
+            f"8 words on its own line (e.g. 'Stopped at Review: Field of Study'), then the explanation. Never "
+            f"mention @@ tracking markers in it.\n\n"
             f"TRACKING: Include in memory field after submission:\n"
             f'@@JOB_APPLIED: {{"title": "{title}", "company": "{company}", "location": "{job.get("location", "")}"}}\n'
             f"For each form question: @@QUESTION: {{\"question\": \"...\", \"answer\": \"...\", \"type\": \"...\"}}"
@@ -1098,21 +1362,32 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         browser_session=browser,
         sensitive_data=agent_sensitive_data,
         extend_system_message=memory,
-        available_file_paths=[resume_path],
-        save_conversation_path=str(LOGS_DIR / f"apply_{company.replace(' ', '_')}_{title.replace(' ', '_')[:30]}"),
+        available_file_paths=[resume_path] + [d["path"] for d in documents]
+        + ([str(_agent_ref["cover_letter_pdf"])] if "write_cover_letter" in tools.registry.registry.actions else []),
+        save_conversation_path=str(LOGS_DIR / safe_folder_name(f"apply_{company}_{title[:30]}")),
         calculate_cost=True,
         register_new_step_callback=_on_step_with_limit,
         register_done_callback=_agent_on_done,
     )
     _agent_ref["agent"] = agent
+    add_form_check_each_step(agent, profile)
     agent._langhire_loop = asyncio.get_running_loop()
     agent._langhire_domain = job_domain
+    agent._langhire_url = url
+    _current[worker_id] = {"url": url, "title": title, "company": company, "step": 0, "max_steps": MAX_STEPS,
+                           "started_at": datetime.now(timezone.utc).isoformat()}
     _running_agents.add(agent)
     if is_paused():
         agent.pause()
 
     try:
         result = await agent.run(max_steps=MAX_STEPS, on_step_start=before_step)
+
+        if url in _skip_requested:
+            _skip_requested.discard(url)
+            await save_job_status(url, "pending", SKIPPED_BY_YOU_NOTE, agent_words=True)
+            print(f"  ⏭️  [W{worker_id}] Skipped by you: {title} at {company}")
+            return "skipped"
 
         # A blocking CAPTCHA we could not solve ends the application here,
         # regardless of what the agent reported, so the next job can start.
@@ -1214,12 +1489,21 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             return "applied"
         else:
             error_msg = failure_reason(result)
+            if strip_markers(error_msg).startswith(NEEDS_YOU_PREFIX):
+                reason = strip_markers(error_msg)[len(NEEDS_YOU_PREFIX):].strip() or "This job needs something from you."
+                await save_job_status(url, "needs_you", reason[:2000], agent_words=True)
+                print(f"  🙋 [W{worker_id}] Needs you: {title} at {company} — {reason[:100]}")
+                return "needs_you"
             if strip_markers(error_msg).startswith(POSTING_CLOSED_PREFIX):
                 reason = strip_markers(error_msg)[len(POSTING_CLOSED_PREFIX):].strip() or "The posting is closed."
                 await save_job_status(url, "closed", reason[:2000], agent_words=True)
                 print(f"  🔒 [W{worker_id}] Closed: {title} at {company} — {reason[:100]}")
                 return "closed"
             await save_job_status(url, "failed", error_msg[:2000], agent_words=result.is_done())
+            # The agent's own report of a problem it might get past on a second
+            # try (not a closed posting, a missing document, a sign-in, ...).
+            if result.is_done() and not is_hard_stop(error_msg) and not job.get("previous_failure"):
+                job["_retry_with"] = strip_markers(error_msg)
             print(f"  ❌ [W{worker_id}] Failed: {title} at {company} — {error_msg[:100]}")
             return "failed"
 
@@ -1250,6 +1534,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         return "failed"
     finally:
         _running_agents.discard(agent)
+        _current.pop(worker_id, None)
         try:
             await browser.close()
         except Exception as close_err:
@@ -1277,11 +1562,19 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
         # Randomised pause so applications are not evenly spaced. Off by
         # default; only runs between jobs, never mid-application.
         # (No pause after a closed posting: no browser was opened.)
-        if status != "closed" and not (cancel_flag and cancel_flag.get("cancel_requested")):
+        if status not in ("closed", "skipped") and not (cancel_flag and cancel_flag.get("cancel_requested")):
             await config.maybe_human_delay("the next application")
 
         # On retry, put back in queue
         if status == "retry":
+            queue.put_nowait(job)
+        # Self-retry: one more attempt that reads the failure report first.
+        # Off in performance mode (a whole extra run).
+        elif status == "failed" and job.get("_retry_with") and not performance_mode() \
+                and not (cancel_flag and cancel_flag.get("cancel_requested")):
+            job["previous_failure"] = job.pop("_retry_with")
+            update_job(job["url"], status="pending", error=f"Retrying with what went wrong last time.\n{job['previous_failure'][:500]}")
+            print(f"  🔁 [{name}] Retrying {job.get('title', '')} once, using its failure report")
             queue.put_nowait(job)
 
         queue.task_done()

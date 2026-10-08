@@ -102,6 +102,7 @@ export default function Analytics() {
       ["failed", failed],
       ["needs you", jobs.filter((j) => j.status === "needs_you").length],
       ["blocked", jobs.filter((j) => j.status === "blocked").length],
+      ["skipped", jobs.filter((j) => j.status === "skipped").length],
       ["closed", jobs.filter((j) => j.status === "closed").length],
     ];
     const trend = dailyTrend(jobs, 14);

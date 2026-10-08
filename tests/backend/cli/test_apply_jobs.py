@@ -261,9 +261,9 @@ def test_prompt_lists_only_same_company_applications(run, monkeypatch):
     captured = {}
     real_build = apply_jobs.build_memory_context
 
-    def spy(profile, qa, applied_labels=None, job_url=None):
+    def spy(profile, qa, applied_labels=None, job_url=None, learnings=True):
         captured["labels"] = applied_labels
-        return real_build(profile, qa, applied_labels, job_url=job_url)
+        return real_build(profile, qa, applied_labels, job_url=job_url, learnings=learnings)
 
     monkeypatch.setattr(apply_jobs, "build_memory_context", spy)
     job = {"url": GREENHOUSE, "title": "Intern", "company": "Acme", "location": "Boston"}
@@ -595,3 +595,219 @@ def test_the_run_gets_our_step_limit_and_page_wait(run):
     run()
     agent = _run_fake_agent[0].instances[-1]
     assert agent.run_kwargs == {"max_steps": 70, "on_step_start": apply_jobs.before_step}
+
+
+# ── batch 1: fit check, needs-you, self-retry, naming, run controls ─────────
+
+def _settings(monkeypatch, **values):
+    base = {"max_failures": 6}
+    base.update(values)
+    monkeypatch.setattr(apply_jobs.config, "load_runtime_settings", lambda: base)
+
+
+def _posting_with(monkeypatch, **kw):
+    monkeypatch.setattr(apply_jobs.config, "refresh_posting_details",
+                        lambda url, posting=None, mark_closed=True: _posting(**kw))
+
+
+def test_outside_the_search_area_is_skipped_before_any_browser(run, monkeypatch):
+    _posting_with(monkeypatch, title="Co-Op", locations=["Worcester, MA"])
+    profile = dict(GOOD_PROFILE, address={"zip": "10001"}, search_area={"center_zip": "", "radius": "50"})
+    status, kwargs, saved = run(profile=profile)
+    assert status == "skipped" and kwargs is None
+    assert saved[-1][1].startswith("Outside your search area\n") and "Worcester, MA" in saved[-1][1]
+
+
+def test_ai_fit_check_skips_a_hard_mismatch(run, monkeypatch):
+    _posting_with(monkeypatch, title="MBA Associate", description="Open to first-year MBA students only.")
+
+    async def verdict(llm, title, company, description, profile, location_note=""):
+        return apply_jobs.ai_extras.FitVerdict(skip=True, title="Requires an MBA", reason="The posting is for MBA students only.")
+
+    monkeypatch.setattr(apply_jobs.ai_extras, "fit_check", verdict)
+    status, kwargs, saved = run()
+    assert status == "skipped" and saved[-1] == ("skipped", "Requires an MBA\nThe posting is for MBA students only.")
+
+
+def test_performance_mode_or_the_switch_turns_the_ai_fit_check_off(run, monkeypatch):
+    _posting_with(monkeypatch, title="MBA Associate", description="MBA only.")
+
+    async def boom(*a, **k):
+        raise AssertionError("fit check must not run")
+
+    monkeypatch.setattr(apply_jobs.ai_extras, "fit_check", boom)
+    for settings in ({"performance_mode": True}, {"fit_check_enabled": False}):
+        _settings(monkeypatch, **settings)
+        assert run()[0] == "applied"
+
+
+def test_applying_to_a_skipped_job_by_hand_overrides_the_checks(run, monkeypatch):
+    _posting_with(monkeypatch, title="Co-Op", locations=["Worcester, MA"])
+    profile = dict(GOOD_PROFILE, address={"zip": "10001"}, search_area={"radius": "25"})
+    _run_fake_agent[0].history = FakeHistory()
+    status = asyncio.run(apply_jobs.apply_to_job(
+        {"url": GREENHOUSE, "title": "Co-Op", "company": "Acme", "fit_override": True}, profile, {}, [],
+        easy_apply=False, worker_id=1))
+    assert status == "applied"
+
+
+def test_needs_you_report_marks_the_job(run):
+    status, _, saved = run(history=FakeHistory(success=False, done_text="NEEDS YOU: missing document: unofficial transcript"))
+    assert status == "needs_you" and saved[-1] == ("needs_you", "missing document: unofficial transcript")
+
+
+def _apply_once(history):
+    job = {"url": GREENHOUSE, "title": "Intern", "company": "Acme"}
+    _run_fake_agent[0].history = history
+    status = asyncio.run(apply_jobs.apply_to_job(job, GOOD_PROFILE, {}, [], easy_apply=False, worker_id=1))
+    return status, job
+
+
+def test_a_fixable_failure_is_marked_for_one_retry_with_its_report(run):
+    status, job = _apply_once(FakeHistory(success=False, done_text="Stopped at Review: Field of Study\nNo Statistics option."))
+    assert status == "failed" and job["_retry_with"].startswith("Stopped at Review")
+
+
+def test_hard_stops_are_not_retried(run):
+    _, job = _apply_once(FakeHistory(success=False, done_text="Gmail sign-in required to read the verification code."))
+    assert "_retry_with" not in job
+
+
+def _worker_run(monkeypatch, statuses, settings=None):
+    """Run worker() over one job whose attempts return `statuses` in order; returns the jobs it was given."""
+    _settings(monkeypatch, **(settings or {}))
+    seen = []
+
+    async def fake_apply(job, *a, **k):
+        seen.append(dict(job))
+        status = statuses[len(seen) - 1]
+        if status == "failed" and "previous_failure" not in job:
+            job["_retry_with"] = "Couldn't select the start date."
+        return status
+
+    async def no_delay(*a, **k):
+        return None
+
+    monkeypatch.setattr(apply_jobs, "apply_to_job", fake_apply)
+    monkeypatch.setattr(apply_jobs, "update_job", lambda url, **f: None)
+    monkeypatch.setattr(apply_jobs.config, "maybe_human_delay", no_delay)
+    monkeypatch.setattr(apply_jobs, "load_json", lambda path, default=None: default)
+
+    async def go():
+        queue = asyncio.Queue()
+        queue.put_nowait({"url": GREENHOUSE, "title": "Intern"})
+        await apply_jobs.worker("W1", 1, queue, GOOD_PROFILE, {}, [], False, {})
+
+    asyncio.run(go())
+    return seen
+
+
+def test_worker_retries_a_failure_once_with_its_report(monkeypatch):
+    seen = _worker_run(monkeypatch, ["failed", "failed"])
+    assert len(seen) == 2 and seen[1]["previous_failure"] == "Couldn't select the start date."
+
+
+def test_no_self_retry_in_performance_mode(monkeypatch):
+    assert len(_worker_run(monkeypatch, ["failed"], {"performance_mode": True})) == 1
+
+
+def test_previous_failure_reaches_the_agent():
+    text = apply_jobs.previous_failure_instructions("Stopped at Review: Field of Study")
+    assert "THE LAST ATTEMPT AT THIS JOB FAILED" in text and "Field of Study" in text
+    assert apply_jobs.previous_failure_instructions("") == ""
+
+
+def test_naming_action_only_outside_performance_mode(monkeypatch):
+    job = {"url": GREENHOUSE, "title": "Pasted Link", "company": ""}
+    monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {})
+    _settings(monkeypatch)
+    assert "set_job_details" in apply_jobs.build_tools(job, "x", False, {}, 1).registry.registry.actions
+    _settings(monkeypatch, performance_mode=True)
+    assert "set_job_details" not in apply_jobs.build_tools(job, "x", False, {}, 1).registry.registry.actions
+    _settings(monkeypatch)
+    monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {GREENHOUSE: {"name_source": "user"}})
+    assert "set_job_details" not in apply_jobs.build_tools(job, "x", False, {}, 1).registry.registry.actions
+
+
+def test_set_job_details_names_the_job(monkeypatch):
+    calls = []
+    monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {})
+    monkeypatch.setattr(apply_jobs.config, "set_job_names", lambda *a: calls.append(a) or True)
+    _settings(monkeypatch)
+    tools = apply_jobs.build_tools({"url": GREENHOUSE, "title": "Pasted Link"}, "x", False, {}, 1)
+    action = tools.registry.registry.actions["set_job_details"].function
+    result = asyncio.run(action(params=apply_jobs.JobDetails(role="Data Intern", company="Contoso")))
+    assert calls == [(GREENHOUSE, "Data Intern", "Contoso", "agent")] and result.extracted_content == "Noted."
+
+
+def test_cover_letter_action_only_when_turned_on(monkeypatch, tmp_path):
+    monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {})
+    _settings(monkeypatch)
+    assert "write_cover_letter" not in apply_jobs.build_tools({"url": GREENHOUSE}, "x", False, {}, 1).registry.registry.actions
+    _settings(monkeypatch, cover_letter_boxes=True)
+    ref = {"profile": {"name": "Ada Lovelace"}, "resume_text": "", "posting_description": "", "cover_letter_pdf": tmp_path / "cl.pdf"}
+    tools = apply_jobs.build_tools({"url": GREENHOUSE, "title": "Intern", "company": "Acme"}, "x", False, ref, 1)
+    calls = []
+
+    async def letter(*a, **k):
+        calls.append(1)
+        return "Dear Hiring Manager,\n\nI built things.\n\nAda Lovelace"
+
+    monkeypatch.setattr(apply_jobs.ai_extras, "write_cover_letter", letter)
+    monkeypatch.setattr(apply_jobs.config, "get_llm", lambda: object())
+    out = asyncio.run(tools.registry.registry.actions["write_cover_letter"].function())
+    assert "I built things." in out.extracted_content and (tmp_path / "cl.pdf").exists()
+    again = asyncio.run(tools.registry.registry.actions["write_cover_letter"].function())
+    assert again.extracted_content == out.extracted_content and calls == [1]   # written once per job
+
+
+def test_documents_and_workday_step_limit(run, monkeypatch, tmp_path):
+    doc = tmp_path / "transcript.pdf"
+    doc.write_bytes(b"%PDF-1.4")
+    _settings(monkeypatch, other_documents=[{"label": "Transcript", "path": str(doc)}, {"label": "Gone", "path": "C:/nope.pdf"}])
+    _, kwargs, _ = run(url="https://acme.wd1.myworkdayjobs.com/Acme/job/X/Intern_1")
+    assert str(doc) in kwargs["available_file_paths"] and "C:/nope.pdf" not in kwargs["available_file_paths"]
+    assert "- Transcript: " in kwargs["task"] and "maximum of 100 steps" in kwargs["task"]
+
+
+@pytest.mark.parametrize("name,safe", [("apply__Early Careers: Health", "apply__Early_Careers__Health"),
+                                       ('a<b>c"d|e?f*g/h\\i', "a_b_c_d_e_f_g_h_i")])
+def test_safe_folder_name(name, safe):
+    assert apply_jobs.safe_folder_name(name) == safe
+
+
+def test_current_job_is_reported_and_cleared(run):
+    seen = {}
+    real_run = _run_fake_agent[0].run
+
+    async def peek(self, **kwargs):
+        seen.update(apply_jobs.current_jobs()[0])
+        return await real_run(self, **kwargs)
+
+    _run_fake_agent[0].run = peek
+    run()
+    assert seen["title"] == "Intern" and seen["step"] == 0 and seen["max_steps"] == 70
+    assert apply_jobs.current_jobs() == []
+
+
+def test_skip_job_stops_that_agent_and_keeps_the_job(run):
+    real_run = _run_fake_agent[0].run
+    stopped = []
+
+    async def skip_mid_run(self, **kwargs):
+        self.stop = lambda: stopped.append(True)
+        assert apply_jobs.skip_job(GREENHOUSE) is True
+        return await real_run(self, **kwargs)
+
+    _run_fake_agent[0].run = skip_mid_run
+    status, _, saved = run()
+    assert status == "skipped" and stopped == [True]
+    assert saved[-1] == ("pending", apply_jobs.SKIPPED_BY_YOU_NOTE)
+    assert apply_jobs.skip_job("https://not-running.example") is False
+
+
+def test_no_naming_action_when_the_page_already_named_the_job(monkeypatch):
+    monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {})
+    _settings(monkeypatch)
+    named = {"url": GREENHOUSE, "title": "Data Intern", "company": "Contoso"}
+    assert "set_job_details" not in apply_jobs.build_tools(named, "x", False, {}, 1).registry.registry.actions

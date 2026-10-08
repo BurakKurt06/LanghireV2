@@ -64,7 +64,7 @@ DEFAULT_PROFILE = {
     "willing_to_relocate": False,
     "preferred_work_mode": "hybrid",
     "years_of_experience": 0,
-    "education": {"degree": "", "major": "", "school": "", "start_date": "", "graduation": ""},
+    "education": {"degree": "", "major": "", "major_alternative": "", "school": "", "start_date": "", "graduation": ""},
     "current_role": "",
     "target_job_titles": [],
     "target_locations": [],
@@ -77,6 +77,8 @@ DEFAULT_PROFILE = {
     "cover_letter": "",
     "date_format": "MM/DD/YYYY",
     "notes": "",
+    # Jobs outside this radius are skipped (remote always counts). "" = address ZIP.
+    "search_area": {"center_zip": "", "radius": "any"},
     # Answers to common screening questions; empty ones are left to the agent's rules.
     "screening": {
         "start_date": "",

@@ -5,6 +5,7 @@
     "profile": "Profile",
     "llmSettings": "LLM Settings",
     "jobs": "Jobs",
+    "inbox": "Inbox",
     "apply": "Apply",
     "memory": "Memory",
     "qa": "Q&A",
@@ -47,6 +48,7 @@
     "blocked": "Blocked",
     "inProgress": "In Progress",
     "closed": "Closed",
-    "needsYou": "Needs you"
+    "needsYou": "Needs you",
+    "skipped": "Skipped"
   }
 }

@@ -13,8 +13,10 @@ import {
   MessageSquare,
   HelpCircle,
   BarChart3,
+  Mail,
 } from "lucide-react";
 import { checkHealth } from "../../lib/api";
+import RunPanel from "../RunPanel";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, labelKey: "nav.dashboard" },
@@ -23,6 +25,7 @@ const navItems = [
   { to: "/profile", icon: User, labelKey: "nav.profile" },
   { to: "/llm", icon: Cpu, labelKey: "nav.llmSettings" },
   { to: "/jobs", icon: Briefcase, labelKey: "nav.jobs" },
+  { to: "/inbox", icon: Mail, labelKey: "nav.inbox" },
   { to: "/memory", icon: Brain, labelKey: "nav.memory" },
   { to: "/qa", icon: HelpCircle, labelKey: "nav.qa" },
   { to: "/logs", icon: ScrollText, labelKey: "nav.logs" },
@@ -96,6 +99,9 @@ export default function Sidebar() {
           </NavLink>
         ))}
       </nav>
+
+      {/* Run controls (only while applications run) */}
+      <RunPanel />
 
       {/* Status */}
       <div className="px-5 py-4 border-t border-border">

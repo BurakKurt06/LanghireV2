@@ -14,6 +14,14 @@ vi.mock("react-i18next", () => ({
 
 vi.mock("../../lib/api", () => ({
   checkHealth: vi.fn(),
+  // The run panel polls this; no run is going in these tests.
+  getApplyStatus: vi.fn(async () => ({ running: false })),
+  pauseApplying: vi.fn(),
+  resumeApplying: vi.fn(),
+  stopApplying: vi.fn(),
+  skipJob: vi.fn(),
+  answerHelp: vi.fn(),
+  reviewApplication: vi.fn(),
 }));
 
 const mockCheckHealth = vi.mocked(checkHealth);

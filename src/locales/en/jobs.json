@@ -10,7 +10,8 @@
     "blocked": "Blocked",
     "inProgress": "In Progress",
     "closed": "Closed",
-    "needsYou": "Needs you"
+    "needsYou": "Needs you",
+    "skipped": "Skipped"
   },
   "filter": {
     "all": "All"
@@ -43,6 +44,7 @@
     "easyApply": "Easy Apply",
     "unknown": "Unknown",
     "error": "Error: {{error}}",
+    "errorPrefix": "Error: ",
     "collected": "Collected {{date}}",
     "applied": " · Applied {{date}}",
     "coverLetter": "Cover Letter",
