@@ -200,6 +200,17 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     fetchJobsRef.current();
   }, [statusFilter]);
 
+  // The counts changed (a run moved jobs along): reload the list so it matches them.
+  const statsKey = JSON.stringify(stats);
+  const firstStats = useRef(true);
+  useEffect(() => {
+    if (firstStats.current) {
+      firstStats.current = false;
+      return;
+    }
+    fetchJobsRef.current(true);
+  }, [statsKey]);
+
   // Poll apply status for single apply
   useEffect(() => {
     if (!applyingUrl) return;

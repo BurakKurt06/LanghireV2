@@ -504,4 +504,13 @@ describe("PendingTab", () => {
       expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ job_urls: [pendingJob.url] })),
     );
   });
+
+  it("reloads the list when the counts change (a run moved jobs along)", async () => {
+    const { rerender } = render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await waitFor(() => expect(mockGetJobs).toHaveBeenCalledTimes(1));
+    rerender(<PendingTab onJobsChanged={onJobsChanged} stats={{ ...stats }} />);
+    expect(mockGetJobs).toHaveBeenCalledTimes(1); // same numbers: no reload
+    rerender(<PendingTab onJobsChanged={onJobsChanged} stats={{ ...stats, pending: stats.pending - 1, failed: stats.failed + 1 }} />);
+    await waitFor(() => expect(mockGetJobs).toHaveBeenCalledTimes(2));
+  });
 });

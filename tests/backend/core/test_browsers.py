@@ -88,3 +88,10 @@ def test_build_browser_kwargs_forgets_old_tabs(monkeypatch, installed):
     monkeypatch.setattr(shared_config, "forget_open_tabs", seen.append)
     kwargs = shared_config.build_browser_kwargs()
     assert [str(p) for p in seen] == [kwargs["user_data_dir"]]
+
+
+def test_build_browser_kwargs_grants_location_so_no_popup_waits(monkeypatch, installed):
+    monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {})
+    permissions = shared_config.build_browser_kwargs()["permissions"]
+    assert "geolocation" in permissions
+    assert {"clipboardReadWrite", "notifications"} <= set(permissions)  # browser-use's defaults kept

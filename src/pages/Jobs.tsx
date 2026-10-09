@@ -39,8 +39,11 @@ export default function Jobs() {
       .catch(() => {});
   }, []);
 
+  // Poll so the counts follow a run started anywhere (the sidebar, another page).
   useEffect(() => {
     fetchStats();
+    const poll = setInterval(fetchStats, 5000);
+    return () => clearInterval(poll);
   }, [fetchStats]);
 
   const handleJobsChanged = useCallback(() => {

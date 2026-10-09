@@ -469,6 +469,8 @@ async def solve(challenge: Challenge, api_key: str) -> str:
     except Exception as e:
         # Deliberately does not include the key or the exception repr, which
         # some SDK errors embed the request URL (and key) into.
+        if type(e).__name__ == "TimeoutException":
+            raise CaptchaUnsolved(challenge.type, "2Captcha gave no answer within its time limit") from e
         raise CaptchaUnsolved(challenge.type, f"2Captcha error ({type(e).__name__})") from e
     if not token:
         raise CaptchaUnsolved(challenge.type, "2Captcha returned an empty token")

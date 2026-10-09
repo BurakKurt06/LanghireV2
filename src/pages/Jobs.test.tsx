@@ -116,4 +116,16 @@ describe("Jobs", () => {
     render(<Jobs />);
     expect(await screen.findByTestId("collect-tab")).toBeInTheDocument();
   });
+
+  it("keeps polling the counts so they follow a run started elsewhere", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<Jobs />);
+      await waitFor(() => expect(mockGetJobStats).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(mockGetJobStats).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

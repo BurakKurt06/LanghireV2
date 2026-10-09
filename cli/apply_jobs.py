@@ -168,6 +168,33 @@ _current: dict[int, dict] = {}
 _skip_requested: set[str] = set()
 SKIPPED_BY_YOU_NOTE = "Skipped by you during the run. It stays in the list; apply again any time."
 
+# Sites whose CAPTCHA couldn't be passed in this run (host -> first job's title).
+# Their other jobs are marked Needs you without opening them: a Pied Piper run
+# spent 38 jobs' worth of AI steps and 2Captcha waits on the same unsolvable
+# hCaptcha.
+_captcha_blocked: dict[str, str] = {}
+
+
+def new_run() -> None:
+    """Forget the previous run's per-site state (called when a run starts)."""
+    _captcha_blocked.clear()
+
+
+def _site(url: str) -> str:
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or "").removeprefix("www.")
+
+
+def captcha_note(reason: str) -> str:
+    """Needs-you text for a CAPTCHA the solver couldn't pass (title line, then the paragraph)."""
+    return ("CAPTCHA the solver couldn't pass\n"
+            f"{reason} Open the link and apply yourself, or apply again later: these checks "
+            "don't always appear.")
+
+
+def _block_site(url: str, title: str) -> None:
+    _captcha_blocked.setdefault(_site(url), title)
+
 
 def current_jobs() -> list[dict]:
     return [dict(job, worker=w) for w, job in sorted(_current.items())]
@@ -1004,6 +1031,16 @@ async def save_job_status(url: str, status: str, error: str | None = None, agent
     update_job(url, **fields)
 
 
+async def _captcha_unsolved(url: str, title: str, company: str, worker_id: int, e) -> str:
+    _block_site(url, title)
+    kind = "hCaptcha" if "hcaptcha" in e.challenge_type else e.challenge_type.replace("_", " ")
+    await save_job_status(url, "needs_you", captcha_note(
+        f"The application site showed a {kind} check and the CAPTCHA solver couldn't solve it ({e.reason})."),
+        agent_words=True)
+    print(f"  🧩 [W{worker_id}] Needs you (CAPTCHA not solved): {title} at {company} — {e.reason}")
+    return "needs_you"
+
+
 async def save_new_qa(new_questions: dict, source_domain: str = ""):
     if not new_questions:
         return
@@ -1067,6 +1104,14 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     if not claim_job(url):
         print(f"  ⏭️  [W{worker_id}] Skipped (already claimed): {title} at {company}")
         return "skipped"
+
+    blocked_by = _captcha_blocked.get(_site(url))
+    if blocked_by is not None:
+        await save_job_status(url, "needs_you", captcha_note(
+            f"Not opened: earlier in this run the same site ({_site(url)}) showed a CAPTCHA the solver "
+            f"couldn't pass, on \"{blocked_by}\"."), agent_words=True)
+        print(f"  🙋 [W{worker_id}] Needs you (same site's CAPTCHA): {title} at {company}")
+        return "needs_you"
 
     agent_sensitive_data = build_agent_secrets(profile, settings_sensitive)
     if "email" not in agent_sensitive_data:
@@ -1397,11 +1442,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             return "needs_you"
         if _captcha_failure["error"] is not None:
             e = _captcha_failure["error"]
-            await save_job_status(
-                url, "failed", f"CAPTCHA could not be solved ({e.challenge_type}): {e.reason}"
-            )
-            print(f"  🧩 [W{worker_id}] Abandoned (CAPTCHA): {title} at {company} — {e.reason}")
-            return "failed"
+            return await _captcha_unsolved(url, title, company, worker_id, e)
 
         # Extract Q&A from history
         _, new_questions = extract_from_history(result)
@@ -1499,6 +1540,11 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
                 await save_job_status(url, "closed", reason[:2000], agent_words=True)
                 print(f"  🔒 [W{worker_id}] Closed: {title} at {company} — {reason[:100]}")
                 return "closed"
+            if result.is_done() and "captcha" in error_msg.lower():
+                _block_site(url, title)
+                await save_job_status(url, "needs_you", captcha_note(strip_markers(error_msg)[:1800]), agent_words=True)
+                print(f"  🙋 [W{worker_id}] Needs you (CAPTCHA): {title} at {company}")
+                return "needs_you"
             await save_job_status(url, "failed", error_msg[:2000], agent_words=result.is_done())
             # The agent's own report of a problem it might get past on a second
             # try (not a closed posting, a missing document, a sign-in, ...).
@@ -1509,9 +1555,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
 
     except _captcha.CaptchaUnsolved as e:
         # Abandon this application and move on — never pause or wait.
-        await save_job_status(url, "failed", f"CAPTCHA could not be solved ({e.challenge_type}): {e.reason}")
-        print(f"  🧩 [W{worker_id}] Abandoned (CAPTCHA): {title} at {company} — {e.reason}")
-        return "failed"
+        return await _captcha_unsolved(url, title, company, worker_id, e)
 
     except Exception as e:
         error_str = str(e)
@@ -1592,6 +1636,7 @@ async def main():
     profile = load_json(CANDIDATE_PROFILE, {})
     qa = load_json(QA_FILE, {})
     LOGS_DIR.mkdir(exist_ok=True)
+    new_run()
 
     # Filter pending jobs by type
     pending = [

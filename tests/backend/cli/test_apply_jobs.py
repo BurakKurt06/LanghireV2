@@ -581,6 +581,42 @@ def test_in_a_trial_run_the_agent_asks_for_help_with_the_human_check(run, monkey
     assert "the app ticks it for you; if it's still there, ask the user" in kwargs["task"]
 
 
+def test_an_unsolved_captcha_needs_you_and_skips_the_sites_other_jobs(run, monkeypatch):
+    monkeypatch.setattr(apply_jobs, "_captcha_blocked", {})
+
+    async def unsolvable(browser, settings):
+        raise apply_jobs._captcha.CaptchaUnsolved("hcaptcha", "2Captcha gave no answer within its time limit")
+
+    monkeypatch.setattr(apply_jobs._captcha, "handle", unsolvable)
+    monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *a: None)
+    _run_fake_agent[0].call_step = True
+    status, _, saved = run(history=FakeHistory(success=False, done_text="Stopped."))
+    assert status == "needs_you"
+    title, reason = saved[-1][1].split("\n", 1)
+    assert title == "CAPTCHA the solver couldn't pass"
+    assert "hCaptcha" in reason and "no answer within its time limit" in reason
+    assert "timed out" not in saved[-1][1].lower()  # not the misleading "Operation timed out"
+
+    agents = len(run.agents)
+    status, _, saved = run(url=GREENHOUSE.replace("123", "456"))
+    assert status == "needs_you" and len(run.agents) == agents  # never opened
+    assert "same site (boards.greenhouse.io)" in saved[-1][1]
+
+    apply_jobs.new_run()
+    monkeypatch.setattr(apply_jobs._captcha, "handle", lambda *a: asyncio.sleep(0, False))
+    status, _, _ = run(url=GREENHOUSE.replace("123", "789"))
+    assert status == "applied"  # a new run tries the site again
+
+
+def test_the_agent_giving_up_at_a_captcha_needs_you(run, monkeypatch):
+    monkeypatch.setattr(apply_jobs, "_captcha_blocked", {})
+    status, _, saved = run(history=FakeHistory(
+        success=False, done_text="The email page is still blocked by an hCaptcha challenge (Please try again)."))
+    assert status == "needs_you"
+    assert saved[-1][1].startswith("CAPTCHA the solver couldn't pass\nThe email page is still blocked")
+    assert "boards.greenhouse.io" in apply_jobs._captcha_blocked
+
+
 def test_an_unexpected_crash_is_retried_once(run, monkeypatch):
     monkeypatch.setattr(apply_jobs, "_crash_retries", {})
     _run_fake_agent[0].crash = TypeError("int() argument must be a string, a bytes-like object or a real number, not 'NoneType'")

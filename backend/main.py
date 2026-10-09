@@ -1169,6 +1169,7 @@ async def start_applying(body: ApplyRequest):
         queue = asyncio.Queue()
         for job in pending:
             queue.put_nowait(job)
+        apply_jobs.new_run()
 
         stats = {}
         num_workers = min(workers, len(pending))

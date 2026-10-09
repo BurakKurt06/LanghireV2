@@ -108,6 +108,7 @@ def build_browser_kwargs() -> dict:
     kwargs: dict = {
         "ignore_default_args": list(IGNORED_CHROME_DEFAULT_ARGS),
         "user_data_dir": str(profile_dir),
+        "permissions": list(GRANTED_PERMISSIONS),
     }
     if executable:
         kwargs["executable_path"] = executable
@@ -144,6 +145,11 @@ def forget_open_tabs(profile_dir) -> int:
             pass
     return removed
 
+
+# Granted to every site up front. browser-use's default is clipboard and
+# notifications; location is added because application sites (Oracle's, for
+# one) ask for it, and the agent can't click the browser's own Allow popup.
+GRANTED_PERMISSIONS = ("clipboardReadWrite", "notifications", "geolocation")
 
 # browser-use default Chrome flags we don't launch with (see build_browser_kwargs).
 IGNORED_CHROME_DEFAULT_ARGS = ["--extensions-on-chrome-urls"]
