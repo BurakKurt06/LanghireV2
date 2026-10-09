@@ -387,73 +387,32 @@ export default function SettingsPage() {
 
       {/* Job Sources */}
       <Section title="Job Sources">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-foreground">Job board collection</p>
-            <p className="text-[13px] text-muted-foreground mt-1">
-              Let the agent search job boards (LinkedIn, Indeed, Handshake, Intern Insider
-              and the other plugins) for listings. When off, the Collect controls are
-              disabled and the collect script exits — pasting links still works.
-            </p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label="Job board collection"
-              checked={jobCollectionEnabled}
-              onChange={(e) => setJobCollectionEnabled(e.target.checked)}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-          </label>
-        </div>
+        <SettingSwitch
+          label="Job board collection"
+          checked={jobCollectionEnabled}
+          onChange={setJobCollectionEnabled}
+          description="Let the agent search job boards (LinkedIn, Indeed, Handshake, Intern Insider and the other plugins) for listings. When off, the Collect controls are disabled and the collect script exits — pasting links still works."
+          className=""
+        />
       </Section>
 
       {/* Anti-detection */}
       <Section title="Anti-Detection">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-foreground">Stealth mode</p>
-            <p className="text-[13px] text-muted-foreground mt-1">
-              Hide the signals that mark the browser as automated (navigator.webdriver,
-              missing plugins, headless WebGL fingerprints) and drop the automation
-              launch flags. The browser already runs visibly, not headless.
-            </p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label="Stealth mode"
-              checked={stealthEnabled}
-              onChange={(e) => setStealthEnabled(e.target.checked)}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-          </label>
-        </div>
+        <SettingSwitch
+          label="Stealth mode"
+          checked={stealthEnabled}
+          onChange={setStealthEnabled}
+          description="Hide the signals that mark the browser as automated (navigator.webdriver, missing plugins, headless WebGL fingerprints) and drop the automation launch flags. The browser already runs visibly, not headless."
+          className=""
+        />
 
-        <div className="flex items-center justify-between mt-5 pt-5 border-t border-border">
-          <div>
-            <p className="text-sm font-semibold text-foreground">Human-like delays</p>
-            <p className="text-[13px] text-muted-foreground mt-1">
-              Wait a random amount of time between applications instead of starting the
-              next one immediately. Slows a run down by roughly the average delay per job.
-            </p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label="Human-like delays"
-              checked={humanDelayEnabled}
-              onChange={(e) => setHumanDelayEnabled(e.target.checked)}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-          </label>
-        </div>
+        <SettingSwitch
+          label="Human-like delays"
+          checked={humanDelayEnabled}
+          onChange={setHumanDelayEnabled}
+          description="Wait a random amount of time between applications instead of starting the next one immediately. Slows a run down by roughly the average delay per job."
+          className="mt-5 pt-5 border-t border-border"
+        />
 
         {humanDelayEnabled && (
           <div className="flex items-end gap-3 mt-4">
@@ -500,28 +459,13 @@ export default function SettingsPage() {
 
       {/* CAPTCHA */}
       <Section title="CAPTCHA Solving">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-foreground">Solve CAPTCHAs with 2Captcha</p>
-            <p className="text-[13px] text-muted-foreground mt-1">
-              When a CAPTCHA appears, send it to 2Captcha (max 2 attempts per
-              application). If solving fails — or this is off — the application is
-              abandoned and marked failed, and the agent moves to the next job.
-              Your API key is never included in prompts or logs.
-            </p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
-            <input
-              type="checkbox"
-              role="switch"
-              aria-label="Solve CAPTCHAs with 2Captcha"
-              checked={captchaEnabled}
-              onChange={(e) => setCaptchaEnabled(e.target.checked)}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-          </label>
-        </div>
+        <SettingSwitch
+          label="Solve CAPTCHAs with 2Captcha"
+          checked={captchaEnabled}
+          onChange={setCaptchaEnabled}
+          description="When a CAPTCHA appears, send it to 2Captcha (max 2 attempts per application). If solving fails — or this is off — the job is marked Needs you (so you can apply yourself), and the agent moves to the next job. Your API key is never included in prompts or logs."
+          className=""
+        />
         {captchaEnabled && (
           <div className="mt-4">
             <label htmlFor="captcha-key" className="block text-sm font-semibold text-foreground mb-1.5">
@@ -540,27 +484,16 @@ export default function SettingsPage() {
 
       {/* Privacy & Telemetry */}
       <Section title="Privacy & Telemetry">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-foreground">Usage Analytics</p>
-            <p className="text-[13px] text-muted-foreground mt-1">
-              Help improve LangHireV2 by sending anonymous usage data (feature usage, crash reports).
-              No personal information or job data is transmitted.
-            </p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-4">
-            <input
-              type="checkbox"
-              checked={telemetryEnabled}
-              onChange={(e) => {
-                setTelemetryEnabled(e.target.checked);
-                setAnalyticsTelemetry(e.target.checked);
-              }}
-              className="sr-only peer"
-            />
-            <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
-          </label>
-        </div>
+        <SettingSwitch
+          label="Usage Analytics"
+          checked={telemetryEnabled}
+          onChange={(on) => {
+            setTelemetryEnabled(on);
+            setAnalyticsTelemetry(on);
+          }}
+          description="Help improve LangHireV2 by sending anonymous usage data (feature usage, crash reports). No personal information or job data is transmitted."
+          className=""
+        />
       </Section>
 
       {/* Blocked Domains */}
@@ -631,11 +564,12 @@ export default function SettingsPage() {
 }
 
 
-function SettingSwitch({ label, description, checked, onChange, disabled = false }: {
+function SettingSwitch({ label, description, checked, onChange, disabled = false, className = "py-2" }: {
   label: string; description: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean;
+  className?: string;
 }) {
   return (
-    <div className="flex items-center justify-between py-2">
+    <div className={`flex items-center justify-between ${className}`}>
       <div>
         <p className="text-sm font-semibold text-foreground">{label}</p>
         <p className="text-[13px] text-muted-foreground mt-1">{description}</p>

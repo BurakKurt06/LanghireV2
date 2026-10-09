@@ -12,11 +12,11 @@ from filelock import FileLock
 from browser_use.llm import ChatAWSBedrock
 
 try:
-    from core.config import get_data_dir
+    from core.config import MAX_PARALLEL_JOBS, clamp_parallel_jobs, get_data_dir, split_name
     from core.markers import parse_marker
     from memory import MemoryStore
 except ImportError:
-    from backend.core.config import get_data_dir
+    from backend.core.config import MAX_PARALLEL_JOBS, clamp_parallel_jobs, get_data_dir, split_name
     from backend.core.markers import parse_marker
     from backend.memory import MemoryStore
 
@@ -125,17 +125,11 @@ def build_browser_kwargs(worker: int = 1) -> dict:
 
 _SESSION_FILES = ("Current Session", "Current Tabs", "Last Session", "Last Tabs")
 
-# Applications running at the same time (Settings → Agent Settings).
-MAX_PARALLEL_JOBS = 4
-
-
 def parallel_jobs(settings: dict | None = None) -> int:
+    """Applications to run at the same time (Settings → Agent Settings)."""
     if settings is None:
         settings = load_runtime_settings()
-    try:
-        return max(1, min(int(settings.get("parallel_jobs") or 1), MAX_PARALLEL_JOBS))
-    except (TypeError, ValueError):
-        return 1
+    return clamp_parallel_jobs(settings.get("parallel_jobs"))
 
 
 def worker_profile_dir(profile_dir, worker: int) -> Path:
@@ -385,6 +379,7 @@ def refresh_posting_details(url: str, posting=None, mark_closed: bool = True):
         posting = job_page.fetch(url)
     if posting is None:
         return None
+    place = _first_place(posting.locations) if posting.locations else ""
     with FileLock(JOBS_LOCK):
         jobs = load_json(JOBS_FILE, {})
         job = jobs.get(url)
@@ -400,10 +395,8 @@ def refresh_posting_details(url: str, posting=None, mark_closed: bool = True):
                 not (job.get("company") or "").strip() or job.get("company") == "Unknown"
                 or source == "page" or job.get("source") == "pasted"):
             job["company"], job["name_source"], changed = posting.company, "page", True
-        if posting.locations and not (job.get("location") or "").strip():
-            place = _first_place(posting.locations)
-            if place:
-                job["location"], changed = place, True
+        if place and not (job.get("location") or "").strip():
+            job["location"], changed = place, True
         if posting.closed and mark_closed and job.get("status") in ("pending", "failed", "needs_you", "skipped"):
             job["status"], job["error"], changed = "closed", posting.reason, True
         if changed:
@@ -539,10 +532,10 @@ def _describe_name(name: str) -> str:
     The profile holds one full name; without the split the agent sometimes
     typed all of it into a form's First name field.
     """
-    parts = (name or "").split()
-    if len(parts) < 2:
+    first, last = split_name(name)
+    if not last:
         return f"Name: {name}"
-    return f"Name: {name} (First name: {' '.join(parts[:-1])} | Last name: {parts[-1]})"
+    return f"Name: {name} (First name: {first} | Last name: {last})"
 
 
 def _describe_salary(currency: str, low, high, period: str) -> str:

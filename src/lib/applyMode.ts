@@ -4,6 +4,12 @@
  */
 export type ApplyMode = "auto" | "trial" | "training";
 
+export const APPLY_MODE_LABELS: Record<ApplyMode, string> = {
+  auto: "Full auto",
+  trial: "Trial run",
+  training: "Training",
+};
+
 const STORAGE_KEY = "langhire_apply_mode";
 
 export function loadApplyMode(): ApplyMode {

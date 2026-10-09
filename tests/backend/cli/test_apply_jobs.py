@@ -600,7 +600,7 @@ def test_an_unsolved_captcha_needs_you_and_skips_the_sites_other_jobs(run, monke
     agents = len(run.agents)
     status, _, saved = run(url=GREENHOUSE.replace("123", "456"))
     assert status == "needs_you" and len(run.agents) == agents  # never opened
-    assert "same site (boards.greenhouse.io)" in saved[-1][1]
+    assert "same site (boards.greenhouse.io/acme)" in saved[-1][1]
 
     apply_jobs.new_run()
     monkeypatch.setattr(apply_jobs._captcha, "handle", lambda *a: asyncio.sleep(0, False))
@@ -614,7 +614,7 @@ def test_the_agent_giving_up_at_a_captcha_needs_you(run, monkeypatch):
         success=False, done_text="The email page is still blocked by an hCaptcha challenge (Please try again)."))
     assert status == "needs_you"
     assert saved[-1][1].startswith("CAPTCHA the solver couldn't pass\nThe email page is still blocked")
-    assert "boards.greenhouse.io" in apply_jobs._captcha_blocked
+    assert "boards.greenhouse.io/acme" in apply_jobs._captcha_blocked
 
 
 def test_an_unexpected_crash_is_retried_once(run, monkeypatch):
@@ -872,6 +872,12 @@ class TestParallelWorkers:
         assert queue.qsize() == 1
         assert apply_jobs.take_job(asyncio.Queue(), 2) is None
 
+    def test_a_site_is_one_employer_even_on_a_shared_host(self):
+        assert apply_jobs._site("https://job-boards.greenhouse.io/acme/jobs/1") == "job-boards.greenhouse.io/acme"
+        assert apply_jobs._site("https://job-boards.greenhouse.io/globex/jobs/2") == "job-boards.greenhouse.io/globex"
+        assert apply_jobs._site("https://acme.wd5.myworkdayjobs.com/en-US/careers/job/1") == "acme.wd5.myworkdayjobs.com"
+        assert apply_jobs._site("https://www.example.com/jobs/1") == "example.com"
+
     def test_one_worker_is_never_held_up_by_its_own_site(self, monkeypatch):
         monkeypatch.setattr(apply_jobs, "_busy_sites", {1: "a.example"})
         assert apply_jobs.take_job(self._queue("https://a.example/2"), 1)["url"] == "https://a.example/2"
@@ -904,3 +910,38 @@ class TestParallelWorkers:
         assert overlaps == [] and stats == {"applied": 4} and len(done) == 4
         assert {w for w, _ in done} == {1, 2}  # both worked
         assert apply_jobs._busy_sites == {}
+
+
+@pytest.mark.parametrize("text, blocked", [
+    ("The email page remained blocked by an hCaptcha challenge (Please try again).", True),
+    ("I couldn't proceed: the CAPTCHA has not been solved.", True),
+    ("The CAPTCHA was solved automatically, but Submit returned a server error.", False),
+    ("No CAPTCHA appeared; the form failed to submit.", False),
+    ("Stopped at Review: Field of Study\nThe page has a reCAPTCHA badge. The Field of Study list lacks FinTech.", False),
+])
+def test_only_a_report_of_being_stopped_by_a_captcha_counts(text, blocked):
+    assert apply_jobs.blocked_by_captcha(text) is blocked
+
+
+def test_a_skip_request_never_outlives_its_application(run, monkeypatch):
+    monkeypatch.setattr(apply_jobs, "_skip_requested", {GREENHOUSE})
+    _run_fake_agent[0].crash = TypeError("browser closed")
+    monkeypatch.setattr(apply_jobs, "_crash_retries", {GREENHOUSE: 1})
+    run()
+    assert apply_jobs._skip_requested == set()
+    apply_jobs._skip_requested.add(GREENHOUSE)
+    apply_jobs.new_run()
+    assert apply_jobs._skip_requested == set()
+
+
+def test_the_form_check_knows_both_emails_the_agent_may_type(run, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(apply_jobs, "add_form_check_each_step", lambda agent, profile: seen.update(profile))
+    monkeypatch.setattr(apply_jobs, "SENSITIVE_DATA", {"email": "ada.accounts@example.com", "password": "correct-horse-battery"})
+    run()
+    assert seen["account_email"] == "ada.accounts@example.com" and seen["email"]
+
+
+def test_saved_answers_stay_keyed_by_the_bare_host(run):
+    _, kwargs, _ = run(url="https://job-boards.greenhouse.io/acme/jobs/1")
+    assert run.agents[-1]._langhire_domain == "job-boards.greenhouse.io"

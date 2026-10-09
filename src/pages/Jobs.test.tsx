@@ -11,7 +11,7 @@ function Jobs({ url = "/jobs" }: { url?: string }) {
     </MemoryRouter>
   );
 }
-import { getJobStats } from "../lib/api";
+import { getJobStats, getApplyStatus } from "../lib/api";
 
 // i18n: identity translator so assertions can use raw keys.
 vi.mock("react-i18next", () => ({
@@ -35,9 +35,11 @@ vi.mock("./jobs/HistoryTab", () => ({
 
 vi.mock("../lib/api", () => ({
   getJobStats: vi.fn(),
+  getApplyStatus: vi.fn(),
 }));
 
 const mockGetJobStats = vi.mocked(getJobStats);
+const mockGetApplyStatus = vi.mocked(getApplyStatus);
 
 const stats = {
   total: 10,
@@ -51,6 +53,7 @@ const stats = {
 describe("Jobs", () => {
   beforeEach(() => {
     mockGetJobStats.mockResolvedValue(structuredClone(stats) as never);
+    mockGetApplyStatus.mockResolvedValue({ running: false } as never);
   });
 
   it("fetches stats on mount and renders the header", async () => {
@@ -117,13 +120,33 @@ describe("Jobs", () => {
     expect(await screen.findByTestId("collect-tab")).toBeInTheDocument();
   });
 
-  it("keeps polling the counts so they follow a run started elsewhere", async () => {
+  it("re-counts while a run goes (even through jobs that never open a browser), and not while idle", async () => {
+    const job = (url: string) => ({ worker: 1, url, title: "Intern", company: "Acme", step: 1, max_steps: 70,
+      started_at: new Date().toISOString() });
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       render(<Jobs />);
       await waitFor(() => expect(mockGetJobStats).toHaveBeenCalledTimes(1));
-      await vi.advanceTimersByTimeAsync(5000);
-      expect(mockGetJobStats).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(mockGetJobStats).toHaveBeenCalledTimes(1); // nothing running: no re-counting
+
+      // Running, but the jobs end before a browser opens (closed, fit-skipped): no current job.
+      mockGetApplyStatus.mockResolvedValue({ running: true, current: [] } as never);
+      await vi.advanceTimersByTimeAsync(2100);
+      await waitFor(() => expect(mockGetJobStats).toHaveBeenCalledTimes(2)); // the run started
+      await vi.advanceTimersByTimeAsync(5100);
+      await waitFor(() => expect(mockGetJobStats).toHaveBeenCalledTimes(3)); // and keeps re-counting
+
+      mockGetApplyStatus.mockResolvedValue({ running: true, current: [job("https://jobs.example/2")] } as never);
+      await vi.advanceTimersByTimeAsync(2100);
+      await waitFor(() => expect(mockGetJobStats.mock.calls.length).toBeGreaterThanOrEqual(4)); // the next job
+
+      mockGetApplyStatus.mockResolvedValue({ running: false } as never);
+      await vi.advanceTimersByTimeAsync(2100);
+      await vi.advanceTimersByTimeAsync(500); // let the "run ended" re-count land
+      const ended = mockGetJobStats.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(11000);
+      expect(mockGetJobStats).toHaveBeenCalledTimes(ended); // the run ended: no more re-counting
     } finally {
       vi.useRealTimers();
     }

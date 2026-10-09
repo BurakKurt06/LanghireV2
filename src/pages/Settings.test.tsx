@@ -223,11 +223,7 @@ describe("SettingsPage", () => {
     render(<SettingsPage />);
     await screen.findByDisplayValue("/home/me/resume.pdf");
 
-    // The telemetry toggle lives in the "Usage Analytics" section. Find the
-    // checkbox in the same row as that label (avoids matching plugin toggles).
-    const analyticsRow = screen.getByText("Usage Analytics").closest("div")!
-      .parentElement! as HTMLElement;
-    const telemetryToggle = within(analyticsRow).getByRole("checkbox");
+    const telemetryToggle = screen.getByRole("switch", { name: "Usage Analytics" });
     expect(telemetryToggle).toBeChecked();
     await user.click(telemetryToggle);
     expect(mockSetTelemetry).toHaveBeenCalledWith(false);

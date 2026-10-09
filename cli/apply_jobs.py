@@ -185,6 +185,7 @@ def new_run() -> None:
     """Forget the previous run's per-site state (called when a run starts)."""
     _captcha_blocked.clear()
     _busy_sites.clear()
+    _skip_requested.clear()
 
 
 def take_job(queue: asyncio.Queue, worker_id: int):
@@ -211,8 +212,11 @@ def take_job(queue: asyncio.Queue, worker_id: int):
 
 
 def _site(url: str) -> str:
+    """One employer's application site: the host, plus the company id on shared hosts (Greenhouse, Lever, ...)."""
     from urllib.parse import urlparse
-    return (urlparse(url).hostname or "").removeprefix("www.")
+    host = (urlparse(url).hostname or "").removeprefix("www.")
+    company = job_page.tenant(url)
+    return f"{host}/{company}" if company and company not in host else host
 
 
 def captcha_note(reason: str) -> str:
@@ -220,6 +224,24 @@ def captcha_note(reason: str) -> str:
     return ("CAPTCHA the solver couldn't pass\n"
             f"{reason} Open the link and apply yourself, or apply again later: these checks "
             "don't always appear.")
+
+
+_CAPTCHA_BLOCKED = re.compile(r"block|stuck|stopp|prevent|unable|can'?t|cannot|could ?not|couldn'?t|unsolved|"
+                              r"not (been )?solved|remain|still|again", re.I)
+_CAPTCHA_PASSED = re.compile(r"\b(was|were|got|is|been|automatically) (solved|passed|cleared)\b|\bno captcha\b|"
+                             r"without (a |any )?captcha", re.I)
+_NEGATED = re.compile(r"\b(not|n't|never)\b[^.]{0,20}\b(solved|passed|cleared)\b", re.I)
+
+
+def blocked_by_captcha(text: str) -> bool:
+    """The agent's failure report says a CAPTCHA stopped it (not merely that one appeared, or was solved)."""
+    for sentence in re.split(r"(?<=[.!?])\s+|\n", text or ""):
+        if "captcha" not in sentence.lower() or not _CAPTCHA_BLOCKED.search(sentence):
+            continue
+        if _CAPTCHA_PASSED.search(sentence) and not _NEGATED.search(sentence):
+            continue
+        return True
+    return False
 
 
 def _block_site(url: str, title: str) -> None:
@@ -797,16 +819,6 @@ def previous_failure_instructions(text: str) -> str:
             "control, the keyboard, Edit links, Sign In instead of Create Account, ...).\n\n")
 
 
-def _is_workday(url: str) -> bool:
-    host = (_urlparse_host(url) or "").lower()
-    return "myworkdayjobs.com" in host or "myworkdaysite.com" in host
-
-
-def _urlparse_host(url: str) -> str:
-    from urllib.parse import urlparse
-    return urlparse(url).hostname or ""
-
-
 def safe_folder_name(name: str) -> str:
     """A folder name Windows accepts: "apply_X_Early Careers: Health" -> "apply_X_Early_Careers__Health"."""
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).replace(" ", "_").strip(". ")
@@ -858,14 +870,21 @@ POSTING_CLOSED_PREFIX = "POSTING CLOSED:"
 # ... and this one marks it "needs_you" (something only the user can provide).
 NEEDS_YOU_PREFIX = "NEEDS YOU:"
 
+# The agent's done text starting with one of these ends the job with that status
+# (prefix, status, reason if none given, log label).
+_AGENT_ENDINGS = (
+    (NEEDS_YOU_PREFIX, "needs_you", "This job needs something from you.", "🙋 Needs you"),
+    (POSTING_CLOSED_PREFIX, "closed", "The posting is closed.", "🔒 Closed"),
+)
+
 # A first done(success=false) before this many steps is sent back once with
 # ideas to try: agents gave up after 10-16 steps, one claiming "this is the
 # final allowed step" with hundreds left.
 EARLY_GIVE_UP_STEPS = 25
 
 # Reasons that end a run however early they come.
-_HARD_STOPS = (POSTING_CLOSED_PREFIX.lower(), NEEDS_YOU_PREFIX.lower(), "sign-in required", "real person", "not a robot",
-               "human check", "captcha")
+_HARD_STOPS = tuple(prefix.lower() for prefix, *_ in _AGENT_ENDINGS) + (
+    "sign-in required", "real person", "not a robot", "human check", "captcha")
 
 
 def is_hard_stop(text: str) -> bool:
@@ -1061,14 +1080,17 @@ async def save_job_status(url: str, status: str, error: str | None = None, agent
     update_job(url, **fields)
 
 
-async def _captcha_unsolved(url: str, title: str, company: str, worker_id: int, e) -> str:
+async def _captcha_needs_you(url: str, title: str, company: str, worker_id: int, reason: str, label: str) -> str:
+    """End the job as Needs you over a CAPTCHA, and skip the site's other jobs this run."""
     _block_site(url, title)
-    kind = "hCaptcha" if "hcaptcha" in e.challenge_type else e.challenge_type.replace("_", " ")
-    await save_job_status(url, "needs_you", captcha_note(
-        f"The application site showed a {kind} check and the CAPTCHA solver couldn't solve it ({e.reason})."),
-        agent_words=True)
-    print(f"  🧩 [W{worker_id}] Needs you (CAPTCHA not solved): {title} at {company} — {e.reason}")
+    await save_job_status(url, "needs_you", captcha_note(reason), agent_words=True)
+    print(f"  🙋 [W{worker_id}] Needs you ({label}): {title} at {company}")
     return "needs_you"
+
+
+def _unsolved_reason(e) -> str:
+    kind = "hCaptcha" if "hcaptcha" in e.challenge_type else e.challenge_type.replace("_", " ")
+    return f"The application site showed a {kind} check and the CAPTCHA solver couldn't solve it ({e.reason})."
 
 
 async def save_new_qa(new_questions: dict, source_domain: str = ""):
@@ -1137,11 +1159,9 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
 
     blocked_by = _captcha_blocked.get(_site(url))
     if blocked_by is not None:
-        await save_job_status(url, "needs_you", captcha_note(
+        return await _captcha_needs_you(url, title, company, worker_id, (
             f"Not opened: earlier in this run the same site ({_site(url)}) showed a CAPTCHA the solver "
-            f"couldn't pass, on \"{blocked_by}\"."), agent_words=True)
-        print(f"  🙋 [W{worker_id}] Needs you (same site's CAPTCHA): {title} at {company}")
-        return "needs_you"
+            f"couldn't pass, on \"{blocked_by}\"."), "same site's CAPTCHA")
 
     agent_sensitive_data = build_agent_secrets(profile, settings_sensitive)
     if "email" not in agent_sensitive_data:
@@ -1166,8 +1186,10 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         if posting.company and (company or "").strip() in ("", "Unknown"):
             company = job["company"] = posting.company
 
-    if not saved.get("fit_override") and not job.get("fit_override"):
+    # A retry of the same job in this run doesn't ask again.
+    if not (saved.get("fit_override") or job.get("fit_override") or job.get("_fit_checked")):
         skip = await check_fit(posting, profile, title, company)
+        job["_fit_checked"] = True
         if skip is not None:
             await save_job_status(url, "skipped", skip, agent_words=True)
             print(f"  🚫 [W{worker_id}] Skipped: {title} at {company} — {skip.splitlines()[0]}")
@@ -1328,7 +1350,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     _agent_log_start("apply", f"{title} at {company}")
 
     # A trial run has the user at hand to get it unstuck, so it gets more room.
-    MAX_STEPS = 150 if is_trial_run() else (100 if _is_workday(url) else 70)
+    MAX_STEPS = 150 if is_trial_run() else (100 if job_page.is_workday(url) else 70)
     _step_count = {"n": 0}
     _agent_ref = {"agent": None, "max_steps": MAX_STEPS}
     # Set when a blocking CAPTCHA cannot be solved, so the run can be ended and
@@ -1372,7 +1394,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
 
     documents = other_documents()
     user_note = (job.get("user_note") or "").strip()
-    job_domain = (_urlparse(url).hostname or "").removeprefix("www.")
+    job_domain = _host.removeprefix("www.")
     review = is_trial_run()
     training = is_training_run()
     if training:
@@ -1383,8 +1405,9 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     _agent_ref["cover_letter_pdf"].parent.mkdir(parents=True, exist_ok=True)
     _agent_ref["profile"] = profile
     _agent_ref["posting_description"] = getattr(posting, "description", "") if posting is not None else ""
-    _agent_ref["resume_text"] = resume_text(resume_path)
+    resume = _agent_ref["resume_text"] = resume_text(resume_path)
     tools = build_tools(job, job_domain, review, _agent_ref, worker_id)
+    actions = tools.registry.registry.actions
 
     agent = Agent(
         task=(
@@ -1392,9 +1415,9 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             f"{user_note_instructions(user_note)}"
             f"{documents_instructions(documents)}"
             f"{previous_failure_instructions(job.get('previous_failure', ''))}"
-            f"{NAME_JOB_RULE if 'set_job_details' in tools.registry.registry.actions else ''}"
-            f"{COVER_LETTER_RULE if 'write_cover_letter' in tools.registry.registry.actions else ''}"
-            f"{resume_instructions(resume_text(resume_path))}"
+            f"{NAME_JOB_RULE if 'set_job_details' in actions else ''}"
+            f"{COVER_LETTER_RULE if 'write_cover_letter' in actions else ''}"
+            f"{resume_instructions(resume)}"
             f"{FORM_RULES}"
             f"{PAGE_CHECK_RULES}"
             f"{REVIEW_RULES if review else ''}"
@@ -1438,14 +1461,16 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         sensitive_data=agent_sensitive_data,
         extend_system_message=memory,
         available_file_paths=[resume_path] + [d["path"] for d in documents]
-        + ([str(_agent_ref["cover_letter_pdf"])] if "write_cover_letter" in tools.registry.registry.actions else []),
+        + ([str(_agent_ref["cover_letter_pdf"])] if "write_cover_letter" in actions else []),
         save_conversation_path=str(LOGS_DIR / safe_folder_name(f"apply_{company}_{title[:30]}")),
         calculate_cost=True,
         register_new_step_callback=_on_step_with_limit,
         register_done_callback=_agent_on_done,
     )
     _agent_ref["agent"] = agent
-    add_form_check_each_step(agent, profile)
+    # The emails the agent is told to type: the form email, and the account email on account pages.
+    add_form_check_each_step(agent, {**profile, "email": agent_sensitive_data.get("email", ""),
+                                     "account_email": agent_sensitive_data.get("account_email", "")})
     agent._langhire_loop = asyncio.get_running_loop()
     agent._langhire_domain = job_domain
     agent._langhire_url = url
@@ -1471,8 +1496,8 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             print(f"  🙋 [W{worker_id}] Needs you (human check): {title} at {company}")
             return "needs_you"
         if _captcha_failure["error"] is not None:
-            e = _captcha_failure["error"]
-            return await _captcha_unsolved(url, title, company, worker_id, e)
+            return await _captcha_needs_you(url, title, company, worker_id,
+                                            _unsolved_reason(_captcha_failure["error"]), "CAPTCHA not solved")
 
         # Extract Q&A from history
         _, new_questions = extract_from_history(result)
@@ -1560,32 +1585,26 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
             return "applied"
         else:
             error_msg = failure_reason(result)
-            if strip_markers(error_msg).startswith(NEEDS_YOU_PREFIX):
-                reason = strip_markers(error_msg)[len(NEEDS_YOU_PREFIX):].strip() or "This job needs something from you."
-                await save_job_status(url, "needs_you", reason[:2000], agent_words=True)
-                print(f"  🙋 [W{worker_id}] Needs you: {title} at {company} — {reason[:100]}")
-                return "needs_you"
-            if strip_markers(error_msg).startswith(POSTING_CLOSED_PREFIX):
-                reason = strip_markers(error_msg)[len(POSTING_CLOSED_PREFIX):].strip() or "The posting is closed."
-                await save_job_status(url, "closed", reason[:2000], agent_words=True)
-                print(f"  🔒 [W{worker_id}] Closed: {title} at {company} — {reason[:100]}")
-                return "closed"
-            if result.is_done() and "captcha" in error_msg.lower():
-                _block_site(url, title)
-                await save_job_status(url, "needs_you", captcha_note(strip_markers(error_msg)[:1800]), agent_words=True)
-                print(f"  🙋 [W{worker_id}] Needs you (CAPTCHA): {title} at {company}")
-                return "needs_you"
+            text = strip_markers(error_msg)
+            for prefix, status, fallback, label in _AGENT_ENDINGS:
+                if text.startswith(prefix):
+                    reason = text[len(prefix):].strip() or fallback
+                    await save_job_status(url, status, reason[:2000], agent_words=True)
+                    print(f"  {label} [W{worker_id}]: {title} at {company} — {reason[:100]}")
+                    return status
+            if result.is_done() and blocked_by_captcha(text):
+                return await _captcha_needs_you(url, title, company, worker_id, text[:1800], "CAPTCHA")
             await save_job_status(url, "failed", error_msg[:2000], agent_words=result.is_done())
             # The agent's own report of a problem it might get past on a second
             # try (not a closed posting, a missing document, a sign-in, ...).
             if result.is_done() and not is_hard_stop(error_msg) and not job.get("previous_failure"):
-                job["_retry_with"] = strip_markers(error_msg)
+                job["_retry_with"] = text
             print(f"  ❌ [W{worker_id}] Failed: {title} at {company} — {error_msg[:100]}")
             return "failed"
 
     except _captcha.CaptchaUnsolved as e:
         # Abandon this application and move on — never pause or wait.
-        return await _captcha_unsolved(url, title, company, worker_id, e)
+        return await _captcha_needs_you(url, title, company, worker_id, _unsolved_reason(e), "CAPTCHA not solved")
 
     except Exception as e:
         error_str = str(e)
@@ -1609,6 +1628,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     finally:
         _running_agents.discard(agent)
         _current.pop(worker_id, None)
+        _skip_requested.discard(url)
         try:
             await browser.close()
         except Exception as close_err:
@@ -1672,8 +1692,9 @@ async def main():
     qa = load_json(QA_FILE, {})
     LOGS_DIR.mkdir(exist_ok=True)
     new_run()
+    args.workers = max(1, min(args.workers, config.MAX_PARALLEL_JOBS))  # one prepared profile per worker
     if args.workers > 1:
-        config.prepare_worker_profiles(min(args.workers, config.MAX_PARALLEL_JOBS))
+        config.prepare_worker_profiles(args.workers)
 
     # Filter pending jobs by type
     pending = [

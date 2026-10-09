@@ -21,6 +21,11 @@ from __future__ import annotations
 import json
 import re
 
+try:
+    from core.config import split_name
+except ImportError:  # pragma: no cover
+    from backend.core.config import split_name
+
 _SCAN_JS = r"""() => {
   const out = [];
   const seenRadio = new Set();
@@ -176,14 +181,14 @@ def profile_mismatches(data: dict, profile: dict | None) -> list[tuple[str, str,
     """
     if not profile:
         return []
-    name = (profile.get("name") or "").split()
+    first, last = split_name(profile.get("name") or "")
     address = profile.get("address") or {}
     checks = [
         (r"\bphone\b(?!.*(type|device|extension|code))", profile.get("phone") or "", "phone"),
         (r"\be-?mail\b", profile.get("email") or "", "email"),
         (r"\b(postal|zip)\b", address.get("zip") or "", "zip"),
-        (r"\bfirst name\b|\bgiven name\b", " ".join(name[:-1]) if len(name) > 1 else "", "text"),
-        (r"\blast name\b|\bfamily name\b|\bsurname\b", name[-1] if len(name) > 1 else "", "text"),
+        (r"\bfirst name\b|\bgiven name\b", first, "text"),
+        (r"\blast name\b|\bfamily name\b|\bsurname\b", last, "text"),
     ]
     out = []
     for field in data.get("fields", []):
@@ -200,7 +205,9 @@ def profile_mismatches(data: dict, profile: dict | None) -> list[tuple[str, str,
             elif kind == "zip":
                 wrong = _digits(shown)[:5] != _digits(expected)[:5]
             elif kind == "email":
-                wrong = shown.lower() != expected.strip().lower()
+                # Account pages (Create Account / Sign In) take the account email.
+                allowed = {e.strip().lower() for e in (expected, profile.get("account_email") or "") if e}
+                wrong = shown.lower() not in allowed
             else:
                 wrong = shown.lower() != expected.strip().lower()
             if wrong:

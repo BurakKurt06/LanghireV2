@@ -165,3 +165,13 @@ def test_clean_company(name, clean):
 @pytest.mark.parametrize("title", ["About the Firm", "Careers", "Job Details", "Early Careers Career Site", "Pasted Link"])
 def test_generic_titles_count_as_unnamed(title):
     assert job_page.is_placeholder(title)
+
+
+def test_a_greenhouse_link_sent_to_the_companys_own_site_is_not_closed():
+    page = "<html><head><title>Data Intern | Acme</title></head></html>"
+    open_elsewhere = job_page.parse("https://careers.acme.com/positions/123?gh_src=abc", 200, page,
+                                    original_url="https://boards.greenhouse.io/acme/jobs/123")
+    assert not open_elsewhere.closed
+    back_to_board = job_page.parse("https://job-boards.greenhouse.io/acme", 200, page,
+                                   original_url="https://job-boards.greenhouse.io/acme/jobs/123")
+    assert back_to_board.closed

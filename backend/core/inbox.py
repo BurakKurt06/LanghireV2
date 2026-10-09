@@ -23,14 +23,19 @@ from pydantic import BaseModel, Field
 
 try:
     from core.config import get_data_dir
+    from core.job_page import _letters
 except ImportError:  # pragma: no cover
     from backend.core.config import get_data_dir
+    from backend.core.job_page import _letters
 
 CATEGORIES = ("applied", "assessment", "interview", "offer", "rejected")
 SCHEDULES = {"off": None, "daily": timedelta(days=1), "weekly": timedelta(days=7)}
 FIRST_CHECK_DAYS = 60
 MAX_EMAILS_PER_CHECK = 40
-BATCH = 10
+# A results page with at least this many rows may have older matches after it.
+RESULT_PAGE_ROWS = 20
+MAX_RESULT_PAGES = 5
+BATCH = MAX_EMAILS_PER_CHECK  # one sorting request per check (40 x 1200 chars fits easily)
 PAGE_WAIT_SECONDS = 25
 GMAIL = "https://mail.google.com/mail/u/0/"
 
@@ -41,6 +46,7 @@ SEARCH_TERMS = ('(application OR applied OR applying OR interview OR offer OR un
 
 _lock = threading.Lock()
 _state = {"checking": False, "requested": False, "status": "", "error": ""}
+WAITING = "Waiting for the current run to finish…"
 
 
 # ── storage ──────────────────────────────────────────────────────────────────
@@ -67,9 +73,26 @@ def save(data: dict) -> None:
 
 
 def status() -> dict:
+    """For the Inbox page (polled): everything but each email's stored text, which only prep sheets use."""
     data = load()
+    emails = [{k: v for k, v in e.items() if k != "text"} for e in data["emails"]]
     return {**_state, "schedule": data["schedule"], "last_checked": data["last_checked"],
-            "emails": sorted(data["emails"], key=lambda e: e.get("date") or "", reverse=True)}
+            "emails": sorted(emails, key=lambda e: e.get("date") or "", reverse=True)}
+
+
+_schedule_cache: dict = {"mtime": None, "fields": {}}
+
+
+def _schedule_fields() -> dict:
+    """schedule / last_checked / last_failed, re-read only when inbox.json changes (the scheduler asks every minute)."""
+    try:
+        mtime = _path().stat().st_mtime_ns
+    except OSError:
+        return {}
+    if _schedule_cache["mtime"] != mtime:
+        data = load()
+        _schedule_cache.update(mtime=mtime, fields={k: data.get(k) for k in ("schedule", "last_checked", "last_failed")})
+    return _schedule_cache["fields"]
 
 
 def set_schedule(schedule: str) -> bool:
@@ -86,7 +109,7 @@ def request_check() -> None:
     """Ask for a check; the scheduler runs it as soon as no application is running."""
     _state["requested"] = True
     _state["error"] = ""
-    _state["status"] = "Waiting for the current run to finish…"
+    _state["status"] = WAITING
 
 
 RETRY_AFTER_FAILURE = timedelta(hours=1)
@@ -112,14 +135,26 @@ def _note_failure() -> None:
 
 
 # ── reading Gmail with code ─────────────────────────────────────────────────
-def search_url(since: datetime) -> str:
-    query = f"after:{since.strftime('%Y/%m/%d')} {SEARCH_TERMS}"
+def search_url(since: datetime, before=None) -> str:
+    """Job mail after `since` (and before the date `before`, for older result pages)."""
+    query = f"after:{since.strftime('%Y/%m/%d')} " + (f"before:{before.strftime('%Y/%m/%d')} " if before else "") + SEARCH_TERMS
     return GMAIL + "#search/" + quote(query, safe="")
+
+
+def _oldest_day(rows: list[dict]):
+    """The earliest date among result rows (None if none can be read)."""
+    days = []
+    for row in rows:
+        try:
+            days.append(datetime.fromisoformat(_iso_date(row.get("date"))).date())
+        except ValueError:
+            continue
+    return min(days) if days else None
 
 
 # Result rows. Gmail's classes (tr.zA, .bog, .y2, .yW [email], .xW [title]) have
 # been stable for years; role=row innerText is the fallback.
-_LIST_JS = r"""() => {
+_LIST_JS = r"""(expected) => {
   const out = [];
   const rows = Array.from(document.querySelectorAll('tr.zA'));
   for (const row of rows) {
@@ -139,7 +174,7 @@ _LIST_JS = r"""() => {
   // Gmail can show the inbox for a moment before the search results: the search
   // box holds the query once the results are on screen.
   const box = document.querySelector('input[name=q]');
-  const searched = !box || /after:/.test(box.value || '');
+  const searched = !box || (box.value || '').includes(expected || 'after:');
   const empty = !rows.length && /no messages matched|didn't match any/i.test(document.body ? document.body.innerText : '');
   return JSON.stringify({ rows: searched ? out : [], signedOut, empty, ready: signedOut || (searched && (rows.length > 0 || empty)) });
 }"""
@@ -170,33 +205,53 @@ async def _poll(page, js: str, *args, key: str = "ready", wait: float = PAGE_WAI
     return data
 
 
-async def read_gmail(since: datetime, known_ids: set[str], browser_kwargs: dict) -> tuple[list[dict], str]:
-    """New job emails since `since` ([{id, sender, sender_email, subject, snippet, date, body}], error)."""
+async def read_gmail(since: datetime, known_ids: set[str], browser_kwargs: dict) -> tuple[list[dict], str, bool]:
+    """New job emails since `since`: ([{id, sender, sender_email, subject, snippet, date, body}], error, complete).
+
+    complete is False when matching mail was left unread (the per-check cap, or
+    more result pages than MAX_RESULT_PAGES); the next check reads the same
+    window again, skipping what it already has.
+    """
     from browser_use import BrowserSession
     browser = BrowserSession(**browser_kwargs)
     try:
         await browser.start()
-        await browser.navigate_to(search_url(since))
-        page = await browser.get_current_page()
-        listing = await _poll(page, _LIST_JS)
-        if listing.get("signedOut"):
-            return [], "Gmail isn't signed in. Sign in to Gmail in Settings → Accounts, then check again."
-        if not listing.get("ready"):
-            return [], "Gmail didn't load in time. Try again."
-        emails = []
-        for row in listing.get("rows", []):
-            if not row.get("id") or row["id"] in known_ids:
-                continue
-            if len(emails) >= MAX_EMAILS_PER_CHECK:
-                break
-            await browser.navigate_to(f"{GMAIL}#all/{row['id']}")
-            message = await _poll(await browser.get_current_page(), _MESSAGE_JS, row.get("subject", ""), wait=12)
-            # Never another email's text: without a matching message, keep the row's snippet.
-            body = message.get("body") if message.get("ready") else ""
-            emails.append({**row, "body": body or row.get("snippet") or ""})
-        return emails, ""
+        emails, seen, before = [], set(known_ids), None
+        for _ in range(MAX_RESULT_PAGES):
+            await browser.navigate_to(search_url(since, before))
+            expected = f"before:{before.strftime('%Y/%m/%d')}" if before else f"after:{since.strftime('%Y/%m/%d')}"
+            listing = await _poll(await browser.get_current_page(), _LIST_JS, expected)
+            if listing.get("signedOut"):
+                return [], "Gmail isn't signed in. Sign in to Gmail in Settings → Accounts, then check again.", False
+            if not listing.get("ready"):
+                return (emails, "", False) if emails else ([], "Gmail didn't load in time. Try again.", False)
+            rows = listing.get("rows", [])
+            for row in rows:
+                if not row.get("id") or row["id"] in seen:
+                    continue
+                if len(emails) >= MAX_EMAILS_PER_CHECK:
+                    return emails, "", False
+                seen.add(row["id"])
+                await browser.navigate_to(f"{GMAIL}#all/{row['id']}")
+                message = await _poll(await browser.get_current_page(), _MESSAGE_JS, row.get("subject", ""), wait=12)
+                # Never another email's text: without a matching message, keep the row's snippet.
+                body = message.get("body") if message.get("ready") else ""
+                emails.append({**row, "body": body or row.get("snippet") or ""})
+            if len(rows) < RESULT_PAGE_ROWS:
+                return emails, "", True
+            # A full page: older matches may follow. before: excludes its own day,
+            # so the next page starts the day after the oldest row (rows already
+            # read that day are skipped).
+            oldest = _oldest_day(rows)
+            following = oldest + timedelta(days=1) if oldest else None
+            if following is not None and following <= since.date():
+                return emails, "", True
+            if following is None or following == before:
+                return emails, "", False
+            before = following
+        return emails, "", False
     except Exception as e:
-        return [], f"Couldn't read Gmail: {e}"
+        return [], f"Couldn't read Gmail: {e}", False
     finally:
         try:
             await browser.kill()
@@ -228,10 +283,10 @@ def classify_prompt(batch: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def classify(llm, emails: list[dict]) -> list[dict]:
-    """The emails that are about applications, each with category / company / role."""
+async def classify(llm, emails: list[dict]) -> tuple[list[dict], set[str]]:
+    """(the emails about applications, each with category / company / role; the ids the AI labeled at all)."""
     from browser_use.llm.messages import UserMessage
-    sorted_emails = []
+    sorted_emails, labeled = [], set()
     for start in range(0, len(emails), BATCH):
         batch = emails[start:start + BATCH]
         try:
@@ -241,30 +296,39 @@ async def classify(llm, emails: list[dict]) -> list[dict]:
         except Exception:
             continue
         for label in labels:
-            if 0 <= label.index < len(batch) and label.category in CATEGORIES:
+            if not 0 <= label.index < len(batch):
+                continue
+            labeled.add(batch[label.index]["id"])
+            if label.category in CATEGORIES:
                 sorted_emails.append({**batch[label.index], "category": label.category,
                                       "company": label.company.strip(), "role": label.role.strip()})
-    return sorted_emails
+    return sorted_emails, labeled
 
 
 # ── matching to jobs ─────────────────────────────────────────────────────────
-def _letters(text: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
-
-
 def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) > 2}
 
 
+def _same_company(a: str, b: str) -> bool:
+    """'Contoso' ~ 'Contoso Investments' (whole words, in order), 'A.C. Labs' ~ 'AC Labs' (same letters);
+    not 'Ally' ~ 'Rally Health'."""
+    if _letters(a) == _letters(b):
+        return True
+    words_a, words_b = re.findall(r"[a-z0-9]+", a.lower()), re.findall(r"[a-z0-9]+", b.lower())
+    short, long = sorted((words_a, words_b), key=len)
+    return bool(short) and any(long[i:i + len(short)] == short for i in range(len(long) - len(short) + 1))
+
+
 def match_job(email: dict, jobs: dict) -> str | None:
     """The job URL this email is about (company must match; the role breaks ties), or None."""
-    company = _letters(email.get("company"))
-    if len(company) < 3:
+    company = email.get("company") or ""
+    if len(_letters(company)) < 3:
         return None
     best, best_score = None, 0.0
     for url, job in jobs.items():
-        name = _letters(job.get("company"))
-        if not name or not (company in name or name in company):
+        name = job.get("company") or ""
+        if not _letters(name) or not _same_company(company, name):
             continue
         role_words, title_words = _words(email.get("role")), _words(job.get("title"))
         score = 1.0 + (len(role_words & title_words) / max(1, len(role_words)) if role_words else 0)
@@ -279,31 +343,40 @@ def match_job(email: dict, jobs: dict) -> str | None:
 async def run_check(llm, browser_kwargs: dict, read_jobs, update_job) -> dict:
     """Read new job mail, sort it, store it and badge the matching jobs. Returns a summary."""
     data = load()
-    since = (datetime.fromisoformat(data["last_checked"]) - timedelta(days=1) if data.get("last_checked")
+    # search_from: a window an earlier check didn't finish (cap, page limit, sorting failed).
+    since = (datetime.fromisoformat(data["search_from"]) if data.get("search_from")
+             else datetime.fromisoformat(data["last_checked"]) - timedelta(days=1) if data.get("last_checked")
              else datetime.now(timezone.utc) - timedelta(days=FIRST_CHECK_DAYS))
     known = {e["id"] for e in data["emails"]}
     known |= set(data.get("ignored_ids", []))
     _state["status"] = "Reading Gmail…"
-    emails, error = await read_gmail(since, known, browser_kwargs)
+    emails, error, complete = await read_gmail(since, known, browser_kwargs)
     if error:
         return {"error": error, "new": 0}
     _state["status"] = f"Sorting {len(emails)} email(s)…"
-    sorted_emails = await classify(llm, emails) if emails else []
+    sorted_emails, labeled = await classify(llm, emails) if emails else ([], set())
+    # Emails the AI didn't get to (an error, a timeout) aren't ignored: the next check reads them again.
+    complete = complete and labeled >= {e["id"] for e in emails}
     kept_ids = {e["id"] for e in sorted_emails}
     jobs = read_jobs()
     for email in sorted_emails:
         email["gmail_url"] = f"https://mail.google.com/mail/u/0/#all/{email['id']}"  # always the real Gmail
         email["date"] = _iso_date(email.get("date"))
         email["job_url"] = match_job(email, jobs)
-        if email["job_url"]:
+    # Oldest first, and never over a newer email's status: each job shows its latest email.
+    for email in sorted(sorted_emails, key=lambda e: e["date"]):
+        job = jobs.get(email["job_url"]) if email["job_url"] else None
+        if job is not None and email["date"] >= (job.get("inbox_date") or ""):
             update_job(email["job_url"], inbox_status=email["category"], inbox_date=email["date"],
                        inbox_subject=email.get("subject", "")[:200])
+            job["inbox_date"] = email["date"]
     with _lock:
         data = load()
         data["emails"] = data["emails"] + [{k: v for k, v in e.items() if k != "body"} | {"text": e.get("body", "")[:2500]}
                                            for e in sorted_emails]
-        data["ignored_ids"] = sorted(set(data.get("ignored_ids", [])) | {e["id"] for e in emails if e["id"] not in kept_ids})[-2000:]
+        data["ignored_ids"] = sorted(set(data.get("ignored_ids", [])) | (labeled - kept_ids))[-2000:]
         data["last_checked"] = datetime.now(timezone.utc).isoformat()
+        data["search_from"] = None if complete else since.isoformat()
         save(data)
     return {"error": "", "new": len(sorted_emails), "read": len(emails)}
 
@@ -336,11 +409,13 @@ def prep_prompt(email: dict, job: dict | None, posting: str, resume: str, profil
     )
 
 
-async def write_prep_sheet(llm, email: dict, job: dict | None, posting: str, resume: str, profile: dict) -> str:
-    from browser_use.llm.messages import UserMessage
-    response = await asyncio.wait_for(llm.ainvoke([UserMessage(content=prep_prompt(email, job, posting, resume, profile))]),
-                                      timeout=120)
-    text = response.completion if isinstance(response.completion, str) else str(response.completion)
+async def write_prep_sheet(llm, email: dict, job: dict | None, posting: str, resume: str, profile: dict,
+                           settings: dict | None = None) -> str:
+    try:
+        from core.ai_extras import ask_text
+    except ImportError:  # pragma: no cover
+        from backend.core.ai_extras import ask_text
+    text = await ask_text(llm, prep_prompt(email, job, posting, resume, profile), timeout=120, settings=settings)
     return re.sub(r"[#*`]+", "", text).strip()
 
 
@@ -360,6 +435,28 @@ def find(email_id: str) -> dict | None:
 
 
 # ── scheduler ────────────────────────────────────────────────────────────────
+def _check_now(check, is_busy=lambda: False) -> None:
+    """One check, its outcome left in _state for the Inbox page."""
+    requested = _state["requested"]
+    _state.update(checking=True, requested=False, status="Opening Gmail…", error="")
+    if is_busy():
+        # A run started between the scheduler's look and here: it owns the browser profile.
+        _state.update(checking=False, requested=requested, status=WAITING if requested else "")
+        return
+    try:
+        try:
+            result = check()
+        except Exception as e:
+            result = {"error": f"Check failed: {e}"}
+        error, new = result.get("error", ""), result.get("new", 0)
+        _state.update(error=error, status="" if error else (
+            f"Found {new} new job email(s)." if new else "No new job emails."))
+        if error:
+            _note_failure()
+    finally:
+        _state["checking"] = False
+
+
 def start_scheduler(is_busy, check, interval_seconds: int = 60, stop: threading.Event | None = None) -> threading.Thread:
     """Run requested and scheduled checks in the background, never during an application run.
 
@@ -371,25 +468,11 @@ def start_scheduler(is_busy, check, interval_seconds: int = 60, stop: threading.
     def loop():
         while not stop.is_set():
             try:
-                wanted = _state["requested"] or due(load())
-                if wanted and not _state["checking"]:
-                    if is_busy():
-                        if _state["requested"]:
-                            _state["status"] = "Waiting for the current run to finish…"
-                    else:
-                        _state.update(checking=True, requested=False, status="Opening Gmail…", error="")
-                        try:
-                            result = check()
-                            _state["error"] = result.get("error", "")
-                            if result.get("error"):
-                                _note_failure()
-                            _state["status"] = "" if result.get("error") else (
-                                f"Found {result.get('new', 0)} new job email(s)." if result.get("new") else "No new job emails.")
-                        except Exception as e:
-                            _state.update(error=f"Check failed: {e}", status="")
-                            _note_failure()
-                        finally:
-                            _state["checking"] = False
+                if not _state["checking"] and (_state["requested"] or due(_schedule_fields())):
+                    if not is_busy():
+                        _check_now(check, is_busy)
+                    elif _state["requested"]:
+                        _state["status"] = WAITING
             except Exception:
                 pass
             stop.wait(interval_seconds if not _state["requested"] else 2)

@@ -912,6 +912,10 @@ async def start_collection(body: CollectRequest):
 
     if _collection_status["running"]:
         return {"success": False, "message": "Collection already running"}
+    if _inbox_checking():
+        # Starting kills every browser on the agents' profile, the Gmail check's included.
+        return {"success": False, "message": "The Inbox is checking Gmail right now. Start again in a moment."}
+    _collection_status["running"] = True  # claims the browser profile (the Gmail scheduler checks it)
 
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
@@ -1058,7 +1062,17 @@ _apply_thread: threading.Thread | None = None
 
 
 # Jobs the Apply / Retry buttons may (re)start.
+# Every job status (in_progress is only ever set by the app), and those a run may (re)start.
+JOB_STATUSES = ("pending", "applied", "failed", "blocked", "in_progress", "closed", "needs_you", "skipped")
 RETRYABLE_STATUSES = ("pending", "failed", "needs_you", "skipped")
+
+
+def _reset_for_apply(url: str, job: dict) -> None:
+    """Back to pending so a worker can claim it. Applying to a Skipped job by hand overrides the fit check."""
+    from core.shared_config import update_job
+    override = job.get("status") == "skipped" or job.get("fit_override", False)
+    update_job(url, status="pending", error=None, fit_override=override)
+    job["status"], job["fit_override"] = "pending", override
 
 
 @app.post("/apply/start")
@@ -1075,6 +1089,7 @@ async def start_applying(body: ApplyRequest):
     if _inbox_checking():
         # Starting kills every browser process, the Gmail check's included.
         return {"success": False, "message": "The Inbox is checking Gmail right now. Start again in a moment."}
+    _apply_status["running"] = True  # claims the browser profile (the Gmail scheduler checks it)
 
     # Kill any leftover browser processes from previous runs
     _kill_browser_processes()
@@ -1126,23 +1141,15 @@ async def start_applying(body: ApplyRequest):
             if target.get("status") not in RETRYABLE_STATUSES:
                 print(f"Job is already {target.get('status')}.")
                 return
-            # Reset to pending so the worker can claim it
-            from core.shared_config import update_job as _update_job
-            # Applying to a Skipped job by hand overrides the fit check.
-            override = target.get("status") == "skipped" or target.get("fit_override", False)
-            _update_job(target_job_url, status="pending", error=None, fit_override=override)
-            target["status"], target["fit_override"] = "pending", override
+            _reset_for_apply(target_job_url, target)
             pending = [target]
         elif target_job_urls:
             # Batch apply: only apply to the specific selected jobs
-            from core.shared_config import update_job as _update_job
             pending = []
             for url in target_job_urls:
                 j = jobs.get(url)
                 if j and j.get("status") in RETRYABLE_STATUSES:
-                    override = j.get("status") == "skipped" or j.get("fit_override", False)
-                    _update_job(url, status="pending", error=None, fit_override=override)
-                    j["status"], j["fit_override"] = "pending", override
+                    _reset_for_apply(url, j)
                     pending.append(j)
         elif easy_apply_filter is None:
             pending = [j for j in jobs.values() if j.get("status") == "pending"]
@@ -1352,8 +1359,7 @@ async def get_jobs(
 @app.get("/jobs/stats")
 async def get_job_stats():
     jobs = _load_jobs()
-    stats = {"total": len(jobs), "pending": 0, "applied": 0, "failed": 0, "blocked": 0, "in_progress": 0,
-             "closed": 0, "needs_you": 0, "skipped": 0}
+    stats = {"total": len(jobs), **{s: 0 for s in JOB_STATUSES}}
     for j in jobs.values():
         s = j.get("status", "pending")
         if s in stats:
@@ -1450,7 +1456,7 @@ async def update_job_status(body: dict):
     new_status = body.get("status", "").strip()
     if not url:
         return _api_error("missing_field", "Job URL is required", 400)
-    valid_statuses = ("pending", "applied", "failed", "blocked", "closed", "needs_you", "skipped")
+    valid_statuses = tuple(s for s in JOB_STATUSES if s != "in_progress")
     if new_status not in valid_statuses:
         return _api_error("invalid_status", f"Status must be one of: {', '.join(valid_statuses)}", 400)
 
@@ -1739,12 +1745,13 @@ async def make_prep_sheet(body: dict):
     if not llm_settings.get("provider"):
         return _api_error("no_llm", "No AI model set up. Choose one in LLM Settings first.")
     job = read_jobs().get(email.get("job_url") or "") if email.get("job_url") else None
-    posting = await asyncio.to_thread(job_page.fetch, job["url"]) if job else None
+    posting = await asyncio.to_thread(job_page.fetch, email["job_url"]) if job else None
     from cli.apply_jobs import resume_text
     resume = resume_text(load_settings().get("resume_path") or "")
     try:
         text = await inbox.write_prep_sheet(create_llm(llm_settings), email, job,
-                                            getattr(posting, "description", "") or "", resume, load_profile())
+                                            getattr(posting, "description", "") or "", resume, load_profile(),
+                                            settings=llm_settings)
     except Exception as e:
         return _api_error("llm_error", f"Couldn't write the prep sheet: {_friendly_llm_error(str(e), getattr(e, 'status_code', None))}", 500)
     inbox.save_prep(email["id"], text)

@@ -19,12 +19,28 @@ class FitVerdict(BaseModel):
     reason: str = Field(description="One or two sentences quoting the posting's requirement. Empty when not skipping.")
 
 
+async def ask_text(llm, prompt: str, timeout: float, settings: dict | None = None) -> str:
+    """One plain-text request. With the LLM settings, backup models take over on capacity errors."""
+    from browser_use.llm.messages import UserMessage
+    try:
+        from core.llm_factory import ainvoke_with_fallback, completion_text
+    except ImportError:  # pragma: no cover
+        from backend.core.llm_factory import ainvoke_with_fallback, completion_text
+    response = await asyncio.wait_for(
+        ainvoke_with_fallback(llm, settings or {}, [UserMessage(content=prompt)]), timeout=timeout)
+    return completion_text(response)
+
+
 def _profile_facts(profile: dict) -> str:
-    edu = profile.get("education") or {}
+    try:
+        from core.shared_config import _describe_education
+    except ImportError:  # pragma: no cover
+        from backend.core.shared_config import _describe_education
     screening = profile.get("screening") or {}
+    edu = profile.get("education") or {}
     return "\n".join(line for line in (
-        f"Degree: {edu.get('degree', '')} in {edu.get('major', '')} at {edu.get('school', '')}",
-        f"Graduation: {edu.get('graduation', '')}",
+        f"Education: {_describe_education(edu)}",
+        f"Graduation date: {edu['graduation']}" if (edu.get("graduation") or "").strip() else "",
         f"Work authorization: {profile.get('work_authorization', '')}",
         f"Needs visa sponsorship: {profile.get('visa_sponsorship_needed', '')}",
         f"Nationality: {profile.get('nationality', '')}" if profile.get("nationality") else "",
@@ -148,12 +164,7 @@ def cover_letter_prompt(profile: dict, resume: str, title: str, company: str, de
 
 
 async def write_cover_letter(llm, profile: dict, resume: str, title: str, company: str, description: str) -> str:
-    from browser_use.llm.messages import UserMessage
-    response = await asyncio.wait_for(
-        llm.ainvoke([UserMessage(content=cover_letter_prompt(profile, resume, title, company, description))]),
-        timeout=90,
-    )
-    text = response.completion if isinstance(response.completion, str) else str(response.completion)
+    text = await ask_text(llm, cover_letter_prompt(profile, resume, title, company, description), timeout=90)
     return plain_cover_letter(text, profile.get("name", ""))
 
 

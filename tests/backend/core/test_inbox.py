@@ -46,6 +46,9 @@ def test_match_prefers_the_role_and_applied_jobs():
     assert inbox.match_job({"company": "Northwind", "role": "Operations Summer Intern"}, JOBS) == "https://northwind/sa"
     assert inbox.match_job({"company": "Globex", "role": "Intern"}, JOBS) is None
     assert inbox.match_job({"company": "", "role": "Intern"}, JOBS) is None
+    # Whole words only: 'Ally' is not 'Rally Health'.
+    assert inbox.match_job({"company": "Ally", "role": ""}, {"https://rally": {"company": "Rally Health"}}) is None
+    assert inbox.match_job({"company": "A.C. Labs", "role": ""}, {"https://acl": {"company": "AC Labs"}}) == "https://acl"
 
 
 @pytest.mark.parametrize("text,iso", [
@@ -78,13 +81,14 @@ LABELS = [{"index": 0, "category": "applied", "company": "Contoso", "role": "Int
 
 
 def test_classify_keeps_application_emails_only():
-    out = asyncio.run(inbox.classify(FakeLLM(LABELS), EMAILS))
+    out, labeled = asyncio.run(inbox.classify(FakeLLM(LABELS), EMAILS))
     assert [(e["id"], e["category"]) for e in out] == [("a", "applied"), ("b", "rejected")]
+    assert labeled == {"a", "b", "c"}
 
 
 def test_a_full_check_stores_badges_and_skips_known_mail(monkeypatch):
     async def fake_read(since, known, kwargs):
-        return [e for e in EMAILS if e["id"] not in known], ""
+        return [e for e in EMAILS if e["id"] not in known], "", True
 
     monkeypatch.setattr(inbox, "read_gmail", fake_read)
     updates = {}
@@ -100,7 +104,7 @@ def test_a_full_check_stores_badges_and_skips_known_mail(monkeypatch):
 
 def test_a_signed_out_gmail_is_reported(monkeypatch):
     async def signed_out(since, known, kwargs):
-        return [], "Gmail isn't signed in. Sign in to Gmail in Settings → Accounts, then check again."
+        return [], "Gmail isn't signed in. Sign in to Gmail in Settings → Accounts, then check again.", False
 
     monkeypatch.setattr(inbox, "read_gmail", signed_out)
     result = asyncio.run(inbox.run_check(FakeLLM([]), {}, lambda: {}, lambda url, **f: None))
@@ -112,7 +116,7 @@ def test_first_check_looks_back_sixty_days(monkeypatch):
 
     async def fake_read(since, known, kwargs):
         seen["since"] = since
-        return [], ""
+        return [], "", True
 
     monkeypatch.setattr(inbox, "read_gmail", fake_read)
     asyncio.run(inbox.run_check(FakeLLM([]), {}, lambda: {}, lambda url, **f: None))
@@ -158,3 +162,83 @@ def test_scheduler_runs_a_request_only_when_not_busy(monkeypatch):
     thread = inbox.start_scheduler(is_busy, check, interval_seconds=0, stop=stop)
     thread.join(timeout=5)
     assert calls == [1] and inbox._state["status"] == "Found 2 new job email(s)."
+
+
+class BrokenLLM:
+    async def ainvoke(self, messages, output_format=None):
+        raise TimeoutError("the model didn't answer")
+
+
+def test_emails_the_ai_couldnt_sort_are_read_again_next_time(monkeypatch):
+    windows = []
+
+    async def fake_read(since, known, kwargs):
+        windows.append(since)
+        return [e for e in EMAILS if e["id"] not in known], "", True
+
+    monkeypatch.setattr(inbox, "read_gmail", fake_read)
+    asyncio.run(inbox.run_check(BrokenLLM(), {}, lambda: JOBS, lambda url, **f: None))
+    stored = inbox.load()
+    assert stored["emails"] == [] and stored.get("ignored_ids", []) == []
+    assert stored["search_from"] == windows[0].isoformat()  # the same window again
+    result = asyncio.run(inbox.run_check(FakeLLM(LABELS), {}, lambda: JOBS, lambda url, **f: None))
+    assert result["new"] == 2 and windows[1] == windows[0]
+    assert inbox.load()["search_from"] is None
+
+
+def test_an_unfinished_window_is_read_again(monkeypatch):
+    windows = []
+
+    async def capped(since, known, kwargs):
+        windows.append(since)
+        return [], "", False
+
+    monkeypatch.setattr(inbox, "read_gmail", capped)
+    asyncio.run(inbox.run_check(FakeLLM([]), {}, lambda: {}, lambda url, **f: None))
+    asyncio.run(inbox.run_check(FakeLLM([]), {}, lambda: {}, lambda url, **f: None))
+    assert windows[0] == windows[1] and inbox.load()["last_checked"]  # still due on schedule, same window
+
+
+def test_a_job_shows_its_latest_email(monkeypatch):
+    newer_first = [
+        {"id": "i", "sender": "Contoso", "subject": "Interview", "date": "Oct 6, 2026", "body": "Let's talk."},
+        {"id": "r", "sender": "Contoso", "subject": "Received", "date": "Sep 20, 2026", "body": "Thanks."},
+    ]
+    labels = [{"index": 0, "category": "interview", "company": "Contoso", "role": "Intern, Branch Office - Shelbyville, NJ"},
+              {"index": 1, "category": "applied", "company": "Contoso", "role": "Intern, Branch Office - Shelbyville, NJ"}]
+
+    async def fake_read(since, known, kwargs):
+        return newer_first, "", True
+
+    monkeypatch.setattr(inbox, "read_gmail", fake_read)
+    jobs = {url: dict(job) for url, job in JOBS.items()}
+    updates = []
+    asyncio.run(inbox.run_check(FakeLLM(labels), {}, lambda: jobs, lambda url, **f: updates.append((url, f))))
+    assert updates[-1][1]["inbox_status"] == "interview"
+
+    # A later check that turns up an older email doesn't overwrite it either.
+    jobs["https://contoso/shelbyville"]["inbox_date"] = "2026-10-06T00:00"
+    older = [{"id": "o", "sender": "Contoso", "subject": "Old", "date": "Sep 1, 2026", "body": "Thanks."}]
+
+    async def read_older(since, known, kwargs):
+        return older, "", True
+
+    monkeypatch.setattr(inbox, "read_gmail", read_older)
+    updates.clear()
+    asyncio.run(inbox.run_check(FakeLLM([{**labels[1], "index": 0}]), {}, lambda: jobs,
+                                lambda url, **f: updates.append((url, f))))
+    assert updates == []
+
+
+def test_older_result_pages_use_before():
+    from datetime import date
+    url = inbox.search_url(datetime(2026, 8, 9, tzinfo=timezone.utc), date(2026, 9, 30))
+    assert "after%3A2026%2F08%2F09%20before%3A2026%2F09%2F30" in url
+    assert inbox._oldest_day([{"date": "Oct 6, 2026, 4:12 PM"}, {"date": "Sep 3, 2026"}, {"date": "yesterday"}]) == date(2026, 9, 3)
+
+
+def test_the_scheduler_gives_way_to_a_run_that_just_started():
+    calls = []
+    inbox._state.update(requested=True)
+    inbox._check_now(lambda: calls.append(1) or {"new": 0}, is_busy=lambda: True)
+    assert calls == [] and inbox._state["requested"] and not inbox._state["checking"]

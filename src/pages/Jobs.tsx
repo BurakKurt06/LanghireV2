@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { getJobStats } from "../lib/api";
+import { useApplyStatus } from "../hooks/useApplyStatus";
 import { PageHeader } from "../components/ui";
 import type { JobStats } from "../lib/types";
 import { Search, Play, CheckCircle } from "lucide-react";
@@ -35,16 +36,28 @@ export default function Jobs() {
 
   const fetchStats = useCallback(() => {
     getJobStats()
-      .then((s) => setStats(s || { total: 0, pending: 0, applied: 0, failed: 0, blocked: 0, in_progress: 0 }))
+      .then((s) => {
+        const next = s || { total: 0, pending: 0, applied: 0, failed: 0, blocked: 0, in_progress: 0 };
+        setStats((prev) => (JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+      })
       .catch(() => {});
   }, []);
 
-  // Poll so the counts follow a run started anywhere (the sidebar, another page).
+  // Re-count whenever a run (started anywhere: the sidebar, another page)
+  // starts, moves to its next job, or ends.
+  const apply = useApplyStatus();
+  const runKey = apply?.running ? (apply.current ?? []).map((j) => j.url).join(" ") || "starting" : "";
   useEffect(() => {
     fetchStats();
-    const poll = setInterval(fetchStats, 5000);
-    return () => clearInterval(poll);
-  }, [fetchStats]);
+  }, [fetchStats, runKey]);
+  // Jobs that end before a browser opens (closed, skipped by the fit check)
+  // never show as the current job, so a running run also re-counts every 5 s.
+  const running = Boolean(apply?.running);
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(fetchStats, 5000);
+    return () => clearInterval(timer);
+  }, [fetchStats, running]);
 
   const handleJobsChanged = useCallback(() => {
     fetchStats();

@@ -174,8 +174,8 @@ def tenant(url: str) -> str:
     return ""
 
 
-def _letters(text: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", text.lower())
+def _letters(text: str | None) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
 def _brand_in(name: str, slug: str) -> str:
@@ -227,6 +227,11 @@ def is_placeholder(title: str | None) -> bool:
     return title.lower() in PLACEHOLDER_TITLES or bool(GENERIC_TITLES.match(title))
 
 
+def is_workday(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return "myworkdayjobs.com" in host or "myworkdaysite.com" in host
+
+
 def parse(url: str, status_code: int, page: str, original_url: str | None = None) -> Posting:
     """Read a fetched page (pure function, for tests). `url` is where it ended up after redirects."""
     host = (urlparse(url).hostname or "").lower()
@@ -236,13 +241,13 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
         return Posting()
     asked = original_url or url
     if "greenhouse.io" in (urlparse(asked).hostname or "") and "/jobs/" in urlparse(asked).path \
-            and "/jobs/" not in urlparse(url).path and "gh_jid" not in url:
+            and "greenhouse.io" in host and "/jobs/" not in urlparse(url).path and "gh_jid" not in url:
         return Posting(closed=True, reason="The posting is closed (the link now opens the company's job board).")
 
     og_title = _meta(page, "og:title")
     page_title = _page_title(page)
-    is_workday = "myworkdayjobs.com" in host or "myworkdaysite.com" in host
-    if is_workday and og_title == "":
+    workday = is_workday(url)
+    if workday and og_title == "":
         return Posting(closed=True, reason="The posting was taken down (Workday shows its not-found page).")
     for text in (og_title or "", page_title):
         low = text.lower()
@@ -270,7 +275,7 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
     slug = tenant(asked)
     org = _org_name(ld)
     company = _brand_in(org, slug) if org and slug else ""
-    if not company and is_workday:
+    if not company and workday:
         # Workday's JSON-LD often names a legal entity or division
         # ("0909 SP - Orbital Space Systems"); the site name is the brand.
         company = _workday_site_name(asked)
@@ -284,7 +289,7 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
     if remote and locations:
         # Workday marks hybrid jobs TELECOMMUTE too; with an office listed, go by the office.
         remote = bool(re.search(r"\bremote\b", f"{title} {' '.join(locations)}", re.I))
-    if is_workday and _url_location(asked):
+    if workday and _url_location(asked):
         locations.append(_url_location(asked))
     description = _text(ld.get("description") or "") if isinstance(ld.get("description"), str) else ""
     if not description:

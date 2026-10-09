@@ -1029,6 +1029,14 @@ class TestApplyReview:
         finally:
             main._apply_status["running"] = False
 
+    def test_collection_waits_for_a_gmail_check(self, auth_client, monkeypatch):
+        from core import inbox
+        killed = []
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: killed.append(1))
+        monkeypatch.setitem(inbox._state, "checking", True)
+        resp = auth_client.post("/jobs/collect", json={"title": "Intern"}).json()
+        assert resp["success"] is False and "Inbox" in resp["message"] and killed == []
+
     def test_start_uses_the_jobs_at_the_same_time_setting(self, auth_client, monkeypatch):
         monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
         monkeypatch.setattr(main, "_run_async_in_thread", lambda make_coro, status: None)

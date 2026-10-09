@@ -1,4 +1,4 @@
-import type { ApplyMode } from "../lib/applyMode";
+import { APPLY_MODE_LABELS, type ApplyMode } from "../lib/applyMode";
 
 interface ApplyModeToggleProps {
   value: ApplyMode;
@@ -26,9 +26,9 @@ export default function ApplyModeToggle({ value, onChange, compact }: ApplyModeT
   return (
     <div className={compact ? "inline-flex items-center" : "space-y-1.5"}>
       <div role="radiogroup" aria-label="Apply mode" className="inline-flex gap-1 p-1 rounded-xl border border-border">
-        {option("auto", "Full auto")}
-        {option("trial", "Trial run")}
-        {option("training", "Training")}
+        {option("auto", APPLY_MODE_LABELS.auto)}
+        {option("trial", APPLY_MODE_LABELS.trial)}
+        {option("training", APPLY_MODE_LABELS.training)}
       </div>
       {!compact && (
         <p className="text-xs text-muted-foreground">

@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Pause, Play, SkipForward, Square, CircleAlert, Check, X } from "lucide-react";
 import {
-  getApplyStatus,
   pauseApplying,
   resumeApplying,
   stopApplying,
@@ -9,10 +8,8 @@ import {
   answerHelp,
   reviewApplication,
 } from "../lib/api";
-import type { ApplyStatus } from "../lib/types";
-
-const POLL_MS = 2000;
-const MODE_LABELS: Record<string, string> = { auto: "Full auto", trial: "Trial run", training: "Training" };
+import { APPLY_MODE_LABELS, type ApplyMode } from "../lib/applyMode";
+import { refreshApplyStatus, useApplyStatus } from "../hooks/useApplyStatus";
 
 function elapsed(startedAt: string, now: number): string {
   const secs = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
@@ -22,29 +19,18 @@ function elapsed(startedAt: string, now: number): string {
 
 /** Run controls in the sidebar (Discord-style), shown on every page while applications run. */
 export default function RunPanel() {
-  const [status, setStatus] = useState<ApplyStatus | null>(null);
+  const status = useApplyStatus();
+  const running = Boolean(status?.running);
   const [now, setNow] = useState(() => Date.now());
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // The elapsed-time clock, only while a run is shown.
   useEffect(() => {
-    let active = true;
-    const poll = () =>
-      getApplyStatus()
-        .then((s) => {
-          if (active) setStatus(s);
-        })
-        .catch(() => {});
-    poll();
-    const timer = setInterval(() => {
-      poll();
-      setNow(Date.now());
-    }, POLL_MS);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, []);
+    if (!running) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
 
   if (!status?.running) return null;
 
@@ -53,13 +39,13 @@ export default function RunPanel() {
   const help = status.help?.[0];
   const review = status.reviews?.[0];
   const paused = Boolean(status.paused);
-  const mode = MODE_LABELS[status.run_mode || "auto"] || "Full auto";
+  const mode = APPLY_MODE_LABELS[(status.run_mode || "auto") as ApplyMode] || APPLY_MODE_LABELS.auto;
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     try {
       await fn();
-      setStatus(await getApplyStatus());
+      await refreshApplyStatus();
     } catch {
       /* the next poll shows the real state */
     } finally {

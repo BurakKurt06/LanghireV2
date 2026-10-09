@@ -143,14 +143,29 @@ def load_settings() -> dict:
     })
 
 
+# Applications running at the same time (Settings → Agent Settings).
+MAX_PARALLEL_JOBS = 4
+
+
+def clamp_parallel_jobs(value) -> int:
+    """1 to MAX_PARALLEL_JOBS; 1 for anything unreadable."""
+    try:
+        return max(1, min(int(value or 1), MAX_PARALLEL_JOBS))
+    except (TypeError, ValueError):
+        return 1
+
+
+def split_name(name: str) -> tuple[str, str]:
+    """('Ada', 'Lovelace') for 'Ada Lovelace'; ('', '') for a single word. The last word is the last name."""
+    parts = (name or "").split()
+    return (" ".join(parts[:-1]), parts[-1]) if len(parts) > 1 else ("", "")
+
+
 def save_settings(settings: dict):
     if "max_failures" in settings:
         settings["max_failures"] = max(1, min(int(settings["max_failures"]), 50))
     if "parallel_jobs" in settings:
-        try:
-            settings["parallel_jobs"] = max(1, min(int(settings["parallel_jobs"]), 4))
-        except (TypeError, ValueError):
-            settings["parallel_jobs"] = 1
+        settings["parallel_jobs"] = clamp_parallel_jobs(settings["parallel_jobs"])
     if "human_delay_min" in settings:
         settings["human_delay_min"] = max(0, min(int(settings["human_delay_min"]), 300))
     if "human_delay_max" in settings:

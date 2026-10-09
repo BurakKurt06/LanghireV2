@@ -148,3 +148,11 @@ def test_other_fields_and_dropdowns_are_not_compared():
     assert form_check.profile_mismatches(data, PROFILE) == []
     assert form_check.profile_mismatches({"fields": [_field("First Name", "Ada Lovelace")]}, PROFILE) == [
         ("First Name", "Ada Lovelace", "Ada")]
+
+
+def test_the_account_email_on_an_account_page_is_not_a_mismatch():
+    data = {"fields": [{"label": "Email Address", "kind": "text", "value": "ada.accounts@example.com"}]}
+    profile = {"email": "ada@example.com", "account_email": "ada.accounts@example.com"}
+    assert form_check.profile_mismatches(data, profile) == []
+    data["fields"][0]["value"] = "ada.acounts@example.com"
+    assert form_check.profile_mismatches(data, profile) == [("Email Address", "ada.acounts@example.com", "ada@example.com")]

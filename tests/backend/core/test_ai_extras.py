@@ -7,7 +7,7 @@ def test_fit_prompt_is_conservative_and_never_skips_for_gpa():
         "education": {"degree": "B.S.", "major": "Statistics", "graduation": "May 2028"},
         "work_authorization": "US Citizen"}, "within 50 miles of ZIP 10001")
     assert "NEVER skip for: GPA minimums" in text and "when in doubt, don't skip" in text
-    assert "Degree: B.S. in Statistics" in text and "SEARCH AREA: within 50 miles" in text
+    assert "Education: B.S. in Statistics from  (May 2028)" in text and "Graduation date: May 2028" in text and "SEARCH AREA: within 50 miles" in text
 
 
 def test_cover_letter_cleaner_removes_formatting_and_ai_tells():

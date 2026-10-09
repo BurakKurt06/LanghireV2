@@ -1,10 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { CircleAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { getApplyStatus } from "../lib/api";
-
-const POLL_MS = 3000;
+import { useApplyStatus } from "../hooks/useApplyStatus";
 
 /**
  * App-wide "❗ the agent needs you" pill: shown on every page while an
@@ -14,23 +12,8 @@ export default function AgentAttention() {
   const { t } = useTranslation("apply");
   const navigate = useNavigate();
   const location = useLocation();
-  const [waiting, setWaiting] = useState(0);
-
-  useEffect(() => {
-    let active = true;
-    const check = () =>
-      getApplyStatus()
-        .then((s) => {
-          if (active) setWaiting(s.running ? (s.help?.length ?? 0) + (s.reviews?.length ?? 0) : 0);
-        })
-        .catch(() => {});
-    check();
-    const timer = setInterval(check, POLL_MS);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, []);
+  const status = useApplyStatus();
+  const waiting = status?.running ? (status.help?.length ?? 0) + (status.reviews?.length ?? 0) : 0;
 
   useEffect(() => {
     const base = document.title.replace(/^❗ /, "");

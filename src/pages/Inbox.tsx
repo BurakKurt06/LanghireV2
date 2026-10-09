@@ -3,8 +3,11 @@ import { Mail, RefreshCw, ExternalLink, FileText, Loader2, ChevronDown, ChevronU
 import { getInbox, checkInbox, setInboxSchedule, makePrepSheet } from "../lib/api";
 import { PageHeader, Section } from "../components/ui";
 import type { InboxCategory, InboxEmail, InboxStatus } from "../lib/types";
+import { INBOX_CATEGORIES, INBOX_STYLES } from "../lib/inbox";
 
+// Quick while a check runs; slow otherwise (a scheduled check can start any time).
 const POLL_MS = 3000;
+const IDLE_POLL_MS = 30000;
 
 const CATEGORY_LABELS: Record<InboxCategory, string> = {
   applied: "Applied",
@@ -13,14 +16,7 @@ const CATEGORY_LABELS: Record<InboxCategory, string> = {
   offer: "Offer",
   rejected: "Rejected",
 };
-const CATEGORY_STYLES: Record<InboxCategory, string> = {
-  applied: "bg-secondary text-foreground",
-  assessment: "bg-blue-500/10 text-blue-600",
-  interview: "bg-amber-500/10 text-amber-600",
-  offer: "bg-green-500/10 text-green-600",
-  rejected: "bg-destructive/10 text-destructive",
-};
-const FILTERS: Array<InboxCategory | ""> = ["", "applied", "assessment", "interview", "offer", "rejected"];
+const FILTERS: Array<InboxCategory | ""> = ["", ...INBOX_CATEGORIES];
 
 function shortDate(value: string): string {
   const d = new Date(value);
@@ -40,11 +36,12 @@ export default function Inbox() {
       .catch(() => {});
   }, []);
 
+  const busy = Boolean(inbox?.checking || inbox?.requested);
   useEffect(() => {
     refresh();
-    const timer = setInterval(refresh, POLL_MS);
+    const timer = setInterval(refresh, busy ? POLL_MS : IDLE_POLL_MS);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, busy]);
 
   const onCheck = async () => {
     setError(null);
@@ -151,7 +148,7 @@ export default function Inbox() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${CATEGORY_STYLES[email.category]}`}>
+                      <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${INBOX_STYLES[email.category]}`}>
                         {CATEGORY_LABELS[email.category]}
                       </span>
                       <span className="font-semibold text-foreground">{email.company || email.sender || "Unknown"}</span>
