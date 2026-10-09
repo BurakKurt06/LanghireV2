@@ -61,3 +61,30 @@ def test_build_browser_kwargs_automatic_has_no_exe(monkeypatch, installed):
     kwargs = shared_config.build_browser_kwargs()
     assert "executable_path" not in kwargs
     assert kwargs["user_data_dir"] == str(shared_config.BROWSER_PROFILE_DIR)
+
+
+def test_forget_open_tabs_removes_saved_tabs_but_keeps_sign_ins(tmp_path):
+    default = tmp_path / "Default"
+    (default / "Sessions").mkdir(parents=True)
+    for name in ("Session_1", "Tabs_1"):
+        (default / "Sessions" / name).write_bytes(b"x")
+    (default / "Current Session").write_bytes(b"x")
+    (default / "Cookies").write_bytes(b"x")
+    (default / "Login Data").write_bytes(b"x")
+
+    assert shared_config.forget_open_tabs(tmp_path) == 3
+    assert not any((default / "Sessions").iterdir())
+    assert not (default / "Current Session").exists()
+    assert (default / "Cookies").exists() and (default / "Login Data").exists()
+
+
+def test_forget_open_tabs_on_a_new_profile_does_nothing(tmp_path):
+    assert shared_config.forget_open_tabs(tmp_path / "missing") == 0
+
+
+def test_build_browser_kwargs_forgets_old_tabs(monkeypatch, installed):
+    seen = []
+    monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {})
+    monkeypatch.setattr(shared_config, "forget_open_tabs", seen.append)
+    kwargs = shared_config.build_browser_kwargs()
+    assert [str(p) for p in seen] == [kwargs["user_data_dir"]]

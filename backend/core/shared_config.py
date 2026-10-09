@@ -104,6 +104,7 @@ def build_browser_kwargs() -> dict:
     """
     settings = load_runtime_settings()
     executable, profile_dir = selected_browser(settings)
+    forget_open_tabs(profile_dir)
     kwargs: dict = {
         "ignore_default_args": list(IGNORED_CHROME_DEFAULT_ARGS),
         "user_data_dir": str(profile_dir),
@@ -118,6 +119,30 @@ def build_browser_kwargs() -> dict:
         from backend.core.stealth import STEALTH_ARGS
     kwargs["args"] = list(STEALTH_ARGS)
     return kwargs
+
+
+_SESSION_FILES = ("Current Session", "Current Tabs", "Last Session", "Last Tabs")
+
+
+def forget_open_tabs(profile_dir) -> int:
+    """Delete the profile's saved tab list so the next launch opens no old tabs.
+
+    Each job's browser is killed when the job ends, and Brave (or Chrome set to
+    "continue where you left off") reopens every tab from the last launch, so
+    old postings and Gmail tabs piled up run after run. Cookies and sign-ins are
+    stored elsewhere and stay. Files a running browser holds open are skipped.
+    """
+    removed = 0
+    default = Path(profile_dir) / "Default"
+    paths = list((default / "Sessions").glob("*")) + [default / name for name in _SESSION_FILES]
+    for path in paths:
+        try:
+            if path.is_file():
+                path.unlink()
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 # browser-use default Chrome flags we don't launch with (see build_browser_kwargs).

@@ -1827,6 +1827,8 @@ async def auth_login(service: str):
     if not executable:
         return {"success": False, "message": "No browser found. Pick one in Settings → Browser."}
 
+    from core.shared_config import forget_open_tabs
+    forget_open_tabs(profile_dir)
     args = [executable, f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
             "--new-window", urls[service]]
     try:
