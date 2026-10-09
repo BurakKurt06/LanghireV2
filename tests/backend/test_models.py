@@ -69,11 +69,11 @@ def test_collect_request_max_jobs_boundaries(ok):
 # ── ApplyRequest ─────────────────────────────────────────────────────────────
 
 def test_apply_request_defaults():
-    """ApplyRequest defaults to easy mode, no limit, single worker."""
+    """ApplyRequest defaults to easy mode, no limit, and the workers from Settings."""
     r = models.ApplyRequest()
     assert r.mode == "easy"
     assert r.limit is None
-    assert r.workers == 1
+    assert r.workers is None
     assert r.job_url is None
     assert r.job_urls is None
 

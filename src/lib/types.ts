@@ -170,6 +170,8 @@ export interface AppSettings {
   fit_check_enabled?: boolean;
   /** Write cover letters into cover-letter boxes. Default false. */
   cover_letter_boxes?: boolean;
+  /** Applications running at the same time, 1-4. Default 1. */
+  parallel_jobs?: number;
 }
 
 export interface OtherDocument {

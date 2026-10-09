@@ -410,9 +410,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     setBatchApplying(true);
     try {
       await tailorBeforeApplying([...selectedJobs]);
+      // No workers: the backend uses Settings → Jobs at the same time.
       const res = await startApplying({
         job_urls: [...selectedJobs],
-        workers: 1,
         mode: "all",
         run_mode: applyMode,
       });

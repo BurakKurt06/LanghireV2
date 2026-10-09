@@ -173,6 +173,19 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Built-in")).toBeInTheDocument();
   });
 
+  it("sets how many jobs run at the same time (1 by default, up to 4)", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPage />);
+    const select = await screen.findByLabelText("Jobs at the same time");
+    expect(select).toHaveValue("1");
+    expect([...(select as HTMLSelectElement).options].map((o) => o.value)).toEqual(["1", "2", "3", "4"]);
+    await user.selectOptions(select, "3");
+    await user.click(screen.getByRole("button", { name: /Save Settings/ }));
+    await waitFor(() =>
+      expect(mockSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ parallel_jobs: 3 })),
+    );
+  });
+
   it("saves settings with the current field values", async () => {
     const user = userEvent.setup();
     render(<SettingsPage />);

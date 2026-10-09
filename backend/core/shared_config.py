@@ -94,7 +94,7 @@ def selected_browser(settings: dict | None = None) -> tuple[str | None, Path]:
     return resolve_browser(settings, BROWSER_PROFILE_DIR)
 
 
-def build_browser_kwargs() -> dict:
+def build_browser_kwargs(worker: int = 1) -> dict:
     """Extra BrowserSession kwargs implied by the current settings.
 
     Always drops browser-use's --extensions-on-chrome-urls default: it only
@@ -104,6 +104,7 @@ def build_browser_kwargs() -> dict:
     """
     settings = load_runtime_settings()
     executable, profile_dir = selected_browser(settings)
+    profile_dir = worker_profile_dir(profile_dir, worker)
     forget_open_tabs(profile_dir)
     kwargs: dict = {
         "ignore_default_args": list(IGNORED_CHROME_DEFAULT_ARGS),
@@ -123,6 +124,64 @@ def build_browser_kwargs() -> dict:
 
 
 _SESSION_FILES = ("Current Session", "Current Tabs", "Last Session", "Last Tabs")
+
+# Applications running at the same time (Settings → Agent Settings).
+MAX_PARALLEL_JOBS = 4
+
+
+def parallel_jobs(settings: dict | None = None) -> int:
+    if settings is None:
+        settings = load_runtime_settings()
+    try:
+        return max(1, min(int(settings.get("parallel_jobs") or 1), MAX_PARALLEL_JOBS))
+    except (TypeError, ValueError):
+        return 1
+
+
+def worker_profile_dir(profile_dir, worker: int) -> Path:
+    """Worker 1 uses the main profile; workers 2+ their own copy of it.
+
+    A browser profile can only be open in one browser at a time: a second
+    browser launched on it exits at once.
+    """
+    profile_dir = Path(profile_dir)
+    return profile_dir if worker <= 1 else profile_dir.parent / f"{profile_dir.name}_w{worker}"
+
+
+# Not copied into a worker's profile: caches (most of a profile's size) and
+# files that only mean something to the browser that wrote them.
+_PROFILE_COPY_SKIP = {
+    "Cache", "Code Cache", "GPUCache", "GPUPersistentCache", "GrShaderCache", "GraphiteDawnCache",
+    "DawnGraphiteCache", "DawnWebGPUCache", "ShaderCache", "CacheStorage", "ScriptCache", "Sessions",
+    "Crashpad", "component_crx_cache", "extensions_crx_cache", "Safe Browsing",
+    "OnDeviceHeadSuggestModel", "optimization_guide_model_store", "lockfile",
+    "SingletonLock", "SingletonCookie", "SingletonSocket",
+}
+
+
+def _skip_in_profile_copy(_folder, names):
+    return [n for n in names if n in _PROFILE_COPY_SKIP or n.startswith("BrowserMetrics")]
+
+
+def prepare_worker_profiles(count: int, settings: dict | None = None) -> list[Path]:
+    """Fresh copies of the main profile for workers 2..count, so every worker
+    has your sign-ins (cookies, saved logins). Copies for workers above
+    `count` are removed. Call when no browser is using the main profile."""
+    import shutil
+    _, base = selected_browser(settings)
+    made = []
+    for n in range(2, MAX_PARALLEL_JOBS + 1):
+        dest = worker_profile_dir(base, n)
+        shutil.rmtree(dest, ignore_errors=True)
+        if n > count:
+            continue
+        if base.exists():
+            try:
+                shutil.copytree(base, dest, ignore=_skip_in_profile_copy, dirs_exist_ok=True)
+            except shutil.Error:
+                pass  # a file the OS kept locked; the rest is copied
+        made.append(dest)
+    return made
 
 
 def forget_open_tabs(profile_dir) -> int:

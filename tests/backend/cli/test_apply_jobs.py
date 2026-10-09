@@ -153,7 +153,7 @@ def run(data_dir, monkeypatch):
     monkeypatch.setattr(apply_jobs, "SENSITIVE_DATA", {"email": "login@example.com", "password": "correct-horse-battery"})
     monkeypatch.setattr(apply_jobs.config, "get_llm", lambda: object())
     monkeypatch.setattr(apply_jobs.config, "maybe_apply_stealth", no_stealth)
-    monkeypatch.setattr(apply_jobs.config, "build_browser_kwargs", lambda: {})
+    monkeypatch.setattr(apply_jobs.config, "build_browser_kwargs", lambda **kw: {})
     monkeypatch.setattr(apply_jobs.config, "load_runtime_settings", lambda: {"max_failures": 6})
 
     def _run(url=GREENHOUSE, profile=GOOD_PROFILE, easy_apply=False, history=None):
@@ -847,3 +847,60 @@ def test_no_naming_action_when_the_page_already_named_the_job(monkeypatch):
     _settings(monkeypatch)
     named = {"url": GREENHOUSE, "title": "Data Intern", "company": "Contoso"}
     assert "set_job_details" not in apply_jobs.build_tools(named, "x", False, {}, 1).registry.registry.actions
+
+
+class TestParallelWorkers:
+    def _queue(self, *urls):
+        queue = asyncio.Queue()
+        for url in urls:
+            queue.put_nowait({"url": url})
+        return queue
+
+    def test_a_worker_takes_the_first_job_on_a_free_site(self, monkeypatch):
+        monkeypatch.setattr(apply_jobs, "_busy_sites", {1: "a.example"})
+        queue = self._queue("https://a.example/1", "https://b.example/1", "https://a.example/2", "https://c.example/1")
+        assert apply_jobs.take_job(queue, 2)["url"] == "https://b.example/1"
+        # The rest keep their order.
+        assert [queue.get_nowait()["url"] for _ in range(3)] == [
+            "https://a.example/1", "https://a.example/2", "https://c.example/1"]
+        assert apply_jobs._busy_sites == {1: "a.example", 2: "b.example"}
+
+    def test_only_busy_sites_left_means_wait_and_an_empty_queue_means_done(self, monkeypatch):
+        monkeypatch.setattr(apply_jobs, "_busy_sites", {1: "a.example"})
+        queue = self._queue("https://a.example/2")
+        assert apply_jobs.take_job(queue, 2) is False
+        assert queue.qsize() == 1
+        assert apply_jobs.take_job(asyncio.Queue(), 2) is None
+
+    def test_one_worker_is_never_held_up_by_its_own_site(self, monkeypatch):
+        monkeypatch.setattr(apply_jobs, "_busy_sites", {1: "a.example"})
+        assert apply_jobs.take_job(self._queue("https://a.example/2"), 1)["url"] == "https://a.example/2"
+
+    def test_two_workers_never_run_the_same_site_at_once(self, monkeypatch):
+        monkeypatch.setattr(apply_jobs, "_busy_sites", {})
+        monkeypatch.setattr(apply_jobs.config, "maybe_human_delay", lambda *a: asyncio.sleep(0))
+        running, overlaps, done = {}, [], []
+
+        async def fake_apply(job, profile, qa, labels, easy_apply, worker_id):
+            site = apply_jobs._site(job["url"])
+            if site in running.values():
+                overlaps.append(job["url"])
+            running[worker_id] = site
+            await asyncio.sleep(0.05)
+            del running[worker_id]
+            done.append((worker_id, job["url"]))
+            return "applied"
+
+        monkeypatch.setattr(apply_jobs, "apply_to_job", fake_apply)
+        monkeypatch.setattr(apply_jobs, "load_json", lambda path, default=None: default)
+        queue = self._queue("https://a.example/1", "https://a.example/2", "https://b.example/1", "https://a.example/3")
+
+        async def run_both():
+            stats = {}
+            await asyncio.gather(*(apply_jobs.worker(f"W{i}", i, queue, {}, {}, [], False, stats) for i in (1, 2)))
+            return stats
+
+        stats = asyncio.run(run_both())
+        assert overlaps == [] and stats == {"applied": 4} and len(done) == 4
+        assert {w for w, _ in done} == {1, 2}  # both worked
+        assert apply_jobs._busy_sites == {}

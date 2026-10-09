@@ -175,9 +175,39 @@ SKIPPED_BY_YOU_NOTE = "Skipped by you during the run. It stays in the list; appl
 _captcha_blocked: dict[str, str] = {}
 
 
+# worker id -> site of the job it's on. Two workers never use the same site at
+# once: simultaneous account creation on one Workday tenant clashes, and a burst
+# of applications to one site is what brings out its CAPTCHA.
+_busy_sites: dict[int, str] = {}
+
+
 def new_run() -> None:
     """Forget the previous run's per-site state (called when a run starts)."""
     _captcha_blocked.clear()
+    _busy_sites.clear()
+
+
+def take_job(queue: asyncio.Queue, worker_id: int):
+    """The first queued job on a site no other worker is using, in queue order.
+
+    None when the queue is empty; False when every queued job is on a site
+    another worker is busy with (try again shortly).
+    """
+    waiting = []
+    while True:
+        try:
+            waiting.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+    busy = {site for w, site in _busy_sites.items() if w != worker_id}
+    pick = next((j for j in waiting if _site(j["url"]) not in busy), None)
+    for j in waiting:
+        if j is not pick:
+            queue.put_nowait(j)
+    if pick is None:
+        return False if waiting else None
+    _busy_sites[worker_id] = _site(pick["url"])
+    return pick
 
 
 def _site(url: str) -> str:
@@ -1150,7 +1180,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     # Use the shared browser profile in OS data dir (same as login endpoint)
     browser = BrowserSession(
         chromium_sandbox=(sys.platform != "linux"),
-        **config.build_browser_kwargs(),
+        **config.build_browser_kwargs(worker=worker_id),
     )
     await config.maybe_apply_stealth(browser)
     mem_store = get_memory_store()
@@ -1591,16 +1621,21 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
         if cancel_flag and cancel_flag.get("cancel_requested"):
             print(f"  🛑 [{name}] Stop requested — halting")
             break
-        try:
-            job = queue.get_nowait()
-        except asyncio.QueueEmpty:
+        job = take_job(queue, worker_id)
+        if job is None:
             break
+        if job is False:
+            await asyncio.sleep(2)  # the rest are on a site another worker is using
+            continue
 
         job_easy_apply = job.get("easy_apply", easy_apply) if job.get("easy_apply") is not None else easy_apply
         # Re-read the profile for each job, so edits saved during a long run
         # (a fixed address, new instructions) apply to the next application.
         profile = load_json(CANDIDATE_PROFILE, profile) or profile
-        status = await apply_to_job(job, profile, qa, applied_labels, job_easy_apply, worker_id)
+        try:
+            status = await apply_to_job(job, profile, qa, applied_labels, job_easy_apply, worker_id)
+        finally:
+            _busy_sites.pop(worker_id, None)
         stats[status] = stats.get(status, 0) + 1
 
         # Randomised pause so applications are not evenly spaced. Off by
@@ -1637,6 +1672,8 @@ async def main():
     qa = load_json(QA_FILE, {})
     LOGS_DIR.mkdir(exist_ok=True)
     new_run()
+    if args.workers > 1:
+        config.prepare_worker_profiles(min(args.workers, config.MAX_PARALLEL_JOBS))
 
     # Filter pending jobs by type
     pending = [

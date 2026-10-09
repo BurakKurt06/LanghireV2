@@ -48,7 +48,8 @@ export default function RunPanel() {
 
   if (!status?.running) return null;
 
-  const job = status.current?.[0];
+  const jobs = status.current ?? [];
+  const titleOf = (url: string) => jobs.find((j) => j.url === url)?.title || "";
   const help = status.help?.[0];
   const review = status.reviews?.[0];
   const paused = Boolean(status.paused);
@@ -76,21 +77,36 @@ export default function RunPanel() {
         <span className="rounded-full bg-background px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">{mode}</span>
       </div>
 
-      {job ? (
-        <div className="mt-2">
-          <p className="truncate font-semibold text-foreground" title={job.title}>{job.title || "Untitled"}</p>
-          <p className="truncate text-muted-foreground" title={job.company}>{job.company || "Unknown company"}</p>
-          <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-background">
-            <div
-              className="h-full rounded-full bg-primary transition-all"
-              style={{ width: `${Math.min(100, Math.round((job.step / Math.max(1, job.max_steps)) * 100))}%` }}
-            />
+      {jobs.length ? (
+        jobs.map((job) => (
+          <div key={job.worker} className="mt-2">
+            <div className="flex items-start gap-1">
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-semibold text-foreground" title={job.title}>{job.title || "Untitled"}</p>
+                <p className="truncate text-muted-foreground" title={job.company}>{job.company || "Unknown company"}</p>
+              </div>
+              <button
+                disabled={busy}
+                onClick={() => act(() => skipJob(job.url))}
+                className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
+                title="Skip this job and go to the next one (it stays in your list)"
+                aria-label={jobs.length > 1 ? `Skip ${job.title || "this job"}` : "Skip this job"}
+              >
+                <SkipForward className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-background">
+              <div
+                className="h-full rounded-full bg-primary transition-all"
+                style={{ width: `${Math.min(100, Math.round((job.step / Math.max(1, job.max_steps)) * 100))}%` }}
+              />
+            </div>
+            <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
+              <span>Step {job.step}</span>
+              <span>{elapsed(job.started_at, now)}</span>
+            </div>
           </div>
-          <div className="mt-1 flex justify-between text-[11px] text-muted-foreground">
-            <span>Step {job.step}</span>
-            <span>{elapsed(job.started_at, now)}</span>
-          </div>
-        </div>
+        ))
       ) : (
         <p className="mt-2 text-muted-foreground">Starting…</p>
       )}
@@ -98,7 +114,7 @@ export default function RunPanel() {
       {help && (
         <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2">
           <p className="flex items-start gap-1 font-semibold text-amber-600">
-            <CircleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" /> Needs you
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" /> Needs you{jobs.length > 1 && titleOf(help.url) ? `: ${titleOf(help.url)}` : ""}
           </p>
           <p className="mt-1 line-clamp-3 text-foreground" title={help.problem}>{help.problem}</p>
           <textarea
@@ -120,7 +136,7 @@ export default function RunPanel() {
 
       {!help && review && (
         <div className="mt-2 rounded-lg border border-primary/40 bg-primary/10 p-2">
-          <p className="font-semibold text-foreground">Ready to submit</p>
+          <p className="font-semibold text-foreground">Ready to submit{jobs.length > 1 && titleOf(review.url) ? `: ${titleOf(review.url)}` : ""}</p>
           <div className="mt-1.5 flex gap-1.5">
             <button disabled={busy} onClick={() => act(() => reviewApplication(review.url, true))}
               className="btn-primary flex-1 !px-2 !py-1 !text-[11px]"><Check className="h-3 w-3" /> Approve</button>
@@ -139,15 +155,6 @@ export default function RunPanel() {
         >
           {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
           {paused ? "Resume" : "Pause"}
-        </button>
-        <button
-          disabled={busy || !job}
-          onClick={() => job && act(() => skipJob(job.url))}
-          className="btn-secondary !px-2 !py-1 !text-[11px]"
-          title="Skip this job and go to the next one (it stays in your list)"
-          aria-label="Skip this job"
-        >
-          <SkipForward className="h-3.5 w-3.5" />
         </button>
         <button
           disabled={busy}

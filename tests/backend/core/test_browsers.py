@@ -95,3 +95,50 @@ def test_build_browser_kwargs_grants_location_so_no_popup_waits(monkeypatch, ins
     permissions = shared_config.build_browser_kwargs()["permissions"]
     assert "geolocation" in permissions
     assert {"clipboardReadWrite", "notifications"} <= set(permissions)  # browser-use's defaults kept
+
+
+@pytest.mark.parametrize("value, expected", [(None, 1), (0, 1), (1, 1), (3, 3), (4, 4), (9, 4), ("2", 2), ("x", 1)])
+def test_parallel_jobs_is_1_to_4(value, expected):
+    assert shared_config.parallel_jobs({"parallel_jobs": value}) == expected
+
+
+def test_each_worker_after_the_first_gets_its_own_profile(monkeypatch, installed):
+    monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {"browser": "msedge"})
+    first = shared_config.build_browser_kwargs()["user_data_dir"]
+    assert shared_config.build_browser_kwargs(worker=1)["user_data_dir"] == first
+    assert shared_config.build_browser_kwargs(worker=3)["user_data_dir"] == first + "_w3"
+
+
+def test_worker_profiles_copy_sign_ins_but_not_caches(tmp_path, monkeypatch):
+    base = tmp_path / "browser_profile_brave"
+    for path in ("Local State", "Default/Network/Cookies", "Default/Login Data", "Default/Local Storage/leveldb/000.log",
+                 "Default/Cache/Cache_Data/f_000001", "Default/Code Cache/js/index", "Default/Sessions/Session_1",
+                 "lockfile", "BrowserMetrics/a.pma"):
+        (base / path).parent.mkdir(parents=True, exist_ok=True)
+        (base / path).write_bytes(b"x")
+    stale = tmp_path / "browser_profile_brave_w4"
+    stale.mkdir()
+    monkeypatch.setattr(shared_config, "selected_browser", lambda settings=None: (None, base))
+
+    made = shared_config.prepare_worker_profiles(3)
+
+    assert made == [tmp_path / "browser_profile_brave_w2", tmp_path / "browser_profile_brave_w3"]
+    for copy in made:
+        assert (copy / "Local State").exists() and (copy / "Default/Network/Cookies").exists()
+        assert (copy / "Default/Login Data").exists() and (copy / "Default/Local Storage/leveldb/000.log").exists()
+        for skipped in ("Default/Cache", "Default/Code Cache", "Default/Sessions", "lockfile", "BrowserMetrics"):
+            assert not (copy / skipped).exists(), skipped
+    assert not stale.exists()  # a copy for a worker you no longer run is removed
+
+
+def test_worker_profiles_are_refreshed_each_run(tmp_path, monkeypatch):
+    base = tmp_path / "p"
+    (base / "Default").mkdir(parents=True)
+    (base / "Default" / "Cookies").write_text("old")
+    monkeypatch.setattr(shared_config, "selected_browser", lambda settings=None: (None, base))
+    shared_config.prepare_worker_profiles(2)
+    (tmp_path / "p_w2" / "Default" / "Leftover").write_text("from the last run")
+    (base / "Default" / "Cookies").write_text("new sign-in")
+    shared_config.prepare_worker_profiles(2)
+    assert (tmp_path / "p_w2" / "Default" / "Cookies").read_text() == "new sign-in"
+    assert not (tmp_path / "p_w2" / "Default" / "Leftover").exists()

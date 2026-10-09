@@ -1080,7 +1080,8 @@ async def start_applying(body: ApplyRequest):
     _kill_browser_processes()
     _set_apply_paused(False)
 
-    workers = body.workers
+    from core.shared_config import parallel_jobs
+    workers = body.workers or parallel_jobs(load_settings())
     mode = body.mode
     limit = body.limit
     target_job_url = body.job_url
@@ -1173,6 +1174,10 @@ async def start_applying(body: ApplyRequest):
 
         stats = {}
         num_workers = min(workers, len(pending))
+        if num_workers > 1:
+            print(f"Copying your browser sign-ins for {num_workers} applications at the same time...")
+        from core.shared_config import prepare_worker_profiles
+        await asyncio.to_thread(prepare_worker_profiles, num_workers)
         cred_task = asyncio.create_task(credential_refresh_loop(CREDENTIAL_REFRESH_MINUTES))
 
         # For mode="all", pass True for easy_apply (agent handles both types via the job URL)

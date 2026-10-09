@@ -94,4 +94,18 @@ describe("RunPanel", () => {
     await user.click(screen.getByRole("button", { name: /^Skip$/ }));
     expect(reviewApplication).toHaveBeenCalledWith(JOB.url, false);
   });
+
+  it("lists every job running at the same time, each with its own Skip", async () => {
+    const second = { ...JOB, worker: 2, url: "https://jobs.example/2", title: "Risk Intern", company: "Northwind", step: 3 };
+    mockStatus.mockResolvedValue(running({ workers: 2, current: [JOB, second],
+      help: [{ url: second.url, problem: "Which office?" }] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    expect(await screen.findByText("Data Intern")).toBeInTheDocument();
+    expect(screen.getByText("Risk Intern")).toBeInTheDocument();
+    expect(screen.getByText("Step 3")).toBeInTheDocument();
+    expect(screen.getByText(/Needs you: Risk Intern/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Skip Risk Intern" }));
+    expect(skipJob).toHaveBeenCalledWith("https://jobs.example/2");
+  });
 });

@@ -1029,6 +1029,19 @@ class TestApplyReview:
         finally:
             main._apply_status["running"] = False
 
+    def test_start_uses_the_jobs_at_the_same_time_setting(self, auth_client, monkeypatch):
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
+        monkeypatch.setattr(main, "_run_async_in_thread", lambda make_coro, status: None)
+        main.save_settings({**main.load_settings(), "parallel_jobs": 3})
+        try:
+            auth_client.post("/apply/start", json={"mode": "all"})
+            assert main._apply_status["workers"] == 3
+            main._apply_status["running"] = False
+            auth_client.post("/apply/start", json={"mode": "all", "workers": 2})   # an explicit number wins
+            assert main._apply_status["workers"] == 2
+        finally:
+            main._apply_status["running"] = False
+
     def test_start_passes_the_trial_run_choice(self, auth_client, monkeypatch):
         from cli import apply_jobs
         monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)

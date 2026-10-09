@@ -240,9 +240,11 @@ describe("PendingTab", () => {
 
     await waitFor(() =>
       expect(mockStartApplying).toHaveBeenCalledWith(
-        expect.objectContaining({ job_urls: expect.any(Array), workers: 1, mode: "all" }),
+        expect.objectContaining({ job_urls: expect.any(Array), mode: "all" }),
       ),
     );
+    // No worker count: the backend uses Settings → Jobs at the same time.
+    expect(mockStartApplying.mock.calls[0][0]).not.toHaveProperty("workers");
   });
 
   it("auto-tailor on: tailors untailored jobs before a batch apply", async () => {

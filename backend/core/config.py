@@ -138,12 +138,19 @@ def load_settings() -> dict:
         # 2Captcha solver. Off by default; the key is never sent to the LLM.
         "captcha_solver_enabled": False,
         "captcha_api_key": "",
+        # Applications running at the same time (1-4).
+        "parallel_jobs": 1,
     })
 
 
 def save_settings(settings: dict):
     if "max_failures" in settings:
         settings["max_failures"] = max(1, min(int(settings["max_failures"]), 50))
+    if "parallel_jobs" in settings:
+        try:
+            settings["parallel_jobs"] = max(1, min(int(settings["parallel_jobs"]), 4))
+        except (TypeError, ValueError):
+            settings["parallel_jobs"] = 1
     if "human_delay_min" in settings:
         settings["human_delay_min"] = max(0, min(int(settings["human_delay_min"]), 300))
     if "human_delay_max" in settings:

@@ -38,6 +38,7 @@ export default function SettingsPage() {
   const [performanceMode, setPerformanceMode] = useState(false);
   const [fitCheckEnabled, setFitCheckEnabled] = useState(true);
   const [coverLetterBoxes, setCoverLetterBoxes] = useState(false);
+  const [parallelJobs, setParallelJobs] = useState(1);
 
   useEffect(() => {
     Promise.all([
@@ -47,6 +48,7 @@ export default function SettingsPage() {
         setPerformanceMode(data.performance_mode === true);
         setFitCheckEnabled(data.fit_check_enabled !== false);
         setCoverLetterBoxes(data.cover_letter_boxes === true);
+        setParallelJobs(Math.max(1, Math.min(4, data.parallel_jobs || 1)));
         setBlockedDomains(data.blocked_domains || []);
         setMaxFailures(data.max_failures || 8);
         setTelemetryEnabled(data.telemetry_enabled !== false);
@@ -141,6 +143,7 @@ export default function SettingsPage() {
         performance_mode: performanceMode,
         fit_check_enabled: fitCheckEnabled,
         cover_letter_boxes: coverLetterBoxes,
+        parallel_jobs: parallelJobs,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -357,6 +360,18 @@ export default function SettingsPage() {
 
       {/* Agent Settings */}
       <Section title="Agent Settings">
+        <div className="mb-5">
+          <label htmlFor="parallel-jobs" className="block text-sm font-semibold text-foreground mb-1.5">Jobs at the same time</label>
+          <select id="parallel-jobs" value={parallelJobs} onChange={(e) => setParallelJobs(Number(e.target.value))}
+            className="input-base !w-32">
+            {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+          <p className="text-[13px] text-muted-foreground mt-1.5">
+            How many applications run at once, each in its own browser window with your sign-ins. 2-3 is a good
+            range: each window uses about 1 GB of memory, and your AI plan's usage goes up as fast. Two jobs on the
+            same site never run at once. Applies from the next run.
+          </p>
+        </div>
         <div>
           <label className="block text-sm font-semibold text-foreground mb-1.5">Max Failures Per Job</label>
           <input type="number" value={maxFailures} onChange={(e) => {
