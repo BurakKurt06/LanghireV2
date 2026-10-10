@@ -945,3 +945,31 @@ def test_the_form_check_knows_both_emails_the_agent_may_type(run, monkeypatch):
 def test_saved_answers_stay_keyed_by_the_bare_host(run):
     _, kwargs, _ = run(url="https://job-boards.greenhouse.io/acme/jobs/1")
     assert run.agents[-1]._langhire_domain == "job-boards.greenhouse.io"
+
+
+@pytest.mark.parametrize("url, origin", [
+    ("https://fa-abcd-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/ppcu/job/1/apply/email",
+     "https://fa-abcd-saasfaprod1.fa.ocs.oraclecloud.com"),
+    ("https://acme.wd5.myworkdayjobs.com/en-US/careers/job/1", "https://acme.wd5.myworkdayjobs.com"),
+    ("https://careers.acme.com/jobs/1", "https://careers.acme.com"),  # the job's own site
+    ("https://ads.example.net/track", ""),
+    ("https://evilmyworkdayjobs.com/x", ""),
+    ("about:blank", ""),
+])
+def test_location_goes_to_the_job_and_application_sites_only(url, origin):
+    assert apply_jobs.location_origin(url, "https://careers.acme.com/jobs/1") == origin
+
+
+def test_location_is_granted_once_per_site():
+    calls = []
+
+    class Send:
+        async def setPermission(self, params):
+            calls.append(params)
+
+    session = SimpleNamespace(cdp_client=SimpleNamespace(send=SimpleNamespace(Browser=Send())))
+    for _ in range(2):
+        asyncio.run(apply_jobs.allow_location(session, "https://acme.wd5.myworkdayjobs.com/a", ""))
+    asyncio.run(apply_jobs.allow_location(session, "https://ads.example.net/", ""))
+    assert calls == [{"permission": {"name": "geolocation"}, "setting": "granted",
+                      "origin": "https://acme.wd5.myworkdayjobs.com"}]

@@ -11,6 +11,7 @@ Usage:
 """
 import argparse
 import asyncio
+import hashlib
 import logging
 import re
 import sys
@@ -757,9 +758,56 @@ PAGE_WAIT_SECONDS = 10
 _PAGE_TEXT_JS = "() => ((document.body && document.body.innerText) || '').trim().length"
 
 
+# Application sites that ask for the location (Oracle's careers pages, for one);
+# the agent can't click the browser's own Allow popup. Any other page keeps the
+# browser's normal behaviour.
+LOCATION_SITES = (
+    "myworkdayjobs.com", "myworkdaysite.com", "oraclecloud.com", "greenhouse.io", "lever.co", "ashbyhq.com",
+    "icims.com", "smartrecruiters.com", "successfactors.com", "successfactors.eu", "sapsf.com", "sapsf.eu",
+    "csod.com", "taleo.net", "jobvite.com", "workable.com", "bamboohr.com", "paylocity.com", "adp.com",
+    "ultipro.com", "ukg.com", "eightfold.ai", "avature.net", "brassring.com",
+)
+
+
+def location_origin(url: str, job_url: str = "") -> str:
+    """The origin to let read the location ("" for none): the job's own site or a known application site."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not host:
+        return ""
+    job_host = (urlparse(job_url or "").hostname or "").lower()
+    if host != job_host and not any(host == s or host.endswith("." + s) for s in LOCATION_SITES):
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+# id(browser session) -> origins already granted (dropped when the job ends).
+_location_granted: dict[int, set[str]] = {}
+
+
+async def allow_location(browser_session, url: str, job_url: str = "") -> None:
+    """Grant the location to this page's site if it's the job's own or an application site (once per site)."""
+    origin = location_origin(url, job_url)
+    granted = _location_granted.setdefault(id(browser_session), set())
+    if not origin or origin in granted:
+        return
+    try:
+        await browser_session.cdp_client.send.Browser.setPermission(
+            params={"permission": {"name": "geolocation"}, "setting": "granted", "origin": origin})
+        granted.add(origin)
+    except Exception:
+        pass
+
+
 async def before_step(agent) -> None:
     """Before each AI step: let a blank page finish loading, then tick a simple
     "I'm not a robot" check, so the AI doesn't spend a request on either."""
+    try:
+        await allow_location(agent.browser_session, await agent.browser_session.get_current_page_url(),
+                             getattr(agent, "_langhire_url", ""))
+    except Exception:
+        pass
     await wait_for_page_content(agent)
     try:
         found = await _captcha.detect(agent.browser_session)
@@ -1205,6 +1253,11 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         **config.build_browser_kwargs(worker=worker_id),
     )
     await config.maybe_apply_stealth(browser)
+    try:
+        await browser.start()  # no-op when already started
+        await allow_location(browser, url, url)
+    except Exception:
+        pass
     mem_store = get_memory_store()
     # Count memories injected for metrics tracking
     domain = mem_store.extract_domain(url)
@@ -1401,7 +1454,9 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         print(f"  🎓 [W{worker_id}] Training run: fills everything in, never submits")
     if review:
         print(f"  👀 [W{worker_id}] Trial run: it will wait for your review before submitting")
-    _agent_ref["cover_letter_pdf"] = LOGS_DIR.parent / "cover_letters" / (safe_folder_name(f"{company}_{title}")[:60] + ".pdf")
+    # Unique per job: two jobs with the same company and title can run at the same time.
+    _agent_ref["cover_letter_pdf"] = LOGS_DIR.parent / "cover_letters" / (
+        safe_folder_name(f"{company}_{title}")[:60] + f"_{hashlib.sha1(url.encode()).hexdigest()[:8]}.pdf")
     _agent_ref["cover_letter_pdf"].parent.mkdir(parents=True, exist_ok=True)
     _agent_ref["profile"] = profile
     _agent_ref["posting_description"] = getattr(posting, "description", "") if posting is not None else ""
@@ -1628,6 +1683,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     finally:
         _running_agents.discard(agent)
         _current.pop(worker_id, None)
+        _location_granted.pop(id(browser), None)
         _skip_requested.discard(url)
         try:
             await browser.close()

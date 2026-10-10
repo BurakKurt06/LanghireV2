@@ -916,9 +916,12 @@ async def start_collection(body: CollectRequest):
         # Starting kills every browser on the agents' profile, the Gmail check's included.
         return {"success": False, "message": "The Inbox is checking Gmail right now. Start again in a moment."}
     _collection_status["running"] = True  # claims the browser profile (the Gmail scheduler checks it)
-
-    # Kill any leftover browser processes from previous runs
-    _kill_browser_processes()
+    try:
+        # Kill any leftover browser processes from previous runs
+        _kill_browser_processes()
+    except Exception:
+        _collection_status["running"] = False
+        raise
 
     title = body.title
     max_jobs = body.max_jobs
@@ -1089,12 +1092,6 @@ async def start_applying(body: ApplyRequest):
     if _inbox_checking():
         # Starting kills every browser process, the Gmail check's included.
         return {"success": False, "message": "The Inbox is checking Gmail right now. Start again in a moment."}
-    _apply_status["running"] = True  # claims the browser profile (the Gmail scheduler checks it)
-
-    # Kill any leftover browser processes from previous runs
-    _kill_browser_processes()
-    _set_apply_paused(False)
-
     from core.shared_config import parallel_jobs
     workers = body.workers or parallel_jobs(load_settings())
     mode = body.mode
@@ -1102,7 +1099,19 @@ async def start_applying(body: ApplyRequest):
     target_job_url = body.job_url
     target_job_urls = body.job_urls
     from cli import apply_jobs as _apply_jobs_module
-    _apply_jobs_module.set_run_mode(body.run_mode or ("trial" if body.review else "auto"))
+
+    # Claim the browser profile before closing browsers (the Gmail scheduler
+    # checks this flag); release it if starting fails before the run's thread
+    # takes over (it resets the flag when the run ends).
+    _apply_status["running"] = True
+    try:
+        _apply_jobs_module.set_run_mode(body.run_mode or ("trial" if body.review else "auto"))
+        # Kill any leftover browser processes from previous runs
+        _kill_browser_processes()
+        _set_apply_paused(False)
+    except Exception:
+        _apply_status["running"] = False
+        raise
 
     if target_job_url:
         _apply_status = {"running": True, "mode": mode, "workers": 1, "log": [f"Applying to single job..."]}
@@ -1503,8 +1512,10 @@ async def add_job_manually(body: dict):
         "title": body.get("title", "").strip() or "Manually Added",
         "company": body.get("company", "").strip() or "",
         "location": body.get("location", "").strip() or "",
-        # A title or company typed by the user is never renamed automatically.
-        **({"name_source": "user"} if (body.get("title") or body.get("company") or "").strip() else {}),
+        # A title or company typed by the user is never renamed automatically
+        # (the other one is still filled in from the page or by the agent).
+        **({"user_named": typed} if (typed := [f for f in ("title", "company") if (body.get(f) or "").strip()]) else {}),
+        **({"name_source": "user"} if len(typed) == 2 else {}),
         "easy_apply": None,
         "status": "pending",
         "source": body.get("source", "manual"),

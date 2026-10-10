@@ -199,10 +199,10 @@ def forget_open_tabs(profile_dir) -> int:
     return removed
 
 
-# Granted to every site up front. browser-use's default is clipboard and
-# notifications; location is added because application sites (Oracle's, for
-# one) ask for it, and the agent can't click the browser's own Allow popup.
-GRANTED_PERMISSIONS = ("clipboardReadWrite", "notifications", "geolocation")
+# Granted to every site up front (browser-use's default). Location is not: the
+# agent grants it to the job's own site and known application sites only
+# (apply_jobs.allow_location).
+GRANTED_PERMISSIONS = ("clipboardReadWrite", "notifications")
 
 # browser-use default Chrome flags we don't launch with (see build_browser_kwargs).
 IGNORED_CHROME_DEFAULT_ARGS = ["--extensions-on-chrome-urls"]
@@ -355,9 +355,10 @@ def set_job_names(url: str, title: str = "", company: str = "", source: str = "a
         if job is None or job.get("name_source") == "user":
             return False
         changed = False
-        if title and not job_page.is_placeholder(title) and job.get("title") != title:
+        typed = job.get("user_named") or []
+        if title and "title" not in typed and not job_page.is_placeholder(title) and job.get("title") != title:
             job["title"], changed = title, True
-        if company and not job_page.is_placeholder(company) and job.get("company") != company:
+        if company and "company" not in typed and not job_page.is_placeholder(company) and job.get("company") != company:
             job["company"], changed = company, True
         if changed:
             job["name_source"] = source
@@ -388,10 +389,11 @@ def refresh_posting_details(url: str, posting=None, mark_closed: bool = True):
         changed = False
         source = job.get("name_source")
         auto = source in (None, "page")  # never overwrite the user's or the agent's names
-        if posting.title and auto and (job_page.is_placeholder(job.get("title"))
+        typed = job.get("user_named") or []  # one field typed by the user: only the other is filled in
+        if posting.title and auto and "title" not in typed and (job_page.is_placeholder(job.get("title"))
                                        or (source == "page" and job.get("title") != posting.title)):
             job["title"], job["name_source"], changed = posting.title, "page", True
-        if posting.company and auto and job.get("company") != posting.company and (
+        if posting.company and auto and "company" not in typed and job.get("company") != posting.company and (
                 not (job.get("company") or "").strip() or job.get("company") == "Unknown"
                 or source == "page" or job.get("source") == "pasted"):
             job["company"], job["name_source"], changed = posting.company, "page", True

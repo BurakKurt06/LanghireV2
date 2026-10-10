@@ -175,3 +175,28 @@ def test_a_greenhouse_link_sent_to_the_companys_own_site_is_not_closed():
     back_to_board = job_page.parse("https://job-boards.greenhouse.io/acme", 200, page,
                                    original_url="https://job-boards.greenhouse.io/acme/jobs/123")
     assert back_to_board.closed
+
+
+@pytest.mark.real_posting_fetch
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8000/admin", "http://192.168.1.1/", "http://localhost/x"])
+def test_fetch_never_reads_this_computer_or_the_home_network(url):
+    assert job_page.fetch(url) is None
+
+
+@pytest.mark.real_posting_fetch
+def test_a_redirect_to_the_home_network_is_refused():
+    import httpx
+    request = httpx.Request("GET", "http://192.168.1.1/")
+    with pytest.raises(httpx.InvalidURL):
+        job_page._public_only(request)
+    job_page._public_only(httpx.Request("GET", "https://jobs.example.com/1"))  # a public address passes
+
+
+@pytest.mark.parametrize("url, tenant", [
+    ("https://wd3.myworkdaysite.com/recruiting/acme/External/job/1", "acme"),
+    ("https://wd3.myworkdaysite.com/en-US/recruiting/acme/External/job/1", "acme"),
+    ("https://wd3.myworkdaysite.com/en-GB/recruiting/globex/Careers/job/1", "globex"),
+    ("https://wd3.myworkdaysite.com/fr-FR/initech/job/1", "initech"),
+])
+def test_workday_hosted_sites_have_a_tenant_in_any_locale(url, tenant):
+    assert job_page.tenant(url) == tenant

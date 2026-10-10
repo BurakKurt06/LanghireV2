@@ -162,8 +162,12 @@ def tenant(url: str) -> str:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     parts = [p for p in parsed.path.split("/") if p]
-    if "myworkdaysite.com" in host and len(parts) >= 2 and parts[0] in ("recruiting", "en-US"):
-        return parts[1] if parts[0] == "recruiting" else (parts[2] if len(parts) > 2 else "")
+    if "myworkdaysite.com" in host:
+        if parts and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
+            parts = parts[1:]  # locale prefix: en-US, en-GB, fr-FR, ...
+        if parts and parts[0] == "recruiting":
+            parts = parts[1:]
+        return parts[0] if parts else ""
     if "myworkdayjobs.com" in host or host.endswith(".csod.com"):
         return host.split(".")[0]
     if "greenhouse.io" in host or "lever.co" in host or "ashbyhq.com" in host or "smartrecruiters.com" in host:
@@ -298,11 +302,26 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
                    description=description[:DESCRIPTION_LIMIT])
 
 
+def _public_only(request: httpx.Request) -> None:
+    """Refuse requests to this computer or the local network, redirects included."""
+    try:
+        from core.shared_config import validate_job_url
+    except ImportError:  # pragma: no cover
+        from backend.core.shared_config import validate_job_url
+    if not validate_job_url(str(request.url)):
+        raise httpx.InvalidURL(f"not a public web address: {request.url.host}")
+
+
 def fetch(url: str) -> Posting | None:
-    """Fetch and read the posting; None when the page can't be fetched (never raises)."""
+    """Fetch and read the posting; None when the page can't be fetched (never raises).
+
+    Only public web addresses: a link (or a redirect from it) to this computer
+    or the home network is never followed.
+    """
     try:
         with httpx.Client(follow_redirects=True, timeout=TIMEOUT_SECONDS,
-                          headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}) as client:
+                          headers={"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+                          event_hooks={"request": [_public_only]}) as client:
             with client.stream("GET", url) as response:
                 chunks, size = [], 0
                 for chunk in response.iter_bytes():

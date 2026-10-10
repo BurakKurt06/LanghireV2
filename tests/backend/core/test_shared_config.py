@@ -582,3 +582,16 @@ def test_refresh_renames_page_names_but_not_agent_names(data_dir, monkeypatch):
     jobs = _json.loads(path.read_text(encoding="utf-8"))
     assert (jobs["u1"]["title"], jobs["u1"]["company"], jobs["u1"]["location"]) == ("Analyst Intern", "Northwind", "New York, NY")
     assert (jobs["u2"]["title"], jobs["u2"]["company"]) == ("Quant Intern", "Stark Global")
+
+
+def test_a_field_the_user_typed_is_kept_and_the_other_filled_in(jobs_paths):
+    from core import job_page
+    url = "https://jobs.example/1"
+    sc.write_jobs({url: {"title": "My Title", "company": "", "status": "pending", "user_named": ["title"]}})
+    sc.refresh_posting_details(url, job_page.Posting(title="Page Title", company="Acme"))
+    job = sc.read_jobs()[url]
+    assert (job["title"], job["company"]) == ("My Title", "Acme")
+    sc.refresh_posting_details(url, job_page.Posting(title="Page Title 2", company="Acme"))
+    sc.set_job_names(url, "Agent Title", "Acme Labs")
+    job = sc.read_jobs()[url]
+    assert job["title"] == "My Title" and job["company"] == "Acme Labs"

@@ -1029,6 +1029,16 @@ class TestApplyReview:
         finally:
             main._apply_status["running"] = False
 
+    def test_a_failed_start_releases_the_running_claim(self, auth_client, monkeypatch):
+        def broken():
+            raise RuntimeError("couldn't list processes")
+
+        monkeypatch.setattr(main, "_kill_browser_processes", broken)
+        main._apply_status["running"] = False
+        with pytest.raises(RuntimeError):
+            auth_client.post("/apply/start", json={"mode": "all"})
+        assert main._apply_status["running"] is False
+
     def test_collection_waits_for_a_gmail_check(self, auth_client, monkeypatch):
         from core import inbox
         killed = []
@@ -1257,10 +1267,13 @@ class TestBatch1Api:
     def test_typed_names_are_the_users(self, auth_client):
         import core.shared_config as shared_config
         auth_client.post("/jobs/add", json={"url": "https://jobs.example/t", "title": "My Title"})
+        auth_client.post("/jobs/add", json={"url": "https://jobs.example/b", "title": "My Title", "company": "Acme"})
         auth_client.post("/jobs/add", json={"url": "https://jobs.example/n"})
         jobs = shared_config.read_jobs()
-        assert jobs["https://jobs.example/t"]["name_source"] == "user"
-        assert "name_source" not in jobs["https://jobs.example/n"]
+        # Only the typed field is the user's; the company can still be filled in.
+        assert jobs["https://jobs.example/t"]["user_named"] == ["title"] and "name_source" not in jobs["https://jobs.example/t"]
+        assert jobs["https://jobs.example/b"]["name_source"] == "user"
+        assert "name_source" not in jobs["https://jobs.example/n"] and "user_named" not in jobs["https://jobs.example/n"]
 
     def test_skipped_status_counts_and_can_be_set(self, auth_client):
         auth_client.post("/jobs/add", json={"url": "https://jobs.example/s"})
