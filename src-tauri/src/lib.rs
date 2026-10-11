@@ -5,9 +5,9 @@ use tauri_plugin_shell::process::CommandChild;
 
 struct Backend(Mutex<Option<CommandChild>>);
 
-#[tauri::command]
-fn get_api_token() -> Result<String, String> {
-    let base = if cfg!(target_os = "macos") {
+/// The backend's data folder (the same one backend/core/config.py uses).
+fn data_dir() -> Result<std::path::PathBuf, String> {
+    if cfg!(target_os = "macos") {
         dirs::home_dir().map(|h| h.join("Library/Application Support/langhirev2"))
     } else if cfg!(target_os = "windows") {
         dirs::data_dir().map(|d| d.join("langhirev2"))
@@ -15,9 +15,12 @@ fn get_api_token() -> Result<String, String> {
     } else {
         dirs::home_dir().map(|h| h.join(".config/langhirev2"))
     }
-    .ok_or("no home dir")?;
+    .ok_or_else(|| "no home dir".to_string())
+}
 
-    let token_path = base.join(".api_token");
+#[tauri::command]
+fn get_api_token() -> Result<String, String> {
+    let token_path = data_dir()?.join(".api_token");
 
     // Backend sidecar may take a few seconds to start and write the token file.
     // Retry up to 30 times (30 seconds total) with 1-second intervals.
@@ -39,8 +42,25 @@ fn get_api_token() -> Result<String, String> {
     Err(format!("Token file not found after 30s: {}", token_path.display()))
 }
 
+/// Open a tailored-resume PDF. Only a .pdf inside the app's tailored folder:
+/// never another path, program or URL, and never through a shell.
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
+    let allowed = data_dir()?
+        .join("tailored")
+        .canonicalize()
+        .map_err(|_| "No tailored resumes yet".to_string())?;
+    let file = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|_| "File not found".to_string())?;
+    let is_pdf = file
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(false);
+    if !file.starts_with(&allowed) || !is_pdf || !file.is_file() {
+        return Err("Only tailored resume PDFs can be opened".to_string());
+    }
+    let path = file.to_string_lossy().trim_start_matches(r"\\?\").to_string();
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
@@ -50,8 +70,9 @@ fn open_file(path: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path])
+        // explorer.exe opens the file with its default app; no cmd.exe parsing.
+        std::process::Command::new("explorer")
+            .arg(&path)
             .spawn()
             .map_err(|e| format!("Failed to open file: {}", e))?;
     }

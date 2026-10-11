@@ -1,7 +1,5 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro';
-
-const GITHUB_TOKEN = import.meta.env.PUBLIC_GITHUB_TOKEN || "";
 ---
 
 <BaseLayout
@@ -68,7 +66,7 @@ const GITHUB_TOKEN = import.meta.env.PUBLIC_GITHUB_TOKEN || "";
       <div id="success-msg" class="hidden card text-center py-10">
         <svg class="w-12 h-12 text-success mx-auto mb-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         <h2 class="text-lg font-bold mb-2">Feedback Submitted!</h2>
-        <p class="text-sm text-muted-foreground mb-4">Your feedback has been posted to GitHub Discussions.</p>
+        <p class="text-sm text-muted-foreground mb-4">Finish posting it on the GitHub page that opened (sign in to GitHub if asked).</p>
         <a id="discussion-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-primary text-xs inline-flex items-center gap-2">
           View Discussion
         </a>
@@ -92,10 +90,10 @@ const GITHUB_TOKEN = import.meta.env.PUBLIC_GITHUB_TOKEN || "";
   </section>
 </BaseLayout>
 
-<script define:vars={{ GITHUB_TOKEN }}>
-  const GRAPHQL_URL = "https://api.github.com/graphql";
-  const REPO_OWNER = "jaimaann";
-  const REPO_NAME = "LangHire";
+<script>
+  // No token in the page: feedback opens GitHub's own "new discussion" form,
+  // pre-filled, and the visitor posts it with their GitHub account.
+  const NEW_DISCUSSION = "https://github.com/jaimaann/LangHire/discussions/new";
 
   const form = document.getElementById('feedback-form');
   const categoryInput = form.querySelector('input[name="category"]');
@@ -117,14 +115,14 @@ const GITHUB_TOKEN = import.meta.env.PUBLIC_GITHUB_TOKEN || "";
     });
   });
 
-  form.addEventListener('submit', async (e) => {
+  form.addEventListener('submit', (e) => {
     e.preventDefault();
     errorMsg.classList.add('hidden');
 
     const title = form.querySelector('#title').value.trim();
     const description = form.querySelector('#description').value.trim();
     const email = form.querySelector('#email').value.trim();
-    const category = categoryInput.value;
+    const category = (categoryInput.value || 'general').toLowerCase().replace(/\s+/g, '-');
 
     if (!title || !description) {
       errorMsg.textContent = 'Please fill in both the title and description.';
@@ -132,56 +130,13 @@ const GITHUB_TOKEN = import.meta.env.PUBLIC_GITHUB_TOKEN || "";
       return;
     }
 
-    if (!GITHUB_TOKEN) {
-      errorMsg.textContent = 'Feedback submission is temporarily unavailable.';
-      errorMsg.classList.remove('hidden');
-      return;
-    }
-
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Submitting...';
-
-    try {
-      const headers = { Authorization: `Bearer ${GITHUB_TOKEN}`, "Content-Type": "application/json" };
-
-      const repoRes = await fetch(GRAPHQL_URL, {
-        method: "POST", headers,
-        body: JSON.stringify({ query: `{ repository(owner: "${REPO_OWNER}", name: "${REPO_NAME}") { id, discussionCategories(first: 25) { nodes { id, name } } } }` }),
-      });
-      const repoData = await repoRes.json();
-      if (repoData.errors) throw new Error(repoData.errors[0].message);
-
-      const repoId = repoData.data.repository.id;
-      const cats = repoData.data.repository.discussionCategories.nodes;
-      const cat = cats.find(c => c.name.toLowerCase() === category.toLowerCase()) || cats[0];
-      if (!cat) throw new Error("No discussion categories found.");
-
-      let body = description;
-      if (email) body += `\n\n---\n*Contact: ${email}*`;
-
-      const mutRes = await fetch(GRAPHQL_URL, {
-        method: "POST", headers,
-        body: JSON.stringify({
-          query: `mutation($repoId: ID!, $catId: ID!, $title: String!, $body: String!) { createDiscussion(input: {repositoryId: $repoId, categoryId: $catId, title: $title, body: $body}) { discussion { url } } }`,
-          variables: { repoId, catId: cat.id, title, body },
-        }),
-      });
-      const mutData = await mutRes.json();
-      if (mutData.errors) throw new Error(mutData.errors[0].message);
-
-      const url = mutData.data.createDiscussion.discussion.url;
-      discussionLink.href = url;
-      successMsg.classList.remove('hidden');
-      submitBtn.classList.add('hidden');
-      form.querySelector('#title').value = '';
-      form.querySelector('#description').value = '';
-      form.querySelector('#email').value = '';
-    } catch (err) {
-      errorMsg.textContent = err.message || 'Failed to submit feedback.';
-      errorMsg.classList.remove('hidden');
-    } finally {
-      submitBtn.disabled = false;
-      submitBtn.textContent = 'Submit Feedback';
-    }
+    let body = description;
+    if (email) body += `\n\n---\n*Contact: ${email}*`;
+    const url = `${NEW_DISCUSSION}?category=${encodeURIComponent(category)}`
+      + `&title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+    window.open(url, '_blank', 'noopener');
+    discussionLink.href = url;
+    successMsg.classList.remove('hidden');
+    submitBtn.classList.add('hidden');
   });
 </script>

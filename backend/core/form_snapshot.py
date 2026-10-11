@@ -81,10 +81,16 @@ async def snapshot(browser_session) -> dict[str, tuple[str, str]]:
 
 
 def changed_fields(before: dict[str, tuple[str, str]], after: dict[str, tuple[str, str]]) -> list[tuple[str, str, str]]:
-    """(label, old value, new value) for each field whose value changed, or that appeared filled."""
+    """(label, old value, new value) for each field that was on the page before and whose value changed.
+
+    A field that only appeared during the wait isn't counted: the page could
+    have added it, and these become the user's saved answers.
+    """
     changes = []
     for key, (label, value) in after.items():
-        old = before.get(key, (label, ""))[1]
+        if key not in before:
+            continue
+        old = before[key][1]
         if value != old and value.strip():
             changes.append((label, old, value))
     return changes

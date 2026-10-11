@@ -145,10 +145,20 @@ class TestAuth:
         resp = auth_client.get("/profile", headers={"Origin": "http://localhost:1420"})
         assert resp.status_code == 200
 
-    def test_health_bypasses_origin_check(self, client):
-        """/health is exempt from both the origin and token checks."""
-        resp = client.get("/health", headers={"Origin": "https://evil.example.com"})
-        assert resp.status_code == 200
+    def test_health_needs_no_token_but_refuses_other_websites(self, client):
+        """/health skips the token (the app polls it while starting) but no web page can read it."""
+        assert client.get("/health").status_code == 200
+        assert client.get("/health", headers={"Origin": "https://evil.example.com"}).status_code == 403
+
+    def test_cors_only_allows_the_app(self, client):
+        resp = client.options("/jobs", headers={"Origin": "https://evil.example.com",
+                                                "Access-Control-Request-Method": "GET"})
+        assert resp.headers.get("access-control-allow-origin") != "https://evil.example.com"
+
+    def test_tailored_resume_ids_are_never_paths(self, auth_client):
+        for bad in ("..%5C..%5Cnotes", "C:%5Cnotes", "abc"):
+            assert auth_client.get(f"/resume/tailor/{bad}").status_code == 404
+            assert auth_client.delete(f"/resume/tailor/{bad}").status_code == 404
 
 
 # ── Profile CRUD roundtrip ────────────────────────────────────────────────────

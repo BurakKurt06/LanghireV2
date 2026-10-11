@@ -18,7 +18,7 @@ def get_data_dir() -> Path:
         base = Path.home() / "AppData" / "Roaming" / "langhirev2"
     else:  # Linux
         base = Path.home() / ".config" / "langhirev2"
-    base.mkdir(parents=True, exist_ok=True)
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
     return base
 
 

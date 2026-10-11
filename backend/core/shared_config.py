@@ -110,6 +110,7 @@ def build_browser_kwargs(worker: int = 1) -> dict:
         "ignore_default_args": list(IGNORED_CHROME_DEFAULT_ARGS),
         "user_data_dir": str(profile_dir),
         "permissions": list(GRANTED_PERMISSIONS),
+        "block_ip_addresses": True,  # job links are never bare IPs; this keeps the agent off the LAN
     }
     if executable:
         kwargs["executable_path"] = executable
@@ -262,21 +263,108 @@ async def worker_stagger(default_seconds: float = 5.0) -> float:
     return default_seconds
 
 
-def validate_job_url(url: str) -> bool:
-    """Reject URLs pointing to private/internal networks (SSRF prevention)."""
+def is_private_host(host: str, resolve: bool = True) -> bool:
+    """True for this computer, the local network and other non-public addresses.
+
+    Checks IP literals in every form (IPv6, mapped, decimal), and with resolve,
+    what a hostname resolves to (a public-looking name for 192.168.1.1).
+    """
+    import ipaddress
+    import socket
+    host = (host or "").strip("[]").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return True
+
+    def private(value) -> bool:
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+        return not ip.is_global or ip.is_multicast
+
+    if private(host.split("%")[0]):
+        return True
+    if host.isdigit():  # http://2130706433/ is 127.0.0.1
+        try:
+            return private(int(host))
+        except ValueError:
+            return True
+    if not resolve:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
+        return False  # unresolvable: opening it fails by itself
+    return any(private(info[4][0].split("%")[0]) for info in infos)
+
+
+def validate_job_url(url: str, resolve: bool = True) -> bool:
+    """Reject URLs pointing to this computer or private/internal networks (SSRF prevention)."""
     from urllib.parse import urlparse
     try:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
-        if not host or not parsed.scheme.startswith("http"):
+        if not host or parsed.scheme not in ("http", "https"):
             return False
-        if host in ("localhost", "0.0.0.0", "[::]", "[::1]"):
+        if host in ("0.0.0.0",) or any(host.startswith(p) for p in _PRIVATE_IP_PREFIXES):
             return False
-        if any(host.startswith(p) for p in _PRIVATE_IP_PREFIXES):
-            return False
-        return True
+        return not is_private_host(host, resolve=resolve)
     except Exception:
         return False
+
+
+_secret_cache: dict = {"key": None, "values": ()}
+
+
+def _secret_values() -> tuple[str, ...]:
+    """The account password, the 2Captcha key and LLM API keys (re-read when the settings files change)."""
+    try:
+        from core.config import get_data_dir as _dd
+    except ImportError:
+        from backend.core.config import get_data_dir as _dd
+    files = [_dd() / "settings.json", _dd() / "llm_settings.json"]
+    key = tuple((f.stat().st_mtime_ns if f.exists() else 0) for f in files)
+    if _secret_cache["key"] != key:
+        values = set()
+        for f in files:
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            stack = [data]
+            while stack:
+                item = stack.pop()
+                if isinstance(item, dict):
+                    for k, v in item.items():
+                        if isinstance(v, (dict, list)):
+                            stack.append(v)
+                        elif isinstance(v, str) and len(v) >= 6 and re.search(r"password|api_key|key$|token|secret", k, re.I):
+                            values.add(v)
+                elif isinstance(item, list):
+                    stack.extend(item)
+        _secret_cache.update(key=key, values=tuple(sorted(values, key=len, reverse=True)))
+    return _secret_cache["values"]
+
+
+def redact_secrets(text):
+    """`text` with the configured password, 2Captcha key and API keys replaced by ***."""
+    if not text or not isinstance(text, str):
+        return text
+    try:
+        for value in _secret_values():
+            if value in text:
+                text = text.replace(value, "***")
+    except Exception:
+        pass
+    return text
+
+
+def safe_folder_name(name: str) -> str:
+    """A folder name Windows accepts and that stays inside its parent: no separators, no '..'."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).replace(" ", "_").strip(". ")
+    return cleaned[:80] or "apply"
 
 # ── Singleton memory store ────────────────────────────────────────────────────
 _memory_store: MemoryStore | None = None

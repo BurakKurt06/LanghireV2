@@ -2,7 +2,14 @@
 Python backend for LangHireV2 desktop app.
 Runs as a local FastAPI server (sidecar process launched by Tauri).
 """
+import os as _os
+
+# browser-use sends each run's task (with the resume), the values typed into
+# forms and the pages visited to its analytics service unless this is off.
+_os.environ["ANONYMIZED_TELEMETRY"] = "false"
+_os.environ["BROWSER_USE_CLOUD_SYNC"] = "false"
 import json
+import re
 import signal
 import subprocess
 import sys
@@ -51,7 +58,7 @@ async def lifespan(app: FastAPI):
     data_dir = get_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
     _log.info(f"Data directory: {data_dir}")
-    _log.info(f"Token prefix: {_API_TOKEN[:8]}...")
+    _log.info("API token ready")
     # Clean up orphaned browser processes from previous crash
     _kill_browser_processes()
     # Reset any jobs stuck in "in_progress" from a previous crash
@@ -83,6 +90,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LangHireV2 Backend", version="1.0.0", lifespan=lifespan)
 
+
 # ── Auth token (generated per-session, written to data dir for frontend) ──
 import secrets as _secrets
 import logging
@@ -100,6 +108,25 @@ logging.basicConfig(
         logging.StreamHandler(),
     ],
 )
+
+
+class _RedactSecrets(logging.Filter):
+    """Keep the account password, 2Captcha key and API keys out of every log file."""
+
+    def filter(self, record):
+        try:
+            from core.shared_config import redact_secrets
+            message = record.getMessage()
+            clean = redact_secrets(message)
+            if clean != message:
+                record.msg, record.args = clean, ()
+        except Exception:
+            pass
+        return True
+
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_RedactSecrets())
 # Silence noisy low-level loggers but keep browser_use agent logs visible
 for _noisy in (
     "browser_use.dom", "browser_use.browser.chrome",
@@ -123,7 +150,7 @@ except OSError as e:
     _log.warning(f"Could not set restrictive permissions on token file: {e}")
 # Verify token was written correctly
 _written = _token_path.read_text().strip()
-_log.info(f"Token written to {_token_path} (starts with '{_API_TOKEN[:8]}...', verified: {_written == _API_TOKEN})")
+_log.info(f"Token written to {_token_path} (verified: {_written == _API_TOKEN})")
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -153,16 +180,17 @@ _ALLOWED_ORIGINS = {"http://localhost:1420", "tauri://localhost", "http://tauri.
 class _AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         _log.info(f"REQ {request.method} {request.url.path} origin='{request.headers.get('Origin', '')}' auth={'yes' if request.headers.get('Authorization') else 'no'}")
-        if request.url.path in ("/health", "/chromium/status"):
-            return await call_next(request)
         origin = request.headers.get("Origin", "")
         if origin and origin not in _ALLOWED_ORIGINS:
+            # Before the token-free paths too: no web page can see the app is installed.
             _log.warning(f"403 blocked origin: '{origin}' not in {_ALLOWED_ORIGINS}")
             return JSONResponse({"error": "forbidden"}, status_code=403)
+        if request.url.path in ("/health", "/chromium/status"):
+            return await call_next(request)
         auth_header = request.headers.get("Authorization", "")
         token = auth_header.removeprefix("Bearer ").strip()
         if token != _API_TOKEN:
-            _log.warning(f"401 {request.method} {request.url.path} | got '{token[:8]}...' expected '{_API_TOKEN[:8]}...'")
+            _log.warning(f"401 {request.method} {request.url.path}")
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if any(request.url.path.startswith(p) for p in _rate_limited_prefixes):
             if not _rate_limiter.is_allowed(request.url.path):
@@ -174,7 +202,7 @@ app.add_middleware(_AuthMiddleware)
 # Allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(_ALLOWED_ORIGINS),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -720,6 +748,8 @@ class _LogCapture(io.StringIO):
 
     def write(self, s):
         import re as _re
+        from core.shared_config import redact_secrets
+        s = redact_secrets(s)
         for line in s.splitlines():
             line = self._ansi_re.sub("", line).strip()
             if line:
@@ -2410,10 +2440,15 @@ async def get_tailored_by_url(body: dict):
     return {"success": True, "content": result["content"], "path": result["path"]}
 
 
+_URL_HASH = re.compile(r"[0-9a-f]{12}")
+
+
 @app.get("/resume/tailor/{url_hash}")
 async def get_tailored_resume(url_hash: str):
     """Get tailored resume content by URL hash."""
     from resume.tailor import _get_tailored_dir
+    if not _URL_HASH.fullmatch(url_hash):  # never a path: ..\..\Desktop\notes
+        return _api_error("not_found", "No tailored resume found", 404)
     md_path = _get_tailored_dir() / f"{url_hash}.md"
     pdf_path = _get_tailored_dir() / f"{url_hash}.pdf"
     if not md_path.exists():
@@ -2429,6 +2464,8 @@ async def get_tailored_resume(url_hash: str):
 async def delete_tailored(url_hash: str):
     """Delete a tailored resume."""
     from resume.tailor import _get_tailored_dir
+    if not _URL_HASH.fullmatch(url_hash):
+        return _api_error("not_found", "No tailored resume found", 404)
     md_path = _get_tailored_dir() / f"{url_hash}.md"
     pdf_path = _get_tailored_dir() / f"{url_hash}.pdf"
     if md_path.exists():

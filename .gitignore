@@ -86,3 +86,6 @@ node_modules/.tmp/
 
 # Cover letters written during applications (personal data)
 cover_letters/
+
+# Local working notes (may mention real applications)
+TODO.md

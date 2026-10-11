@@ -447,10 +447,12 @@ def _solve_sync(api_key: str, challenge: Challenge) -> str:
     elif challenge.type == IMAGE_CAPTCHA:
         # The detector hands back the <img> src, which is either a data: URI or
         # a normal URL. 2Captcha wants raw base64 for the former.
+        # Only an image already in the page: the solver library would download
+        # a URL itself (any address) or upload a local file named by the page.
         src = challenge.image_b64
-        if src.startswith("data:"):
-            src = src.split(",", 1)[-1]
-        res = solver.normal(src)
+        if not src.startswith("data:image/"):
+            raise ValueError("the CAPTCHA image isn't embedded in the page")
+        res = solver.normal(src.split(",", 1)[-1])
     else:
         raise ValueError(f"unsupported challenge type: {challenge.type}")
     return (res or {}).get("code", "")

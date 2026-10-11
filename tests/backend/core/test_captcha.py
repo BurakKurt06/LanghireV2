@@ -173,7 +173,7 @@ class TestImageCaptchaSource:
         assert captcha._solve_sync(API_KEY, ch) == "AB12"
         assert captured["src"] == "IMGDATA"
 
-    def test_plain_url_is_passed_through(self, monkeypatch):
+    def test_a_plain_url_is_refused(self, monkeypatch):
         captured = {}
 
         class FakeSolver:
@@ -187,9 +187,11 @@ class TestImageCaptchaSource:
         mod.TwoCaptcha = FakeSolver
         monkeypatch.setitem(sys.modules, "twocaptcha", mod)
 
-        ch = Challenge(type=IMAGE_CAPTCHA, image_b64="https://x.test/c.png")
-        assert captcha._solve_sync(API_KEY, ch) == "CD34"
-        assert captured["src"] == "https://x.test/c.png"
+        # The solver library would fetch any address (or upload a local file) named by the page.
+        for src in ("https://x.test/c.png", "http://192.168.1.1/c.png", "C:/Users/ada/resume.pdf"):
+            with pytest.raises(ValueError):
+                captcha._solve_sync(API_KEY, Challenge(type=IMAGE_CAPTCHA, image_b64=src))
+        assert captured == {}
 
 
 # ── Solving ─────────────────────────────────────────────────────────────────

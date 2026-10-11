@@ -6,17 +6,6 @@
   "permissions": [
     "core:default",
     "dialog:default",
-    "shell:allow-open",
-    "shell:allow-execute",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "langhirev2-backend",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    }
+    "shell:allow-open"
   ]
 }

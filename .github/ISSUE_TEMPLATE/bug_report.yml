@@ -71,7 +71,7 @@ body:
     id: logs
     attributes:
       label: Relevant Logs
-      description: Paste any error messages or log output
+      description: Paste any error messages or log output. Remove personal details first (your name, email, phone, address, employers, passwords or API keys).
       render: shell
 
   - type: textarea

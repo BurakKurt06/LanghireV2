@@ -18,7 +18,6 @@ from __future__ import annotations
 import html
 import json
 import re
-import socket
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -302,30 +301,13 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
                    description=description[:DESCRIPTION_LIMIT])
 
 
-def _private_address(host: str) -> bool:
-    """True when the host resolves to this computer, the local network or another non-public address."""
-    import ipaddress
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except (OSError, UnicodeError):
-        return False  # unresolvable: the request fails by itself
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0].split("%")[0])
-        except ValueError:
-            continue
-        if not ip.is_global or ip.is_multicast:
-            return True
-    return False
-
-
 def _public_only(request: httpx.Request) -> None:
     """Refuse requests to this computer or the local network, redirects included."""
     try:
         from core.shared_config import validate_job_url
     except ImportError:  # pragma: no cover
         from backend.core.shared_config import validate_job_url
-    if not validate_job_url(str(request.url)) or _private_address(request.url.host):
+    if not validate_job_url(str(request.url)):
         raise httpx.InvalidURL(f"not a public web address: {request.url.host}")
 
 

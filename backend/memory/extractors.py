@@ -199,9 +199,12 @@ def store_learnings(
     reinforced_count = 0
 
     for learning in learnings:
+        # The domain is the job's own: a page can't file a "tip" under another site.
+        if re.search(r"https?://|www\.|<secret|@@", learning["content"], re.I):
+            continue  # a tip with a link or a secret tag isn't a UI tip
         is_new = store.add(
             content=learning["content"],
-            website_domain=learning.get("domain", domain),
+            website_domain=domain,
             category=learning.get("category", "form_strategy"),
             success=success,
             confidence=0.85 if success else 0.5,

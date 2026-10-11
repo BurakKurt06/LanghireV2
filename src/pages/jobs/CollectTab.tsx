@@ -162,7 +162,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
         setCollecting(true);
         setCollectLog([t("collector.startingCollection")]);
         trackEvent("collection_started", {
-          title: collectTitle || "all",
+          has_title: Boolean(collectTitle),
           max_jobs: collectMaxJobs || "unlimited",
           source: collectSources.join(","),
         });

@@ -128,7 +128,7 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
         .then((s) => {
           if (active) {
             if (!s.running) {
-              trackEvent("apply_completed", { error: s.error || null });
+              trackEvent("apply_completed", { failed: Boolean(s.error) });
               loadAppliedJobs();
               onJobsChanged();
             }

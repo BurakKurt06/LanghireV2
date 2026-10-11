@@ -12,6 +12,7 @@ the Codex CLI's own login.
 import base64
 import hashlib
 import json
+import os
 import secrets
 import threading
 import time
@@ -85,6 +86,10 @@ def _save(tokens: dict, previous: dict | None = None) -> dict:
     data.update({k: v for k, v in _account(data).items() if v})
     path = _auth_file()
     path.write_text(json.dumps(data), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)  # sign-in tokens: this user only (no effect on Windows ACLs)
+    except OSError:
+        pass
     return data
 
 

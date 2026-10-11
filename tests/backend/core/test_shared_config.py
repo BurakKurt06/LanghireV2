@@ -50,11 +50,33 @@ def test_validate_job_url_rejects_private_or_invalid(url):
     assert sc.validate_job_url(url) is False
 
 
-def test_validate_job_url_ipv6_loopback_known_gap():
-    """Document a source gap: bracketed IPv6 literals in the denylist never
-    match what urlparse yields (it strips the brackets), so ``https://[::1]``
-    is currently *accepted*. Pinned here so a future fix flips this test."""
-    assert sc.validate_job_url("https://[::1]/x") is True
+@pytest.mark.parametrize("url", [
+    "https://[::1]/x", "http://[::ffff:127.0.0.1]/", "http://[fd00::1]/", "http://2130706433/",
+    "http://127.1/", "http://169.254.169.254/latest", "http://app.localhost/",
+])
+def test_validate_job_url_refuses_every_form_of_a_local_address(url):
+    assert sc.validate_job_url(url, resolve=False) is False
+
+
+def test_validate_job_url_refuses_names_that_resolve_to_the_local_network(monkeypatch):
+    import socket
+    addresses = {"jobs.example.com": "93.184.216.34", "router.example.com": "192.168.1.1"}
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, port: [(2, 1, 6, "", (addresses[host], 0))])
+    assert sc.validate_job_url("https://jobs.example.com/1") is True
+    assert sc.validate_job_url("http://router.example.com/") is False
+
+
+def test_secrets_are_redacted(tmp_path, monkeypatch):
+    import json
+    monkeypatch.setattr(sc, "_secret_cache", {"key": None, "values": ()})
+    (tmp_path / "settings.json").write_text(json.dumps(
+        {"sensitive_data": {"email": "ada@example.com", "password": "Hunter2-Secret!"}, "captcha_api_key": "abcdef123456"}))
+    (tmp_path / "llm_settings.json").write_text(json.dumps({"openai": {"api_key": "sk-test-000111"}}))
+    import core.config as cfg
+    monkeypatch.setattr(cfg, "get_data_dir", lambda: tmp_path)
+    text = "used Hunter2-Secret! with key abcdef123456 and sk-test-000111 for ada@example.com"
+    assert sc.redact_secrets(text) == "used *** with key *** and *** for ada@example.com"
+    assert sc.redact_secrets(None) is None
 
 
 # ── normalize_question ───────────────────────────────────────────────────────
@@ -595,3 +617,11 @@ def test_a_field_the_user_typed_is_kept_and_the_other_filled_in(jobs_paths):
     sc.set_job_names(url, "Agent Title", "Acme Labs")
     job = sc.read_jobs()[url]
     assert job["title"] == "My Title" and job["company"] == "Acme Labs"
+
+
+def test_browser_use_telemetry_is_off():
+    import os
+    import core  # noqa: F401  (the package switches it off on import)
+    from browser_use.telemetry.service import ProductTelemetry
+    assert os.environ["ANONYMIZED_TELEMETRY"] == "false"
+    assert ProductTelemetry()._posthog_client is None
