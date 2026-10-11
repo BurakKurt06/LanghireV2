@@ -78,7 +78,21 @@ ATS_DOMAINS: dict[str, str] = {
     "darwinbox.com":         "darwinbox",
     "freshteam.com":         "freshteam",
     "jobadder.com":          "jobadder",
+    # Enterprise application sites
+    "myworkdaysite.com":     "workday",
+    "oraclecloud.com":       "oracle",
+    "csod.com":              "cornerstone",
+    "sapsf.com":             "successfactors",
+    "sapsf.eu":              "successfactors",
+    "successfactors.eu":     "successfactors",
+    "ukg.com":               "ultipro",
+    "workable.com":          "workable",
+    "eightfold.ai":          "eightfold",
+    "avature.net":           "avature",
+    "brassring.com":         "brassring",
 }
+# Job boards and aggregators (listings, not the employer's application form).
+JOB_BOARDS = {"linkedin", "indeed", "ziprecruiter", "glassdoor", "seek", "naukri", "reed", "stepstone"}
 
 # ── Domain normalization rules ────────────────────────────────────────────────
 # Maps company-specific subdomains to their shared ATS platform domain.

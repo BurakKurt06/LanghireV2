@@ -1039,6 +1039,18 @@ class TestApplyReview:
             auth_client.post("/apply/start", json={"mode": "all"})
         assert main._apply_status["running"] is False
 
+    def test_a_run_whose_thread_doesnt_start_releases_the_claim(self, auth_client, monkeypatch):
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
+
+        def no_thread(make_coro, status):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(main, "_run_async_in_thread", no_thread)
+        main._apply_status["running"] = False
+        with pytest.raises(RuntimeError):
+            auth_client.post("/apply/start", json={"mode": "all"})
+        assert main._apply_status["running"] is False
+
     def test_collection_waits_for_a_gmail_check(self, auth_client, monkeypatch):
         from core import inbox
         killed = []

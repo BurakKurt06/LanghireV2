@@ -18,6 +18,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import socket
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -165,9 +166,8 @@ def tenant(url: str) -> str:
     if "myworkdaysite.com" in host:
         if parts and re.fullmatch(r"[a-z]{2}-[A-Z]{2}", parts[0]):
             parts = parts[1:]  # locale prefix: en-US, en-GB, fr-FR, ...
-        if parts and parts[0] == "recruiting":
-            parts = parts[1:]
-        return parts[0] if parts else ""
+        # /recruiting/<tenant>/...; any other shape names no tenant (never a generic segment).
+        return parts[1] if len(parts) >= 2 and parts[0] == "recruiting" else ""
     if "myworkdayjobs.com" in host or host.endswith(".csod.com"):
         return host.split(".")[0]
     if "greenhouse.io" in host or "lever.co" in host or "ashbyhq.com" in host or "smartrecruiters.com" in host:
@@ -302,13 +302,30 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
                    description=description[:DESCRIPTION_LIMIT])
 
 
+def _private_address(host: str) -> bool:
+    """True when the host resolves to this computer, the local network or another non-public address."""
+    import ipaddress
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
+        return False  # unresolvable: the request fails by itself
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            continue
+        if not ip.is_global or ip.is_multicast:
+            return True
+    return False
+
+
 def _public_only(request: httpx.Request) -> None:
     """Refuse requests to this computer or the local network, redirects included."""
     try:
         from core.shared_config import validate_job_url
     except ImportError:  # pragma: no cover
         from backend.core.shared_config import validate_job_url
-    if not validate_job_url(str(request.url)):
+    if not validate_job_url(str(request.url)) or _private_address(request.url.host):
         raise httpx.InvalidURL(f"not a public web address: {request.url.host}")
 
 

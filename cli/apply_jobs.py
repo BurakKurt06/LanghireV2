@@ -39,7 +39,7 @@ try:
         build_memory_context, extract_from_history, normalize_question,
         read_jobs, claim_job, update_job, get_memory_store,
     )
-    from memory import extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
+    from memory import ATS_DOMAINS, JOB_BOARDS, extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
     from memory.metrics import MetricsStore
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import core.captcha as _captcha
@@ -54,7 +54,7 @@ except ImportError:
         build_memory_context, extract_from_history, normalize_question,
         read_jobs, claim_job, update_job, get_memory_store,
     )
-    from backend.memory import extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
+    from backend.memory import ATS_DOMAINS, JOB_BOARDS, extract_learnings_from_markers, extract_learnings_via_llm, store_learnings
     from backend.memory.metrics import MetricsStore
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import backend.core.captcha as _captcha
@@ -182,8 +182,24 @@ _captcha_blocked: dict[str, str] = {}
 _busy_sites: dict[int, str] = {}
 
 
+COVER_LETTER_DAYS = 30
+
+
+def _remove_old_cover_letters(days: int = COVER_LETTER_DAYS) -> None:
+    """Cover-letter PDFs are only needed while their application runs; keep a month of them."""
+    import time
+    cutoff = time.time() - days * 86400
+    for pdf in (LOGS_DIR.parent / "cover_letters").glob("*.pdf"):
+        try:
+            if pdf.stat().st_mtime < cutoff:
+                pdf.unlink()
+        except OSError:
+            pass
+
+
 def new_run() -> None:
     """Forget the previous run's per-site state (called when a run starts)."""
+    _remove_old_cover_letters()
     _captcha_blocked.clear()
     _busy_sites.clear()
     _skip_requested.clear()
@@ -575,7 +591,10 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
             changed = await asyncio.to_thread(config.set_job_names, url, params.role, params.company, "agent")
             if changed:
                 print(f"  🏷️  [W{worker_id}] Named: {params.role} at {params.company}")
-            _current.get(worker_id, {}).update(title=params.role or title, company=params.company or company)
+            typed = saved.get("user_named") or []
+            _current.get(worker_id, {}).update(
+                title=title if "title" in typed else (params.role or title),
+                company=company if "company" in typed else (params.company or company))
             return ActionResult(extracted_content="Noted.")
 
     if cover_letter_boxes_on():
@@ -758,39 +777,41 @@ PAGE_WAIT_SECONDS = 10
 _PAGE_TEXT_JS = "() => ((document.body && document.body.innerText) || '').trim().length"
 
 
-# Application sites that ask for the location (Oracle's careers pages, for one);
-# the agent can't click the browser's own Allow popup. Any other page keeps the
-# browser's normal behaviour.
-LOCATION_SITES = (
-    "myworkdayjobs.com", "myworkdaysite.com", "oraclecloud.com", "greenhouse.io", "lever.co", "ashbyhq.com",
-    "icims.com", "smartrecruiters.com", "successfactors.com", "successfactors.eu", "sapsf.com", "sapsf.eu",
-    "csod.com", "taleo.net", "jobvite.com", "workable.com", "bamboohr.com", "paylocity.com", "adp.com",
-    "ultipro.com", "ukg.com", "eightfold.ai", "avature.net", "brassring.com",
-)
+# Employer application sites (Oracle's careers pages, for one) ask for the
+# location, and the agent can't click the browser's own Allow popup. Job boards
+# and every other page keep the browser's normal behaviour.
+LOCATION_SITES = tuple(host for host, platform in ATS_DOMAINS.items() if platform not in JOB_BOARDS)
 
 
-def location_origin(url: str, job_url: str = "") -> str:
-    """The origin to let read the location ("" for none): the job's own site or a known application site."""
+def location_origin(url: str) -> str:
+    """The origin to let read the location ("" for none): known application sites only."""
     from urllib.parse import urlparse
     parsed = urlparse(url or "")
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in ("http", "https") or not host:
         return ""
-    job_host = (urlparse(job_url or "").hostname or "").lower()
-    if host != job_host and not any(host == s or host.endswith("." + s) for s in LOCATION_SITES):
+    if not any(host == s or host.endswith("." + s) for s in LOCATION_SITES):
         return ""
-    return f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    default = 443 if parsed.scheme == "https" else 80
+    return f"{parsed.scheme}://{host}" + (f":{port}" if port and port != default else "")
 
 
-# id(browser session) -> origins already granted (dropped when the job ends).
-_location_granted: dict[int, set[str]] = {}
+# id(browser session) -> (the session, origins already granted); dropped when the
+# job ends. Holding the session keeps its id from being reused while listed.
+_location_granted: dict[int, tuple[object, set[str]]] = {}
 
 
-async def allow_location(browser_session, url: str, job_url: str = "") -> None:
-    """Grant the location to this page's site if it's the job's own or an application site (once per site)."""
-    origin = location_origin(url, job_url)
-    granted = _location_granted.setdefault(id(browser_session), set())
-    if not origin or origin in granted:
+async def allow_location(browser_session, url: str) -> None:
+    """Grant the location to this page's site if it's an employer application site (once per site)."""
+    origin = location_origin(url)
+    if not origin:
+        return
+    granted = _location_granted.setdefault(id(browser_session), (browser_session, set()))[1]
+    if origin in granted:
         return
     try:
         await browser_session.cdp_client.send.Browser.setPermission(
@@ -804,8 +825,7 @@ async def before_step(agent) -> None:
     """Before each AI step: let a blank page finish loading, then tick a simple
     "I'm not a robot" check, so the AI doesn't spend a request on either."""
     try:
-        await allow_location(agent.browser_session, await agent.browser_session.get_current_page_url(),
-                             getattr(agent, "_langhire_url", ""))
+        await allow_location(agent.browser_session, await agent.browser_session.get_current_page_url())
     except Exception:
         pass
     await wait_for_page_content(agent)
@@ -1252,12 +1272,7 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         chromium_sandbox=(sys.platform != "linux"),
         **config.build_browser_kwargs(worker=worker_id),
     )
-    await config.maybe_apply_stealth(browser)
-    try:
-        await browser.start()  # no-op when already started
-        await allow_location(browser, url, url)
-    except Exception:
-        pass
+    # (started inside the try below, whose finally always closes it)
     mem_store = get_memory_store()
     # Count memories injected for metrics tracking
     domain = mem_store.extract_domain(url)
@@ -1536,6 +1551,12 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
         agent.pause()
 
     try:
+        await config.maybe_apply_stealth(browser)
+        try:
+            await browser.start()  # no-op when stealth already started it
+            await allow_location(browser, url)  # before the posting's first page loads
+        except Exception:
+            pass
         result = await agent.run(max_steps=MAX_STEPS, on_step_start=before_step)
 
         if url in _skip_requested:

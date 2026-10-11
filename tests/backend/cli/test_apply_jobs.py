@@ -951,13 +951,18 @@ def test_saved_answers_stay_keyed_by_the_bare_host(run):
     ("https://fa-abcd-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/ppcu/job/1/apply/email",
      "https://fa-abcd-saasfaprod1.fa.ocs.oraclecloud.com"),
     ("https://acme.wd5.myworkdayjobs.com/en-US/careers/job/1", "https://acme.wd5.myworkdayjobs.com"),
-    ("https://careers.acme.com/jobs/1", "https://careers.acme.com"),  # the job's own site
+    ("https://acme.wd5.myworkdayjobs.com:443/en-US/careers/job/1", "https://acme.wd5.myworkdayjobs.com"),
+    ("https://user:secret@acme.wd5.myworkdayjobs.com/x", "https://acme.wd5.myworkdayjobs.com"),
+    ("https://boards.greenhouse.io:8443/acme/jobs/1", "https://boards.greenhouse.io:8443"),
+    ("https://careers.acme.com/jobs/1", ""),             # the company's own site: browser default
+    ("https://www.linkedin.com/jobs/view/123", ""),      # a job board
+    ("https://www.indeed.com/viewjob?jk=1", ""),
     ("https://ads.example.net/track", ""),
     ("https://evilmyworkdayjobs.com/x", ""),
     ("about:blank", ""),
 ])
-def test_location_goes_to_the_job_and_application_sites_only(url, origin):
-    assert apply_jobs.location_origin(url, "https://careers.acme.com/jobs/1") == origin
+def test_location_goes_to_employer_application_sites_only(url, origin):
+    assert apply_jobs.location_origin(url) == origin
 
 
 def test_location_is_granted_once_per_site():
@@ -969,7 +974,37 @@ def test_location_is_granted_once_per_site():
 
     session = SimpleNamespace(cdp_client=SimpleNamespace(send=SimpleNamespace(Browser=Send())))
     for _ in range(2):
-        asyncio.run(apply_jobs.allow_location(session, "https://acme.wd5.myworkdayjobs.com/a", ""))
-    asyncio.run(apply_jobs.allow_location(session, "https://ads.example.net/", ""))
+        asyncio.run(apply_jobs.allow_location(session, "https://acme.wd5.myworkdayjobs.com/a"))
+    asyncio.run(apply_jobs.allow_location(session, "https://ads.example.net/"))
     assert calls == [{"permission": {"name": "geolocation"}, "setting": "granted",
                       "origin": "https://acme.wd5.myworkdayjobs.com"}]
+    apply_jobs._location_granted.pop(id(session), None)
+
+
+def test_old_cover_letters_are_removed_when_a_run_starts(tmp_path, monkeypatch):
+    import os
+    import time
+    monkeypatch.setattr(apply_jobs, "LOGS_DIR", tmp_path / "logs")
+    folder = tmp_path / "cover_letters"
+    folder.mkdir()
+    old, recent = folder / "old.pdf", folder / "recent.pdf"
+    old.write_bytes(b"%PDF")
+    recent.write_bytes(b"%PDF")
+    month_ago = time.time() - 31 * 86400
+    os.utime(old, (month_ago, month_ago))
+    apply_jobs.new_run()
+    assert not old.exists() and recent.exists()
+
+
+def test_the_browser_starts_inside_the_try_that_closes_it(run, monkeypatch):
+    events = []
+
+    async def stealth(browser):
+        events.append("stealth")
+        return False
+
+    monkeypatch.setattr(apply_jobs.config, "maybe_apply_stealth", stealth)
+    monkeypatch.setattr(apply_jobs, "build_tools", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("jobs.json locked")))
+    with pytest.raises(RuntimeError):
+        run()
+    assert events == []  # setup failed before the browser was ever started

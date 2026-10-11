@@ -13,7 +13,7 @@ Usage:
     context = store.format_for_prompt(memories)
 """
 
-from .store import MemoryStore, CATEGORIES, ATS_DOMAINS
+from .store import MemoryStore, CATEGORIES, ATS_DOMAINS, JOB_BOARDS
 from .extractors import (
     extract_learnings_from_markers,
     extract_learnings_via_llm,
@@ -24,6 +24,7 @@ __all__ = [
     "MemoryStore",
     "CATEGORIES",
     "ATS_DOMAINS",
+    "JOB_BOARDS",
     "extract_learnings_from_markers",
     "extract_learnings_via_llm",
     "store_learnings",

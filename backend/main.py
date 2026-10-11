@@ -1034,7 +1034,11 @@ async def start_collection(body: CollectRequest):
     def make_coro():
         return _do_collect()
 
-    _collection_thread = _run_async_in_thread(make_coro, _collection_status)
+    try:
+        _collection_thread = _run_async_in_thread(make_coro, _collection_status)
+    except Exception:
+        _collection_status["running"] = False  # the thread would have reset it
+        raise
     return {"success": True, "message": f"Collection started for {title or 'all titles'}"}
 
 
@@ -1216,7 +1220,11 @@ async def start_applying(body: ApplyRequest):
     def make_coro():
         return _do_apply()
 
-    _apply_thread = _run_async_in_thread(make_coro, _apply_status)
+    try:
+        _apply_thread = _run_async_in_thread(make_coro, _apply_status)
+    except Exception:
+        _apply_status["running"] = False  # the thread would have reset it
+        raise
     return {"success": True, "message": f"Started {mode} apply with {workers} worker(s)"}
 
 

@@ -184,19 +184,26 @@ def test_fetch_never_reads_this_computer_or_the_home_network(url):
 
 
 @pytest.mark.real_posting_fetch
-def test_a_redirect_to_the_home_network_is_refused():
+def test_a_redirect_to_the_home_network_is_refused(monkeypatch):
     import httpx
     request = httpx.Request("GET", "http://192.168.1.1/")
     with pytest.raises(httpx.InvalidURL):
         job_page._public_only(request)
+    addresses = {"jobs.example.com": "93.184.216.34", "router.example.com": "192.168.1.1",
+                 "127.0.0.1.nip.io": "127.0.0.1"}
+    monkeypatch.setattr(job_page.socket, "getaddrinfo",
+                        lambda host, port: [(2, 1, 6, "", (addresses[host], 0))])
     job_page._public_only(httpx.Request("GET", "https://jobs.example.com/1"))  # a public address passes
+    for host in ("router.example.com", "127.0.0.1.nip.io"):  # public-looking names for private addresses
+        with pytest.raises(httpx.InvalidURL):
+            job_page._public_only(httpx.Request("GET", f"http://{host}/"))
 
 
 @pytest.mark.parametrize("url, tenant", [
     ("https://wd3.myworkdaysite.com/recruiting/acme/External/job/1", "acme"),
     ("https://wd3.myworkdaysite.com/en-US/recruiting/acme/External/job/1", "acme"),
     ("https://wd3.myworkdaysite.com/en-GB/recruiting/globex/Careers/job/1", "globex"),
-    ("https://wd3.myworkdaysite.com/fr-FR/initech/job/1", "initech"),
+    ("https://wd3.myworkdaysite.com/fr-FR/careers/job/1", ""),  # no /recruiting/<tenant>: no guess
 ])
 def test_workday_hosted_sites_have_a_tenant_in_any_locale(url, tenant):
     assert job_page.tenant(url) == tenant
