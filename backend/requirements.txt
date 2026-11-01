@@ -1080,7 +1080,7 @@ referencing==0.37.0
     #   jsonschema-specifications
 regex==2026.9.10
     # via tiktoken
-reportlab==4.4.9
+reportlab==5.1.0
     # via browser-use
 requests==2.33.0
     # via
