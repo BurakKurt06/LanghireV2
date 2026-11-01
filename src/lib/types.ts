@@ -63,6 +63,8 @@ export interface CandidateProfile {
   screening?: ScreeningAnswers;
   /** Where to apply: jobs outside the radius around the ZIP are skipped (remote always counts). */
   search_area?: SearchArea;
+  /** What to collect: the Collect page starts from these. */
+  job_search?: JobSearchPrefs;
 }
 
 export interface SearchArea {
@@ -199,16 +201,30 @@ export interface Job {
   search_title?: string;
   collected_at?: string;
   applied_at?: string;
+  submit_attempted_at?: string | null;
+  submission_evidence?: { kind: "user_confirmed" | "unverified_page"; confirmed_at?: string; observed_at?: string } | null;
   error?: string;
   description?: string;
   tailored_resume_path?: string;
   /** The user's note for the agent, used on the next attempt. */
   user_note?: string;
-  /** When a training run last filled this job in (without submitting). */
+  /** When a trial run last filled this job in and was skipped at the final review (not submitted). */
   practised_at?: string;
   /** From the Inbox page's Gmail check: what the employer's latest email said. */
   inbox_status?: string;
   inbox_subject?: string;
+  /** What the collector read: pay (with a yearly estimate), job type, work arrangement. */
+  pay?: JobPay | null;
+  job_types?: JobType[];
+  work_mode?: WorkMode;
+  /** Source-based collection fit; historical entries may contain an AI score. */
+  match?: number;
+  match_reason?: string;
+  match_source?: "source_rules" | "ai_relevance";
+  /** Original AI relevance, retained alongside historical source-rule scores. */
+  model_match?: number;
+  model_reason?: string;
+  posted_at?: string;
 }
 
 // ── Resume Tailoring ─────────────────────────────────────────────────────
@@ -235,6 +251,8 @@ export interface PluginFilter {
   options: { value: string; label: string }[];
   url_param: string;
   default: string;
+  /** Set by the shared Job search preferences, so not offered again as a board filter. */
+  shared?: boolean;
 }
 
 export interface PluginConfig {
@@ -250,6 +268,78 @@ export interface PluginConfig {
   is_builtin: boolean;
   enabled: boolean;
   filters: PluginFilter[];
+  /** Quick collection can read this board's results pages; otherwise one job at a time. */
+  quick?: boolean;
+  /** Job search preferences this board applies in its own search. */
+  shared_filters?: string[];
+}
+
+// ── Job search (Profile → Job search; changeable per collection) ─────────
+export type JobType = "full_time" | "part_time" | "contract" | "temporary" | "internship";
+export type WorkMode = "remote" | "hybrid" | "onsite";
+export type ExperienceLevel = "internship" | "entry" | "associate" | "mid" | "senior" | "director";
+export type PayPeriod = "hour" | "day" | "week" | "month" | "year";
+export type CollectMode = "quick" | "detailed";
+
+export interface JobSearchPrefs {
+  mode: CollectMode;
+  job_types: JobType[];
+  work_modes: WorkMode[];
+  experience: ExperienceLevel[];
+  /** Days; 0 = any time. */
+  posted_within: 0 | 1 | 3 | 7 | 14 | 30;
+  /** amount 0 = no minimum; currency defaults to the salary currency in Profile. */
+  min_pay: { amount: number; period: PayPeriod; currency?: string };
+  /** Hours a week used to estimate yearly pay for part-time hourly jobs. */
+  part_time_hours: number;
+  /** 0 = every match score. */
+  min_match: number;
+  notes: string;
+  exclude_companies: string[];
+  exclude_title_words: string[];
+  dealbreakers: string[];
+  skip_staffing_agencies: boolean;
+  /** 0 = off. */
+  company_cooldown_days: number;
+}
+
+export interface JobPay {
+  low: number;
+  high: number;
+  currency: string;
+  period: PayPeriod;
+  text: string;
+  hours: number;
+  yearly_low: number;
+  yearly_high: number;
+  /** Converted from hourly/monthly pay, or the period was inferred. */
+  estimated: boolean;
+  period_inferred?: boolean;
+  source_estimate?: boolean;
+}
+
+export interface SavedSearch {
+  id: string;
+  name: string;
+  title: string;
+  sources: string[];
+  filters: Record<string, string>;
+  max_jobs: number;
+  search: JobSearchPrefs;
+}
+
+export interface FilteredJob {
+  url: string;
+  title: string;
+  company: string;
+  location?: string;
+  source?: string;
+  search_title?: string;
+  kind: string;
+  reason: string;
+  pay?: JobPay | null;
+  match?: number | null;
+  filtered_at?: string;
 }
 
 // ── Country Config ───────────────────────────────────────────────────────
@@ -351,6 +441,7 @@ export interface HealthResponse {
 // ── Status Responses ─────────────────────────────────────────────────────
 export interface CollectionStatus {
   running: boolean;
+  login_window_open?: boolean;
   title: string | null;
   log: string[];
   collected: number;
@@ -405,17 +496,35 @@ export interface ApplyStatus {
   paused?: boolean;
   /** Applications filled in and waiting for the user's approval to submit. */
   reviews?: PendingReview[];
+  requests?: BrowserRequestReview[];
   /** Trial-run applications stuck and waiting for the user's help. */
   help?: HelpRequest[];
   /** The job each worker is on right now. */
   current?: CurrentJob[];
-  /** "auto" | "trial" | "training" while running. */
+  /** "auto" | "trial" while running. */
   run_mode?: string | null;
   mode: string | null;
   workers: number;
   log: string[];
   error: string | null;
   finished_at: string | null;
+}
+
+export interface BrowserRequestReview {
+  id: string;
+  job_url: string;
+  title: string;
+  company: string;
+  mode: string;
+  kind: "credentials";
+  origin: string;
+  tenant?: string;
+  url: string;
+  method: string;
+  body: string;
+  has_body?: boolean;
+  files?: { name: string; bytes: number; sha256: string }[];
+  description: string;
 }
 
 // closed: the posting was taken down. needs_you: a step only the user can do (a "confirm you're human" box).

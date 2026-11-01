@@ -50,15 +50,17 @@ On first launch the app downloads Chromium (~150 MB) automatically.
 2. **Resume** — Settings → Resume, a PDF path.
 3. **Profile** — name, contact details, work authorization, target job titles
    and locations. Collection uses the target titles as its search terms.
-4. **Logins** — LinkedIn and Gmail have buttons in the app; log in there before
-   a run. Other sites (Handshake, Intern Insider, …) are signed into in the
-   agent's window: when a sign-in page appears the agent waits for you, up to
-   2 minutes, then stops that run with a "sign-in required" message. Nothing
-   checks logins up front, because every check is a paid LLM request.
+4. **Logins** — Select your boards in Jobs → Collector, then use their **Sign in**
+   buttons before collecting. All ten built-in boards open a normal browser window
+   for password login, SSO or verification. Close that window when finished; the
+   collector reuses its saved session in the same app-selected browser profile.
+   If a session expires, sign in again here and retry. Gmail's separate button is
+   in Settings → Accounts. Sign-in and automation never use the profile at the
+   same time. Imported plugins cannot launch unrestricted sign-in windows.
 
-Gmail matters beyond email: when a site sends a verification code, the agent
-reads it off the Gmail page in its own browser. There is no IMAP or API
-integration. Gmail is only opened when a code is actually needed.
+Gmail verification is read by app code in a separate browser profile. The application
+agent cannot open Gmail; it receives only a checked code or link. Optional Inbox
+checks classify job emails, but those classifications are not verified receipts.
 
 ## Getting jobs in
 
@@ -68,6 +70,53 @@ and counted. Pasted jobs are treated as external applications.
 
 **Collect from job boards** — pick one or more sources and a job title. Each
 title is collected from every selected source in turn.
+
+- **Quick** (default) reads each results page as a whole: job links and listing text
+  come from the page, and one AI request labels and advises on the page's listings
+  (about 25 jobs per request). Links a person couldn't see or click are ignored.
+  ZipRecruiter's results have no job links, so it is always collected one job at a time.
+- **Detailed** has the agent open each job in turn; a job can require several AI steps.
+  Quick also reads nested cross-origin frames and closed shadow roots through Chrome's
+  DOM protocol, checking visibility through ancestor frames and finishing embedded scrolling first.
+- **Glassdoor** ignores a typed place and shows the whole US, so the app asks Glassdoor
+  for its own ID for your first target location ("Toronto, ON" is Ontario, not Ohio).
+  If Glassdoor doesn't know the place, the log says its results may come from anywhere.
+- **Profile → Job search** sets what to look for: job type, work arrangement,
+  experience, posting age, minimum pay, a lowest match score, notes for the AI, and
+  what to leave out (employers, title words, phrases, staffing agencies, employers
+  applied to recently). The Collect page can change any of them for one search, and
+  searches can be saved. Boards take what they can in their own search; every listing
+  is also checked by the app.
+- **Pay** is read from the listing, the posting data or the description, and hourly,
+  weekly or monthly pay gets a yearly estimate (40 hours a week, or your part-time
+  hours). Jobs below your minimum aren't collected. With a minimum set, a job that
+  doesn't list pay needs a higher match: halfway from your bar to 10.
+  Different or missing currency, a guessed pay period and a board salary estimate also count as unknown pay. With that raised bar
+  enabled, a missing match score cannot qualify; check the Left out list.
+- Left-out listings are kept with the reason (Collect → *Left out*), and any of them
+  can be added after all. Review & Apply can sort by match or pay.
+
+Quick normally makes one classifier invocation per nonempty page; a fallback
+can add another. Provider retries and token usage are not a hard budget.
+Collection uses GET/HEAD without bodies. Built-in boards can load documents, runtime chunks,
+images, styles, fonts and GET APIs on configured board/CDN hosts. Other destinations need exact
+declared resources; imported plugins keep the stricter exact-capability policy and network sealing.
+Write methods, upload bodies and beacons are refused without asking. Private addresses, Gmail,
+unguarded connections, workers and WebSockets remain blocked by the broker. Collection reuses an
+existing signed-in session; use the app's separate browser login when that session expires.
+Board API/session headers are scoped to configured read hosts, referrers are removed and only
+startup/server cookie values are forwarded. Automatic board GETs can have server-side effects;
+this compatibility policy is not an assertion that arbitrary scripts cannot send data to their board.
+When a failed bootstrap hides public server-rendered listings, Quick can reload the same search
+with scripts disabled, retaining CSS visibility, clipping and overlay checks.
+
+Automatic match filtering uses AI relevance from your notes, profile and desired role, including
+related titles such as BI Analyst for Data Analyst. Explicit exclusions, source facts and pay
+comparisons are checked separately. Without stated/comparable pay, a minimum-pay search raises
+the required match halfway from your match threshold to10. AI relevance is fallible; explicit
+exclusions are the way to enforce requirements without relying on a model. Guessed or estimated pay
+is labelled approximate. Source text and structured posting data remain statements by the publisher,
+not independent proof of employer identity or compensation.
 
 | Source | Availability | Login |
 |---|---|---|
@@ -92,33 +141,48 @@ are appended in code, so no plugin can ship without them.
 | Human-like delays | off | Randomised pause (default 5–15s) between applications, between collection sources, and between worker launches. |
 | Solve CAPTCHAs with 2Captcha | off | Sends CAPTCHAs to 2Captcha, max 2 attempts. Needs your API key. |
 | Account email / password | empty | Used to create and log into accounts on employer sites. Passed to the agent as secret placeholders, never as prompt text. The account email is also used on forms when the Profile email isn't a valid address. |
-| Browser | Automatic (Chrome) | Which installed Chromium browser (Chrome, Edge, Brave, Vivaldi, or a custom path) the agent drives. Each gets its own automation profile. |
+| Browser | Automatic (bundled Chromium) | Which Chromium browser (bundled Chromium, Chrome, Edge, Brave, Vivaldi, or a custom path) the agent drives. Login and automation use the same executable and profile; each explicit browser choice has its own automation profile. |
 | Max failures per job | 8 | Consecutive failed steps before the agent gives up on a job. |
 
-All defaults reproduce the app's behaviour with none of the new features on.
+There are two application modes. **Trial run** (the default) works on the live site:
+login, assets, redirects, uploads, saves and Next run automatically like Full auto.
+The agent stops before pressing the final Submit application control, without approval.
+The site can still send data or submit during an intermediate step or its own scripts;
+Trial does not refuse a request merely because its ATS operation is unknown.
+Completed Trial leaves the job pending for the user to check.
+**Full auto** applies on the live site, final Submit included. Collection keeps its separate policy.
+
+Previously reviewed ATS contracts remain available for explicit protocol diagnostics,
+including Workday, Greenhouse, Lever, Ashby, Workable and Oracle Candidate Experience.
+Those diagnostics are stricter than normal Trial; they do not limit normal login,
+Next or saves. This is not a claim that every employer customization works.
+Within the optional strict diagnostics, recognizing an ATS name alone does not
+authorize its server writes; normal Trial has no such ATS write allowlist.
+Candidate sign-in also supports observed iCIMS email gates and its delegated Auth0
+login/verification forms, Taleo's JSF login, and SAP SuccessFactors' candidate login.
+Candidate preparation also covers Teamtailor's signed file uploads, Breezy's uploads
+and upload-bound résumé parser, Jobvite's resource uploads and Personio's documents.
+BrassRing supports its observed candidate login and metadata-bound non-review
+SaveAndNextPage requests; the strict diagnostic refuses its Submit flag.
+Delegated credentials stay tied to the original employer; social identity providers
+and unreviewed application dispatchers do not inherit those login permissions.
 
 ### CAPTCHA behaviour
 
-A visible challenge (reCAPTCHA v2, hCaptcha, Turnstile, image) that cannot be
-solved ends that application: it is marked **failed** with the reason, and the
-next job starts. Nothing ever waits for you.
-
-reCAPTCHA **v3 / Enterprise is deliberately not treated as blocking** — it is
-invisible and scores the session in the background rather than gating
-submission, and it appears on a large share of ordinary career sites.
-Abandoning on its mere presence would throw away applications that would
-otherwise succeed. It is still solved when the solver is on.
-
-Failed jobs stay in the Pending list with their error and can be re-run.
+Both modes use the configured CAPTCHA handling and scoped email verification. An unsolved
+challenge ends the job for later attention, without a Trial approval wait. A run
+that may already have submitted retains its uncertain outcome and is not retried
+automatically. Invisible reCAPTCHA scores alone are not treated as proof that a
+challenge is blocking the application. The live 2Captcha service remains untested.
 
 ## Building from source
 
-Requires Node 20+, Rust (MSVC toolchain), Visual Studio Build Tools with the
+Requires Node 22.22+ (also supports the website build), Rust (MSVC toolchain), Visual Studio Build Tools with the
 **Desktop development with C++** workload, and `uv`.
 
 ```
-npm install
-uv sync
+npm ci
+uv sync --locked
 powershell -ExecutionPolicy Bypass -File scripts/build-backend.ps1   # sidecar first
 npm run tauri build
 ```
@@ -126,27 +190,62 @@ npm run tauri build
 The sidecar must be built before the Tauri bundle — `tauri.conf.json` declares
 it as an `externalBin` and the build fails without it.
 
-Tests:
+Tests (see TESTING.md for the isolated environment and what the safety net blocks):
 
 ```
 npm run test:coverage
 uv run pytest tests/
 ```
 
-## Known limitations
+## Safety boundaries and remaining limits
 
-- **Handshake and Intern Insider collection is unproven.** Those plugins were
-  written from the sites' public pages; their logged-in layouts were never
-  observed and the navigation steps may need adjusting.
-- **2Captcha has never been run against the live service.** The decision logic
-  is unit-tested against a mocked SDK; no real solve has happened.
-- **Secrets are stored in plaintext.** The account password and the 2Captcha
-  API key live in `%APPDATA%\langhirev2\settings.json` as plain JSON. The code
-  attempts a restrictive `chmod`, which does almost nothing on Windows.
-- **LinkedIn collection costs one request per job.** The LinkedIn plugin reads
-  each job's URL from the address bar after clicking it, so collecting 25 jobs
-  takes 25+ LLM requests; on Gemini's free tier (20 requests/day per model)
-  collect in small batches.
+- **Trial stops the agent's final-submit action.** Login, saves, Next and site requests use
+  the same transport as Full auto, without an approval prompt or an ATS write allowlist.
+  The action guard refuses recognized final controls even after an old approval, and refuses
+  arbitrary agent scripts/unreadable targets that could bypass that check. Site scripts and
+  intermediate steps may send data or submit automatically; this is deliberately allowed.
+  Strict request contracts can be explicitly enabled for protocol diagnostics, but are not
+  the normal application mode. This is not a guarantee that a website can never submit.
+- **Full auto submits on its own.** No questions during the run. A page saying the application
+  was received marks it Applied. Trial never marks an application Applied.
+- **Browser egress is denied.** Application and collection browsers use a deny-all
+  local SOCKS listener, disabled browser DNS/prefetch/QUIC and secured WebRTC
+  preferences. Every request is fetched by the backend through the checked-IP
+  transport and handed to the browser. Private destinations and Gmail stay blocked;
+  one unreachable or refused resource fails on its own. Other
+  processes and arbitrary managed/custom browser policies are outside this
+  boundary; this is not an OS-wide firewall.
+- **Unsupported features stop safely.** Workers, WebSockets and non-HTTP transports
+  are not supported for applications. Ambiguous or unreadable uploads are refused.
+  Uploads must match explicitly available local files. Limits include 25 MB uploads
+  and 15 MB responses. Some employer flows will need manual completion.
+- **Credentials go only to the employer's site.** The job's own site, or its applicant-system
+  tenant, gets account details without a question in either mode; any other site gets nothing.
+  Trial never opens a credential approval prompt.
+  New passwords are scoped to the exact origin and tenant. Reuse of an older
+  saved password remains restricted to its original site; the old vault entry is preserved.
+  Inputs and form destinations must match, and a job's credentials stay pinned to
+  its first approved origin. The earlier shared password remains restricted to
+  the original job origin/tenant.
+- **Uncertain outcomes are never retried blindly.** A run that may have submitted but didn't
+  end on a confirmation page keeps its mark; retrying it requires acknowledging the duplicate risk.
+- **Collection uses the same browser network.** Imported plugins get only their exact configured
+  HTTPS hosts, with no domain-wide wildcard. Description reads use anonymous public
+  HTTP rather than another signed-in browser agent. Console runs require an
+  interactive terminal for approvals; non-interactive runs refuse to proceed.
+- **Dependencies are checked, with explicit exceptions.** The pinned Python and
+  both npm dependency trees have been remediated. Two narrow upstream Rust cases
+  remain documented in `security/dependency-exceptions.json`: an unmaintained
+  hashing crate and an old RNG used only while building, not at runtime. The audit
+  checks active Windows features and rejects new or expired exceptions.
+- **Live services remain unvalidated.** Tests use local pages/listeners, isolated
+  profiles and fake LLM responses. Real employer compatibility, Gmail cookie-copy
+  sign-in, Handshake/Intern Insider layouts and 2Captcha have not been exercised.
+  Do not infer universal compatibility from passing local tests.
+- **Review generated resumes and answers.** Tailoring is optional and creates a
+  separate PDF with its own layout; original styling is not guaranteed. Preview
+  the output. The app cannot guarantee an LLM's semantic correctness or that an
+  employer posting is legitimate; review your answers and approved destinations.
 
 ## Automation and terms of service
 

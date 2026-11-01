@@ -13,6 +13,16 @@ param([switch]$DebugBuild)
 
 $ErrorActionPreference = "Stop"
 
+# "Stop" doesn't apply to native programs (npm, uv, cargo, PyInstaller) in Windows
+# PowerShell: check each one's exit code, so a failed step never ends in
+# "Build complete" next to an old installer.
+function Assert-Exit([string]$Step) {
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "$Step failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+    exit $LASTEXITCODE
+  }
+}
+
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 if (-not $ProjectDir) { $ProjectDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
 Set-Location $ProjectDir
@@ -40,8 +50,10 @@ if (Test-Path "node_modules\.bin\tauri.cmd") {
 # 2. Install dependencies
 Write-Host "Installing JS dependencies..."
 npm install
+Assert-Exit "npm install"
 Write-Host "Syncing Python dependencies..."
 uv sync
+Assert-Exit "uv sync"
 
 if (-not $Tauri) {
   Write-Error "Tauri CLI not found. Run 'npm install' or 'cargo install tauri-cli --version ^2'."
@@ -51,6 +63,7 @@ if (-not $Tauri) {
 # 3. Build the Python backend sidecar
 Write-Host "Building Python backend sidecar..."
 powershell -ExecutionPolicy Bypass -File "$PSScriptRoot\build-backend.ps1"
+Assert-Exit "Backend build"
 
 # 4. Build the Tauri app + installer (also runs `npm run build`)
 Write-Host "Building Tauri app + installer..."
@@ -59,6 +72,7 @@ if ($Tauri -eq "cargo-tauri") {
 } else {
   if ($DebugBuild) { & $Tauri build --debug } else { & $Tauri build }
 }
+Assert-Exit "Tauri build"
 
 # 5. Report artifacts
 $Bundle = if ($DebugBuild) { "src-tauri\target\debug\bundle" } else { "src-tauri\target\release\bundle" }

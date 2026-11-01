@@ -7,6 +7,7 @@ import {
   startApplying,
   getApplyStatus,
   generateCoverLetter,
+  saveJobCoverLetter,
   saveProfile,
   getProfile,
   updateJobStatus,
@@ -49,6 +50,7 @@ vi.mock("../../lib/api", () => ({
   startApplying: vi.fn(),
   getApplyStatus: vi.fn(),
   generateCoverLetter: vi.fn(),
+  saveJobCoverLetter: vi.fn(async () => ({ success: true })),
   saveProfile: vi.fn(),
   getProfile: vi.fn(),
   updateJobStatus: vi.fn(),
@@ -115,7 +117,7 @@ const stats: JobStats = {
 };
 
 describe("PendingTab", () => {
-  let onJobsChanged: ReturnType<typeof vi.fn>;
+  let onJobsChanged: ReturnType<typeof vi.fn<() => void>>;
 
   beforeEach(() => {
     installLocalStorage();
@@ -290,24 +292,51 @@ describe("PendingTab", () => {
     expect(mockSaveJobNote.mock.invocationCallOrder[0]).toBeLessThan(mockStartApplying.mock.invocationCallOrder[0]);
   });
 
-  it("training mode is sent with the apply", async () => {
+  it("saves a failed job's note without starting and supplies it when Retry opens", async () => {
+    mockSaveJobNote.mockResolvedValue({ success: true });
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await user.click(await screen.findByRole("button", { name: "Edit retry note for Frontend Engineer" }));
+    await user.type(screen.getByLabelText("Retry note for Frontend Engineer"), "Choose the saved education option");
+    await user.click(screen.getByRole("button", { name: "Save note" }));
+    await waitFor(() => expect(screen.queryByLabelText("Retry note for Frontend Engineer")).not.toBeInTheDocument());
+    expect(mockSaveJobNote).toHaveBeenCalledWith(failedJob.url, "Choose the saved education option");
+    expect(mockStartApplying).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "jobItem.retry" }));
+    expect(await screen.findByLabelText(/Note for the agent/)).toHaveValue("Choose the saved education option");
+  });
+
+  it("keeps an unsaved retry note visible after a save failure", async () => {
+    mockSaveJobNote.mockRejectedValue(new Error("Disk unavailable"));
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await user.click(await screen.findByRole("button", { name: "Edit retry note for Frontend Engineer" }));
+    await user.type(screen.getByLabelText("Retry note for Frontend Engineer"), "Keep this draft");
+    await user.click(screen.getByRole("button", { name: "Save note" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Disk unavailable");
+    expect(screen.getByLabelText("Retry note for Frontend Engineer")).toHaveValue("Keep this draft");
+    expect(mockStartApplying).not.toHaveBeenCalled();
+  });
+
+  it("a remembered training mode opens as a trial run, the only other mode next to full auto", async () => {
+    localStorage.setItem("langhire_apply_mode", "training");
     const user = userEvent.setup();
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
     await screen.findByText("Backend Engineer");
     await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
-    await user.click(await screen.findByRole("radio", { name: "Training" }));
-    expect(screen.getByText(/never submits, then closes it/)).toBeInTheDocument();
+    expect(await screen.findByRole("radio", { name: "Trial run" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByRole("radio", { name: "Training" })).not.toBeInTheDocument();
+    expect(screen.getByText(/No approval prompts/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Got it, Start" }));
     await waitFor(() =>
-      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "training" })),
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "trial" })),
     );
-    expect(localStorage.getItem("langhire_apply_mode")).toBe("training");
   });
 
-  it("marks a job a training run filled in", async () => {
+  it("marks a job a trial run filled in and skipped at review", async () => {
     mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), practised_at: "2026-10-01T10:00:00Z" }] as never);
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
-    expect(await screen.findByText(/training run, not submitted/)).toBeInTheDocument();
+    expect(await screen.findByText(/trial, not submitted/)).toBeInTheDocument();
   });
 
   it("a job that needs the user can be retried and explains why, without looking like an error", async () => {
@@ -329,16 +358,37 @@ describe("PendingTab", () => {
     expect(screen.getByRole("button", { name: /status\.closed \(1\)/ })).toBeInTheDocument();
   });
 
-  it("full auto is the default", async () => {
+  it("trial request approval is the default", async () => {
     const user = userEvent.setup();
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
     await screen.findByText("Backend Engineer");
     await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
-    expect(await screen.findByRole("radio", { name: "Full auto" })).toHaveAttribute("aria-checked", "true");
+    expect(await screen.findByRole("radio", { name: "Trial run" })).toHaveAttribute("aria-checked", "true");
     await user.click(screen.getByRole("button", { name: "Got it, Start" }));
     await waitFor(() =>
-      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "auto" })),
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "trial" })),
     );
+  });
+
+  it("does not retry an uncertain submission when duplicate-risk confirmation is declined", async () => {
+    vi.spyOn(window, "confirm").mockReturnValueOnce(false);
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), status: "needs_you", submit_attempted_at: "2026-10-16T10:00:00Z" }] as never);
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await user.click(await screen.findByRole("button", { name: /jobItem\.retry/ }));
+    await user.click(screen.getByRole("button", { name: "Got it, Start" }));
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("duplicate risk"));
+    expect(mockStartApplying).not.toHaveBeenCalled();
+  });
+
+  it("sends explicit acknowledgement only after the user confirms an uncertain retry", async () => {
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), status: "needs_you", submit_attempted_at: "2026-10-16T10:00:00Z" }] as never);
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await user.click(await screen.findByRole("button", { name: /jobItem\.retry/ }));
+    await user.click(screen.getByRole("button", { name: "Got it, Start" }));
+    await waitFor(() => expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ acknowledge_unknown: true })));
   });
 
   it("auto-tailor off: applies without tailoring", async () => {
@@ -378,7 +428,7 @@ describe("PendingTab", () => {
     expect(await screen.findByDisplayValue("Dear Hiring Manager")).toBeInTheDocument();
   });
 
-  it("saves a generated cover letter to the profile", async () => {
+  it("saves a generated cover letter on that job, never as the profile's letter for every job", async () => {
     const user = userEvent.setup();
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
     await screen.findByText("Backend Engineer");
@@ -389,10 +439,9 @@ describe("PendingTab", () => {
 
     await user.click(screen.getByRole("button", { name: /coverLetterModal\.saveToProfile/ }));
     await waitFor(() =>
-      expect(mockSaveProfile).toHaveBeenCalledWith(
-        expect.objectContaining({ cover_letter: "Dear Hiring Manager" }),
-      ),
+      expect(vi.mocked(saveJobCoverLetter)).toHaveBeenCalledWith("https://job.example.com/pending", "Dear Hiring Manager"),
     );
+    expect(mockSaveProfile).not.toHaveBeenCalled();
   });
 
   it("expands a tailored job, loads content, and refines it", async () => {
@@ -514,5 +563,31 @@ describe("PendingTab", () => {
     expect(mockGetJobs).toHaveBeenCalledTimes(1); // same numbers: no reload
     rerender(<PendingTab onJobsChanged={onJobsChanged} stats={{ ...stats, pending: stats.pending - 1, failed: stats.failed + 1 }} />);
     await waitFor(() => expect(mockGetJobs).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows what the collector read and sorts by pay or match", async () => {
+    const pay = { low: 22, high: 26, currency: "USD", period: "hour" as const, text: "$22 - $26 an hour", hours: 40,
+                  yearly_low: 45760, yearly_high: 54080, estimated: true };
+    mockGetJobs.mockResolvedValue([
+      { ...structuredClone(pendingJob), url: "u1", title: "Scored Low", match: 6, match_source: "source_rules", job_types: ["full_time"] },
+      { ...structuredClone(pendingJob), url: "u2", title: "Paid Well", pay, match: 8, work_mode: "remote", match_reason: "Fits",
+        match_source: "source_rules", model_match: 0, model_reason: "Advisory only" },
+      { ...structuredClone(pendingJob), url: "u3", title: "Plain Pasted Link" },
+    ] as never);
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    expect(await screen.findByText("Paid Well")).toBeInTheDocument();
+    expect(screen.getByText("$22–$26/hr")).toBeInTheDocument();
+    expect(screen.getAllByText("jobItem.sourceFit")).toHaveLength(2);
+    expect(screen.getByText("jobItem.aiSuggestion")).toBeInTheDocument();
+    expect(screen.getByText(/≈ \$45,760–\$54,080\/yr/)).toBeInTheDocument();
+    expect(screen.getByText("jobItem.payNotListed")).toBeInTheDocument();   // only the collected job without pay
+    const titles = () => screen.getAllByRole("heading", { level: 4 }).map((h) => h.textContent);
+    await user.selectOptions(screen.getByLabelText("sort.label"), "pay");
+    expect(titles()).toEqual(["Paid Well", "Scored Low", "Plain Pasted Link"]);
+    await user.selectOptions(screen.getByLabelText("sort.label"), "match");
+    expect(titles()).toEqual(["Paid Well", "Scored Low", "Plain Pasted Link"]);
+    await user.selectOptions(screen.getByLabelText("sort.label"), "newest");
+    expect(titles()).toEqual(["Scored Low", "Paid Well", "Plain Pasted Link"]);
   });
 });

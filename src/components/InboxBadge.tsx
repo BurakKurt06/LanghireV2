@@ -3,7 +3,7 @@ import type { InboxCategory } from "../lib/types";
 import { INBOX_STYLES } from "../lib/inbox";
 
 const LABELS: Record<InboxCategory, string> = {
-  applied: "Application received",
+  applied: "Email suggests application received",
   assessment: "Assessment",
   interview: "Interview",
   offer: "Offer",

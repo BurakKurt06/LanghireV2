@@ -4,6 +4,7 @@ Loads built-in plugins from backend/sources/plugins/ and community plugins
 from the user data directory (~/.langhirev2/plugins/).
 """
 
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,173 @@ class PluginFilter:
     default: str = ""
 
 
+# The shared search preferences (core.job_search) a board can take in its search address.
+SHARED_PARAMS = ("job_type", "work_mode", "experience", "posted_within")
+_PARAM_NAME = re.compile(r"[A-Za-z0-9_.\-\[\]]{1,40}")
+_FRAGMENT = re.compile(r"[A-Za-z0-9_.\-]{1,40}=[A-Za-z0-9_.%+\-]{0,80}")
+
+
+@dataclass
+class SearchParam:
+    """How a board takes one shared preference.
+
+    With `param`, each value maps to the board's own code (`join` set when the board
+    takes several in one parameter: f_JT=F,P). Without it, each value maps to a whole
+    "name=value" pair (Reed: fullTime=true&partTime=true). `posted_within` maps day
+    counts ("7") to the board's code; the smallest that covers the wish is used.
+    """
+    param: str = ""
+    join: str = ""
+    values: dict = field(default_factory=dict)
+
+
+@dataclass
+class ListingConfig:
+    """How Quick collection reads a board's results page without an AI step per job.
+
+    `job_link`: a pattern on each job link's address; its first group is the job's id.
+    `job_url`: the job's own address from the id ("{id}", "{host}"); empty keeps the link
+    without its query, apart from `keep_query`. `next_param`: the page-number parameter
+    (page n = next_first + n * next_step); without it the page's own Next link or
+    "show more" button is used. `easy_apply`: words on a listing that mean the board's
+    own quick application. `skip_lines`: whole lines that mean skip the listing
+    (LinkedIn's "Applied").
+    """
+    job_link: str
+    job_url: str = ""
+    keep_query: list[str] = field(default_factory=list)
+    next_param: str = ""
+    next_step: int = 1
+    next_first: int = 0
+    easy_apply: str = ""
+    skip_lines: list[str] = field(default_factory=list)
+
+
+def _safe_pattern(pattern, *, trusted=False) -> str:
+    """A plugin's pattern, if it is short, valid and without nested repeats (which can take
+    forever on a long address)."""
+    if not isinstance(pattern, str) or not 0 < len(pattern) <= 200:
+        return ""
+    if re.search(r"\([^()]*[+*][^()]*\)\s*[+*{]", pattern):
+        return ""
+    try:
+        from re import _parser, _constants
+        parsed = _parser.parse(pattern, 0)
+        variable_repeats = 0
+        def check(items, repeated=False):
+            nonlocal variable_repeats
+            for op, value in items:
+                if op in (_constants.MAX_REPEAT, _constants.MIN_REPEAT):
+                    low, high, child = value
+                    if repeated:
+                        raise ValueError("nested repeat")
+                    if low != high:
+                        variable_repeats += 1
+                    check(child, repeated or high > 1)
+                elif op == _constants.SUBPATTERN:
+                    check(value[-1], repeated)
+                elif op == _constants.BRANCH:
+                    if repeated or not trusted:
+                        raise ValueError("repeated alternation")
+                    for branch in value[1]:
+                        check(branch, repeated)
+                elif op not in (_constants.LITERAL, _constants.NOT_LITERAL, _constants.IN,
+                                _constants.ANY, _constants.AT, _constants.CATEGORY):
+                    raise ValueError("unsupported pattern construct")
+        check(parsed)
+        # Imported patterns execute in both Python and Chromium. Keep their
+        # subset bounded rather than relying on a timeout in only one engine.
+        # Built-ins are reviewed code with bounded input, not imported YAML.
+        if not trusted and variable_repeats > 1:
+            return ""
+        re.compile(pattern)
+    except (re.error, ValueError, OverflowError, RecursionError):
+        return ""
+    return pattern
+
+
+def _parse_search_params(data) -> dict:
+    out = {}
+    if not isinstance(data, dict):
+        return out
+    for key in SHARED_PARAMS:
+        spec = data.get(key)
+        if not isinstance(spec, dict) or not isinstance(spec.get("values"), dict):
+            continue
+        param = str(spec.get("param") or "")
+        if param and not _PARAM_NAME.fullmatch(param):
+            continue
+        values = {}
+        for ours, theirs in spec["values"].items():
+            theirs = str(theirs)
+            if (param and re.fullmatch(r"[A-Za-z0-9_.%+\-]{1,80}", theirs)) or (not param and _FRAGMENT.fullmatch(theirs)):
+                values[str(ours)] = theirs
+        if values:
+            out[key] = SearchParam(param=param, join=str(spec.get("join") or "")[:3], values=values)
+    return out
+
+
+def _parse_listing(data, *, trusted=False) -> Optional[ListingConfig]:
+    if not isinstance(data, dict):
+        return None
+    link = _safe_pattern(data.get("job_link"), trusted=trusted)
+    if not link:
+        return None
+    job_url = str(data.get("job_url") or "")
+    if job_url and (not job_url.startswith("https://") or re.search(r"\{(?!id\}|host\})", job_url)):
+        return None
+    nxt = data.get("next_page") if isinstance(data.get("next_page"), dict) else {}
+    param = str(nxt.get("param") or "")
+
+    def _int(value, default):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    return ListingConfig(
+        job_link=link, job_url=job_url,
+        keep_query=[q for q in (data.get("keep_query") or []) if isinstance(q, str) and _PARAM_NAME.fullmatch(q)][:5],
+        next_param=param if _PARAM_NAME.fullmatch(param or "-") else "",
+        next_step=max(1, _int(nxt.get("step"), 1)), next_first=max(0, _int(nxt.get("first"), 0)),
+        easy_apply=_safe_pattern(data.get("easy_apply"), trusted=trusted),
+        skip_lines=[p for p in (_safe_pattern(x, trusted=trusted) for x in (data.get("skip_lines") or [])[:5]) if p],
+    )
+
+
+def shared_params(search_params: dict, prefs: dict | None) -> list[tuple[str, str]]:
+    """The query pairs for the shared preferences a board can express.
+
+    A preference goes in only when the board can say all of it: with remote and hybrid
+    wanted and a board that only filters "remote", the board gets nothing and the
+    collector checks each listing instead (asking the board for less would hide jobs).
+    """
+    if not prefs:
+        return []
+    wanted = {"job_type": prefs.get("job_types") or [], "work_mode": prefs.get("work_modes") or [],
+              "experience": prefs.get("experience") or []}
+    pairs: list[tuple[str, str]] = []
+    for key, spec in search_params.items():
+        if key == "posted_within":
+            days = int(prefs.get("posted_within") or 0)
+            fits = sorted((int(d), code) for d, code in spec.values.items() if str(d).isdigit() and int(d) >= days)
+            if days and fits and spec.param:
+                pairs.append((spec.param, fits[0][1]))
+            continue
+        values = wanted.get(key) or []
+        if not values or any(v not in spec.values for v in values):
+            continue
+        codes = list(dict.fromkeys(spec.values[v] for v in values))
+        if spec.param:
+            if len(codes) == 1:
+                pairs.append((spec.param, codes[0]))
+            elif spec.join:
+                pairs.append((spec.param, spec.join.join(codes)))
+        else:
+            pairs.extend(tuple(code.split("=", 1)) for code in codes)
+    return pairs
+
+
 @dataclass
 class PluginConfig:
     name: str
@@ -59,9 +227,18 @@ class PluginConfig:
     auth_cookies: list[AuthCookie] = field(default_factory=list)
     domain_patterns: list[DomainPattern] = field(default_factory=list)
     filters: list[PluginFilter] = field(default_factory=list)
+    search_params: dict = field(default_factory=dict)   # SHARED_PARAMS key -> SearchParam
+    listing: Optional[ListingConfig] = None
     is_builtin: bool = False
     enabled: bool = True
     file_path: str = ""
+
+    def shared_filter_params(self) -> set[str]:
+        """Query parameters the shared preferences set (the board's own filter for one is hidden)."""
+        names = {spec.param for spec in self.search_params.values() if spec.param}
+        names |= {code.split("=", 1)[0] for spec in self.search_params.values() if not spec.param
+                  for code in spec.values.values()}
+        return names
 
     def build_search_url(
         self,
@@ -69,34 +246,68 @@ class PluginConfig:
         locations: list[str],
         max_jobs: int,
         filters: dict | None = None,
+        search: dict | None = None,
+        page: int = 0,
     ) -> str:
-        """The pre-filtered search URL the collection prompt starts from."""
-        from urllib.parse import quote_plus
+        """The pre-filtered search URL the collection prompt starts from.
+
+        `search`: the shared preferences (core.job_search) the board can take; they replace
+        a board filter's default for the same parameter, never a value the user picked.
+        `page`: a later results page (Quick collection), when the board numbers its pages.
+        """
+        from urllib.parse import quote, quote_plus
 
         title = titles[0] if titles else ""
         location = locations[0] if locations else ""
         # Values interpolated into the search URL must be percent-encoded, or a
         # multi-word title ("Software Engineer") produces a URL with raw spaces.
         # The prompt body below deliberately keeps the human-readable values.
+        # '+' means a space in query strings, but is a literal '+' in URL paths.
+        # Reed, SEEK, Stepstone and Naukri put these placeholders in the path.
+        def encode(key, value):
+            prefix = self.search_url.split("{" + key + "}", 1)[0]
+            if "?" in prefix:
+                return quote_plus(value)
+            if self.is_builtin and self.name in {"reed", "seek", "naukri"}:
+                # These boards route keywords/places as slugs. A literal space
+                # makes Reed parse 'Data Analyst' as Data jobs in Analyst.
+                value = re.sub(r"\s+", "-", value.strip()).lower()
+            return quote(value, safe="")
+
         search_url = self.search_url.format(
-            title=quote_plus(title), titles=quote_plus(", ".join(titles)),
-            location=quote_plus(location), locations=quote_plus(", ".join(locations)),
+            title=encode("title", title), titles=encode("titles", ", ".join(titles)),
+            location=encode("location", location), locations=encode("locations", ", ".join(locations)),
             max_jobs=max_jobs,
         )
-        # Append filter URL params
-        filter_params = []
-        if filters:
-            for f in self.filters:
-                value = filters.get(f.key, "")
-                if value and f.url_param:
-                    filter_params.append(f"{f.url_param}={quote_plus(str(value))}")
-        else:
-            for f in self.filters:
-                if f.default and f.url_param:
-                    filter_params.append(f"{f.url_param}={quote_plus(str(f.default))}")
-        if filter_params:
+        picked: list[tuple[str, str]] = []
+        defaults: list[tuple[str, str]] = []
+        for f in self.filters:
+            if not f.url_param:
+                continue
+            value = filters.get(f.key, "") if filters else ""
+            if value:
+                picked.append((f.url_param, str(value)))
+            elif not filters and f.default:
+                defaults.append((f.url_param, str(f.default)))
+        shared = shared_params(self.search_params, search)
+        taken = {name for name, _ in picked}
+        shared = [(n, v) for n, v in shared if n not in taken]
+        taken |= {name for name, _ in shared}
+        # A wish the board can't express still replaces the board's default for it: wanting
+        # full- or part-time jobs on Handshake must not leave its "Internship" default on.
+        wishes = {"job_type": "job_types", "work_mode": "work_modes", "experience": "experience",
+                  "posted_within": "posted_within"}
+        for key, spec in self.search_params.items():
+            # "Any time" (0) is a wish too: the board's "past week" default goes.
+            if search and (search.get(wishes[key]) or (key == "posted_within" and "posted_within" in search)):
+                taken |= {spec.param} if spec.param else {c.split("=", 1)[0] for c in spec.values.values()}
+        pairs = picked + [(n, v) for n, v in defaults if n not in taken] + shared
+        if page and self.listing and self.listing.next_param:
+            pairs = [(n, v) for n, v in pairs if n != self.listing.next_param]
+            pairs.append((self.listing.next_param, str(self.listing.next_first + page * self.listing.next_step)))
+        if pairs:
             sep = "&" if "?" in search_url else "?"
-            search_url += sep + "&".join(filter_params)
+            search_url += sep + "&".join(f"{n}={quote_plus(v, safe=',')}" for n, v in pairs)
         return search_url
 
     def render_collection_prompt(
@@ -106,10 +317,14 @@ class PluginConfig:
         max_jobs: int,
         filters: dict | None = None,
         languages: list[str] | None = None,
+        search: dict | None = None,
+        search_url: str | None = None,
     ) -> str:
+        """`search_url`: the address the collector opens, when it differs from the built one
+        (Glassdoor's place ID, sources.locations): the prompt must name the same page."""
         title = titles[0] if titles else ""
         location = locations[0] if locations else ""
-        search_url = self.build_search_url(titles, locations, max_jobs, filters)
+        search_url = search_url or self.build_search_url(titles, locations, max_jobs, filters, search=search)
         return self.collection_prompt.format(
             search_url=search_url,
             title=title, titles=", ".join(titles),
@@ -216,6 +431,8 @@ def _parse_plugin_yaml(data: dict, file_path: str, is_builtin: bool) -> Optional
         auth_cookies=auth_cookies,
         domain_patterns=domain_patterns,
         filters=filters,
+        search_params=_parse_search_params(data.get("search_params")),
+        listing=_parse_listing(data.get("listing"), trusted=is_builtin),
         is_builtin=is_builtin,
         enabled=True,
         file_path=file_path,

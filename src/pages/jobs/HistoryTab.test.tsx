@@ -94,7 +94,7 @@ const metric = {
 };
 
 describe("HistoryTab", () => {
-  let onJobsChanged: ReturnType<typeof vi.fn>;
+  let onJobsChanged: ReturnType<typeof vi.fn<() => void>>;
 
   beforeEach(() => {
     onJobsChanged = vi.fn();

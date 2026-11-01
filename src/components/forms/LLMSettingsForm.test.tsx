@@ -7,6 +7,7 @@ import {
   saveLLMSettings,
   testLLMConnection,
   fetchOllamaModels,
+  fetchProviderModels,
   startChatGPTLogin,
   getChatGPTStatus,
   chatGPTLogout,
@@ -28,6 +29,7 @@ vi.mock("../../lib/api", () => ({
   saveLLMSettings: vi.fn(),
   testLLMConnection: vi.fn(),
   fetchOllamaModels: vi.fn(),
+  fetchProviderModels: vi.fn(),
   startChatGPTLogin: vi.fn(),
   getChatGPTStatus: vi.fn(),
   chatGPTLogout: vi.fn(),
@@ -38,6 +40,7 @@ const mockGetLLMSettings = vi.mocked(getLLMSettings);
 const mockSaveLLMSettings = vi.mocked(saveLLMSettings);
 const mockTestLLMConnection = vi.mocked(testLLMConnection);
 const mockFetchOllamaModels = vi.mocked(fetchOllamaModels);
+const mockFetchProviderModels = vi.mocked(fetchProviderModels);
 const mockTrackEvent = vi.mocked(trackEvent);
 const mockStartChatGPTLogin = vi.mocked(startChatGPTLogin);
 const mockGetChatGPTStatus = vi.mocked(getChatGPTStatus);
@@ -65,12 +68,11 @@ const baseSettings = {
   openai_compatible: { base_url: "", api_key: "", model: "" },
 };
 
-// Default global fetch stub → empty OpenRouter list → curated fallback renders.
+// Model lists come from the backend (the page never calls providers itself): an
+// empty OpenRouter list → the curated fallback renders. A direct fetch fails the test.
 function stubFetch(data: unknown = { data: [] }) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => ({ json: async () => data })) as unknown as typeof fetch,
-  );
+  mockFetchProviderModels.mockResolvedValue({ success: true, data });
+  vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("the page must not call providers directly"); }));
 }
 
 describe("LLMSettingsForm", () => {
@@ -372,18 +374,14 @@ describe("LLMSettingsForm", () => {
       ).toBeInTheDocument();
     });
 
-    it("gemini: a saved key loads the live model list, key sent as a header", async () => {
-      const fetchMock = vi.fn(async () => ({
-        ok: true,
-        json: async () => ({
-          models: [
-            { name: "models/gemini-9-flash", supportedGenerationMethods: ["generateContent"] },
-            { name: "models/gemini-9-flash-tts", supportedGenerationMethods: ["generateContent"] },
-            { name: "models/text-embedding-9", supportedGenerationMethods: ["embedContent"] },
-          ],
-        }),
-      }));
-      vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+    it("gemini: a saved key loads the live model list through the backend", async () => {
+      stubFetch({
+        models: [
+          { name: "models/gemini-9-flash", supportedGenerationMethods: ["generateContent"] },
+          { name: "models/gemini-9-flash-tts", supportedGenerationMethods: ["generateContent"] },
+          { name: "models/text-embedding-9", supportedGenerationMethods: ["embedContent"] },
+        ],
+      });
       mockGetLLMSettings.mockResolvedValue({
         ...structuredClone(baseSettings),
         provider: "gemini",
@@ -396,11 +394,8 @@ describe("LLMSettingsForm", () => {
       // TTS and embedding models are filtered out.
       expect(screen.queryByRole("option", { name: "gemini-9-flash-tts" })).not.toBeInTheDocument();
       expect(screen.queryByRole("option", { name: "text-embedding-9" })).not.toBeInTheDocument();
-      const call = (fetchMock.mock.calls as unknown as [string, RequestInit][]).find(([u]) => u.includes("generativelanguage"));
-      expect(call).toBeDefined();
-      const [url, init] = call!;
-      expect(url).not.toContain("AIza-live");
-      expect(init.headers).toEqual({ "x-goog-api-key": "AIza-live" });
+      expect(mockFetchProviderModels).toHaveBeenCalledWith("gemini", "AIza-live", "");
+      expect(fetch).not.toHaveBeenCalled();
     });
 
     it("anthropic: the custom option reveals a text input for any model ID", async () => {
@@ -491,5 +486,63 @@ describe("LLMSettingsForm", () => {
       expect(mockChatGPTLogout).toHaveBeenCalled();
       expect(await screen.findByText("chatgpt.notSignedIn")).toBeInTheDocument();
     });
+  });
+
+  describe("saved settings safety", () => {
+    it("a failed load shows an error and Retry, never a form that could save defaults", async () => {
+      const user = userEvent.setup();
+      mockGetLLMSettings.mockRejectedValueOnce(new Error("backend down"));
+      render(<LLMSettingsForm />);
+      expect(await screen.findByText("status.loadFailed")).toBeInTheDocument();
+      expect(screen.queryByText("selectProvider")).not.toBeInTheDocument();
+      expect(mockSaveLLMSettings).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "status.retry" }));
+      expect(await screen.findByText("selectProvider")).toBeInTheDocument();
+    });
+
+    it("a model pick right after typing a key saves both, and no older copy lands after it", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+        mockGetLLMSettings.mockResolvedValue({ ...structuredClone(baseSettings), provider: "gemini" } as never);
+        render(<LLMSettingsForm />);
+        const key = await screen.findByPlaceholderText("AIza...");
+        await user.type(key, "AIza-new");                    // debounced autosave pending
+        const model = screen.getByDisplayValue("gemini-2.5-pro") as HTMLSelectElement;
+        const other = Array.from(model.options).map((o) => o.value).find((v) => v && v !== "gemini-2.5-pro")!;
+        await user.selectOptions(model, other);               // immediate save
+        await vi.advanceTimersByTimeAsync(2000);              // the old debounce would fire here
+        const saves = mockSaveLLMSettings.mock.calls.map(([s]) => s as typeof baseSettings);
+        const last = saves[saves.length - 1];
+        expect(last.gemini).toEqual({ api_key: "AIza-new", model: other });
+        expect(saves.every((s, i) => i < saves.length - 1 || s.gemini.model === other)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a failed save is shown", async () => {
+      const user = userEvent.setup();
+      mockSaveLLMSettings.mockRejectedValue(new Error("backend down"));
+      render(<LLMSettingsForm />);
+      await screen.findByText("selectProvider");
+      await user.click(screen.getByRole("radio", { name: /gemini/i }));
+      expect(await screen.findByText("status.saveFailed")).toBeInTheDocument();
+    });
+  });
+});
+
+describe("LLMSettingsForm labels", () => {
+  beforeEach(() => {
+    mockGetLLMSettings.mockResolvedValue({ ...structuredClone(baseSettings), provider: "openai" } as never);
+    mockSaveLLMSettings.mockResolvedValue({ success: true } as never);
+    mockGetChatGPTStatus.mockResolvedValue(signedOut);
+    stubFetch();
+  });
+
+  it("the key and model fields are named by their labels", async () => {
+    render(<LLMSettingsForm />);
+    expect(await screen.findByLabelText("labels.apiKey")).toHaveAttribute("placeholder", "sk-...");
+    expect(screen.getByLabelText(/labels\.model/)).toBeInTheDocument();
   });
 });

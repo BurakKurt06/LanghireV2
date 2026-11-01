@@ -354,7 +354,7 @@ def test_decay_confidence_only_affects_stale(store):
 
 
 def test_decay_confidence_floor(store):
-    """Decay never pushes confidence below the 0.3 floor."""
+    """Decay never pushes confidence below its floor."""
     conn = store._get_conn()
     conn.execute("INSERT INTO memories "
                  "(website_domain, category, content, content_hash, success, "
@@ -364,7 +364,23 @@ def test_decay_confidence_floor(store):
     conn.commit()
     store.decay_confidence(days_old=1, decay_factor=0.1)
     rows = store.search(website_domain="x.com")
-    assert rows[0]["confidence"] == pytest.approx(0.3)
+    assert rows[0]["confidence"] == pytest.approx(store.DECAY_FLOOR)
+
+
+def test_a_memory_left_stale_long_enough_is_removed_by_cleanup(store):
+    """The floor sat exactly at the cleanup threshold, so decayed memories were never cleaned up."""
+    conn = store._get_conn()
+    conn.execute("INSERT INTO memories "
+                 "(website_domain, category, content, content_hash, success, "
+                 " confidence, created_at, updated_at) "
+                 "VALUES ('x.com','navigation','stale','hashstale',1,0.9,"
+                 "'2000-01-01T00:00:00+00:00','2000-01-01T00:00:00+00:00')")
+    conn.commit()
+    store.add("fresh", "x.com", "navigation", confidence=0.9)
+    for _ in range(40):                       # the Memory page's Decay, run over many months
+        store.decay_confidence(days_old=30, decay_factor=0.95)
+    assert store.delete_low_confidence() == 1  # the Memory page's Cleanup (default threshold)
+    assert [r["content"] for r in store.search(website_domain="x.com")] == ["fresh"]
 
 
 def test_delete_low_confidence(store):
@@ -563,7 +579,8 @@ def test_qa_auto_squash(store):
         "INSERT INTO qa_repository (question, normalized, answer, created_at, updated_at) "
         "VALUES (?, ?, '', '2020-01-01', '2020-01-01')",
         ("How many years of experience do you have?",
-         store._normalize_qa("How many years of experience do you have extra")),
+         # Differs only by a filler word: still the same question (an added content word wouldn't be).
+         store._normalize_qa("How many years of experience do you currently have")),
     )
     conn.commit()
     merges = store.qa_auto_squash()
@@ -617,10 +634,10 @@ def test_separate_stores_have_isolated_dbs(tmp_path):
 
 
 def test_schema_version_recorded(store):
-    """Migrations advance schema_version to 3 (qa_repository with source and options)."""
+    """Migrations advance to 4 (retry the app-folder legacy Q&A import)."""
     conn = store._get_conn()
     version = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
-    assert version == 3
+    assert version == 4
     columns = {r[1] for r in conn.execute("PRAGMA table_info(qa_repository)").fetchall()}
     assert {"source", "options"} <= columns
     # qa_repository table exists.

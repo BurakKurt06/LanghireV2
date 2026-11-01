@@ -113,7 +113,10 @@
     "testing": "Testing...",
     "testConnection": "Test Connection",
     "connectionSuccessful": "Connection successful!",
-    "connectionFailed": "Connection failed."
+    "connectionFailed": "Connection failed.",
+    "loadFailed": "Couldn't load your AI settings, so nothing here can be changed (saving now could replace them with defaults).",
+    "retry": "Try again",
+    "saveFailed": "Your last change wasn't saved. Check that the app is running, then change it again."
   },
   "chatgpt": {
     "signIn": "Sign in with ChatGPT",

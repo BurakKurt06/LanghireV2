@@ -242,3 +242,47 @@ def test_the_scheduler_gives_way_to_a_run_that_just_started():
     inbox._state.update(requested=True)
     inbox._check_now(lambda: calls.append(1) or {"new": 0}, is_busy=lambda: True)
     assert calls == [] and inbox._state["requested"] and not inbox._state["checking"]
+
+
+def test_an_email_that_fits_two_applications_equally_is_left_unlinked():
+    jobs = {
+        "https://acme/a": {"title": "Data Intern", "company": "Acme", "status": "applied"},
+        "https://acme/b": {"title": "Finance Intern", "company": "Acme", "status": "applied"},
+    }
+    assert inbox.match_job({"company": "Acme", "role": ""}, jobs) is None          # which one? unknown
+    assert inbox.match_job({"company": "Acme", "role": "Finance Intern"}, jobs) == "https://acme/b"
+
+
+def test_old_emails_keep_their_listing_but_not_their_text():
+    now = datetime(2026, 10, 8, tzinfo=timezone.utc)
+    emails = [
+        {"id": "new", "date": "2026-09-01T10:00", "subject": "Interview", "text": "Call Tuesday", "prep": "notes"},
+        {"id": "old", "date": "2025-01-01T10:00", "subject": "Thanks for applying", "text": "Dear Ada", "prep": "x"},
+        {"id": "undated", "date": "yesterday", "subject": "Hi", "text": "keep"},
+    ]
+    kept = {e["id"]: e for e in inbox._retained(emails, now)}
+    assert kept["new"]["text"] == "Call Tuesday" and kept["new"]["prep"] == "notes"
+    assert kept["old"]["text"] == "" and kept["old"]["prep"] == "" and kept["old"]["subject"] == "Thanks for applying"
+    assert kept["undated"]["text"] == "keep"
+
+
+def test_at_most_the_newest_emails_are_kept(monkeypatch):
+    monkeypatch.setattr(inbox, "MAX_KEPT_EMAILS", 2)
+    emails = [{"id": str(i), "date": f"2026-10-0{i}T10:00"} for i in range(1, 5)]
+    assert [e["id"] for e in inbox._retained(emails)] == ["4", "3"]
+
+
+@pytest.mark.parametrize("text", [
+    "Hi Ada,\n\nUse this to continue:\n\n   482913   \n\nThanks", "Hi Ada,\r\n\r\n482913\r\n\r\nThanks",
+    "Hi Ada,\n\n 482913 \n", "482913"])
+def test_a_code_alone_on_its_line_is_found(text):
+    assert inbox.extract_verification("code", text, [], set()) == "482913"
+
+
+def test_a_hostile_email_body_cannot_stall_the_code_reader():
+    # "A code alone on its line" let its whitespace run across lines: a body of blank lines made the
+    # search quadratic (12 s for 40,000 lines; hours for a large message).
+    import time
+    start = time.monotonic()
+    assert inbox.extract_verification("code", "\n" * 200_000 + " \n" * 100_000, [], set()) == ""
+    assert time.monotonic() - start < 5

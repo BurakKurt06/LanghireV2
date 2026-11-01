@@ -184,6 +184,12 @@ Return ONLY the JSON array."""
 
 # ── Storage helper ───────────────────────────────────────────────────────────
 
+try:
+    from memory.store import is_instruction_like
+except ImportError:  # pragma: no cover
+    from backend.memory.store import is_instruction_like
+
+
 def store_learnings(
     store: MemoryStore,
     learnings: list[dict],
@@ -200,8 +206,10 @@ def store_learnings(
 
     for learning in learnings:
         # The domain is the job's own: a page can't file a "tip" under another site.
-        if re.search(r"https?://|www\.|<secret|@@", learning["content"], re.I):
-            continue  # a tip with a link or a secret tag isn't a UI tip
+        # A tip with a link, a secret tag, or an order about credentials,
+        # submitting or the rules isn't a UI observation (it may echo a page's text).
+        if is_instruction_like(learning["content"]):
+            continue
         is_new = store.add(
             content=learning["content"],
             website_domain=domain,

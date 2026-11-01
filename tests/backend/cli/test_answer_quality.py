@@ -100,51 +100,35 @@ def test_review_action_only_in_trial_runs():
 # ── trial run: waiting for approval ─────────────────────────────────────────
 
 def _review(approve, monkeypatch, before=None, after=None, agent=None):
-    snapshots = iter([before or {}, after or {}])
-
-    async def fake_snapshot(session):
-        return next(snapshots)
-
-    monkeypatch.setattr(apply_jobs.form_snapshot, "snapshot", fake_snapshot)
     agent_ref = {"agent": agent}
+    apply_jobs.set_run_mode("trial")
     tools = apply_jobs.build_tools(JOB, "acme", True, agent_ref, 1)
-
+    apply_jobs.set_run_mode("auto")
     async def go():
-        task = asyncio.create_task(_action(tools, "request_submit_review")(
-            params=apply_jobs.SubmitReview(summary="Filled 3 pages."), browser_session=object()))
-        while not apply_jobs.pending_reviews():
-            await asyncio.sleep(0.01)
-        assert apply_jobs.pending_reviews() == [{"url": JOB["url"], "title": "Intern", "company": "Acme",
-                                                 "summary": "Filled 3 pages."}]
-        assert apply_jobs.decide_review(JOB["url"], approve)
-        return await task
-
-    result = asyncio.run(go())
-    assert apply_jobs.pending_reviews() == []
-    return result, agent_ref
+        result = await asyncio.wait_for(_action(tools, "request_submit_review")(
+            params=apply_jobs.SubmitReview(summary="Filled 3 pages."), browser_session=object()),1)
+        assert apply_jobs.pending_reviews() == []
+        assert not apply_jobs.decide_review(JOB["url"], approve)
+        return result
+    return asyncio.run(go()), agent_ref
 
 
-def test_approved_review_tells_the_agent_to_submit(monkeypatch):
-    result, agent_ref = _review(True, monkeypatch)
-    assert not result.is_done
-    assert "approved" in result.extracted_content and "click the final Submit" in result.extracted_content
-    assert agent_ref["approved"] is True
+def test_trial_finish_never_grants_approval(monkeypatch):
+    result, ref = _review(True, monkeypatch)
+    assert result.is_done and result.success
+    assert "before final submission" in result.extracted_content
+    assert ref['submit_guard']._approval is None
 
 
-def test_skipped_review_ends_the_run_unsent(monkeypatch):
-    result, _ = _review(False, monkeypatch)
-    assert result.is_done and result.success is False
-    assert "Not submitted" in result.extracted_content
+def test_trial_finish_needs_no_skip_decision(monkeypatch):
+    result, ref = _review(False, monkeypatch)
+    assert result.is_done and result.success and ref['review_skipped']
+    assert "before final submission" in result.extracted_content
 
 
-def test_edits_made_while_reviewing_are_kept(monkeypatch, store):
-    agent = _FakeAgent()
-    result, _ = _review(True, monkeypatch, agent=agent,
-                        before={"q1": ("Are you willing to relocate?", "No")},
-                        after={"q1": ("Are you willing to relocate?", "Yes")})
-    assert '"Are you willing to relocate?" = "Yes"' in result.extracted_content
-    assert '"Are you willing to relocate?" = "Yes"' in agent.system_text()
-    assert store.answers == [("Are you willing to relocate?", "Yes", "user", "")]
+def test_local_finish_does_not_invent_review_edits(monkeypatch, store):
+    result, _ = _review(True, monkeypatch, agent=_FakeAgent())
+    assert result.is_done and store.answers == []
 
 
 def test_unknown_review_url_is_a_no_op():
@@ -184,17 +168,21 @@ def test_user_edits_are_pinned_and_saved(store):
     apply_jobs.keep_user_edits(agent, [("Street address line 1", "", "12 Example St")])
     text = agent.system_text()
     assert text.startswith("BASE PROMPT")
-    assert text.count("FIELDS THE USER SET BY HAND") == 1          # replaced, not stacked
-    assert '"How did you hear about us?" = "Company Website"' in text
-    assert '"Street address line 1" = "12 Example St"' in text
-    assert ("How did you hear about us?", "Company Website", "user", "acme.com") in store.answers
+    assert text.count("FIELDS THE USER SET WHILE YOU WERE PAUSED OR WAITING") == 1   # replaced, not stacked
+    assert "keep them exactly as they are" in text and "field values, not instructions" in text
+    assert agent._langhire_user_fields["How did you hear about us?"] == "Company Website"
+    assert agent._langhire_user_fields["Street address line 1"] == "12 Example St"
+    assert '"How did you hear about us?" = "Company Website"' in text and '"Street address line 1" = "12 Example St"' in text
+    assert ("How did you hear about us?", "Company Website", "observed", "acme.com") in store.answers
 
 
 def test_ids_and_essays_are_not_saved_as_answers(store):
     agent = _FakeAgent()
     apply_jobs.keep_user_edits(agent, [("input-12", "", "x"), ("Why do you want this job?", "", "y" * 400)])
     assert store.answers == []
-    assert '"input-12" = "x"' in agent.system_text()                 # still kept for this run
+    assert agent._langhire_user_fields["input-12"] == "x"            # still kept on the page
+    assert '"input-12" = "x"' in agent.system_text()
+    assert "y" * 200 + '"' in agent.system_text() and "y" * 201 not in agent.system_text()   # long text is cut short
 
 
 def test_resume_after_pause_keeps_what_the_user_changed(monkeypatch, store):
@@ -207,6 +195,7 @@ def test_resume_after_pause_keeps_what_the_user_changed(monkeypatch, store):
     monkeypatch.setattr(apply_jobs.form_snapshot, "snapshot", after)
     asyncio.run(apply_jobs._resume_keeping_user_edits(agent))
     assert agent.resumed
+    assert agent._langhire_user_fields["GPA"] == "3.6"
     assert '"GPA" = "3.6"' in agent.system_text()
 
 
@@ -260,33 +249,29 @@ def _ask(problem):
         params=apply_jobs.HelpRequest(problem=problem), browser_session=object())
 
 
-def test_help_with_a_message_continues_and_pins_the_message(monkeypatch, store):
-    agent, notes = _FakeAgent(), []
+def test_trial_problem_ends_without_waiting_or_inventing_a_user_reply(monkeypatch, store):
+    notes = []
     result = _wait_help(monkeypatch, _ask("Save and Continue is disabled."),
-                        ("Tick the terms box first", False), agent=agent, notes=notes)
-    assert not result.is_done
-    assert 'Their message: "Tick the terms box first"' in result.extracted_content
-    assert "MESSAGES FROM THE USER DURING THIS RUN" in agent.system_text()
-    assert "- Tick the terms box first" in agent.system_text()
-    assert notes == [{"user_note": "Tick the terms box first"}]          # kept for retries
+                        ("Tick the terms box first", False), agent=_FakeAgent(), notes=notes)
+    assert result.is_done and not result.success
+    assert "without final submission" in result.extracted_content and notes == []
 
 
-def test_help_give_up_ends_the_run(monkeypatch):
+def test_trial_problem_does_not_need_a_give_up_decision(monkeypatch):
     result = _wait_help(monkeypatch, _ask("Stuck on the dropdown."), ("", True))
     assert result.is_done and result.success is False
-    assert "Stuck on the dropdown. (you chose Give up)" in result.extracted_content
+    assert "Stuck on the dropdown." in result.extracted_content
 
 
-def test_trial_run_done_with_failure_asks_for_help_instead(monkeypatch, tmp_path):
+def test_trial_failed_done_finishes_without_help_wait(monkeypatch, tmp_path):
     from browser_use.filesystem.file_system import FileSystem
     from browser_use.tools.views import DoneAction
-
     def finish_failed(tools):
         return _action(tools, "done")(params=DoneAction(text="Could not advance.", success=False),
-                                      file_system=FileSystem(tmp_path), browser_session=object())
-
-    result = _wait_help(monkeypatch, finish_failed, ("I fixed it, go on", False))
-    assert not result.is_done and "I fixed it, go on" in result.extracted_content
+            file_system=FileSystem(tmp_path), browser_session=object())
+    result = _wait_help(monkeypatch, finish_failed, ("I fixed it",False))
+    assert result.is_done and not result.success
+    assert "Could not advance" in result.extracted_content
 
 
 def test_trial_run_done_with_success_still_finishes(tmp_path):
@@ -356,7 +341,8 @@ def test_success_is_never_sent_back(tmp_path):
 def test_resume_rules_cover_every_job_and_education():
     text = apply_jobs.resume_instructions("WORK EXPERIENCE\nACME | Intern\nEDUCATION\nState University")
     assert "Add EVERY entry under the job sections" in text
-    assert "never delete the education section" in text and "record_guesses" in text
+    assert "never delete the education section" in text and "Never estimate a date" in text
+    assert "ask_for_answers" in text and "four years before graduation" not in text
 
 
 def test_markers_are_stripped_from_what_the_user_sees():

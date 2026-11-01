@@ -7,6 +7,8 @@ import {
   skipJob,
   answerHelp,
   reviewApplication,
+  decideBrowserRequests,
+  stopJobCollection,
 } from "../lib/api";
 import { APPLY_MODE_LABELS, type ApplyMode } from "../lib/applyMode";
 import { refreshApplyStatus, useApplyStatus } from "../hooks/useApplyStatus";
@@ -32,14 +34,15 @@ export default function RunPanel() {
     return () => clearInterval(timer);
   }, [running]);
 
-  if (!status?.running) return null;
+  if (!status || (!status.running && !status.requests?.length)) return null;
 
   const jobs = status.current ?? [];
   const titleOf = (url: string) => jobs.find((j) => j.url === url)?.title || "";
   const help = status.help?.[0];
   const review = status.reviews?.[0];
+  const requests = status.requests ?? [];
   const paused = Boolean(status.paused);
-  const mode = APPLY_MODE_LABELS[(status.run_mode || "auto") as ApplyMode] || APPLY_MODE_LABELS.auto;
+  const mode = APPLY_MODE_LABELS[(status.run_mode || requests[0]?.mode || "trial") as ApplyMode] || APPLY_MODE_LABELS.trial;
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -54,11 +57,11 @@ export default function RunPanel() {
   };
 
   return (
-    <section aria-label="Run controls" className="mx-3 mb-3 rounded-xl border border-border bg-secondary/40 p-3 text-[12px]">
+    <section aria-label="Run controls" className="mx-3 mb-3 max-h-[70vh] overflow-y-auto rounded-xl border border-border bg-secondary/40 p-3 text-[12px]">
       <div className="flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-1.5 font-semibold text-foreground">
           <span className={`h-2 w-2 rounded-full ${paused ? "bg-amber-500" : "animate-pulse bg-success"}`} />
-          {paused ? "Paused" : "Applying"}
+          {status.running ? (paused ? "Paused" : "Applying") : "Collecting"}
         </span>
         <span className="rounded-full bg-background px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">{mode}</span>
       </div>
@@ -120,12 +123,37 @@ export default function RunPanel() {
         </div>
       )}
 
+      {requests.length > 0 && (
+        <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2" role="region" aria-label="Account details approval">
+          <p className="font-semibold">Account details need your approval</p>
+          <p className="mt-1">The app didn't recognise this site as the employer's own application site. Allow your account details only if it is.</p>
+          <div className="mt-2 max-h-72 space-y-3 overflow-y-auto">
+            {requests.map((r) => (
+              <div key={r.id} role="group" aria-label={`Review ${r.origin}`} className="rounded border border-border bg-background p-2">
+                <p className="font-semibold break-all"><bdi>{r.company || r.title}</bdi></p>
+                <p className="break-all"><code dir="ltr" style={{ unicodeBidi: "isolate" }}>{r.origin}</code></p>
+                {r.tenant && <p>Tenant: {r.tenant}</p>}
+                <p className="mt-1">{r.description}</p>
+                <p className="mt-1 break-all text-[10px]"><code dir="ltr" style={{ unicodeBidi: "isolate" }}>{r.url}</code></p>
+                <div className="mt-1.5 flex gap-1.5">
+                  <button disabled={busy} onClick={() => act(() => decideBrowserRequests([r.id], true))}
+                    className="btn-primary flex-1 !px-2 !py-1 !text-[11px]">Allow account details</button>
+                  <button disabled={busy} onClick={() => act(() => decideBrowserRequests([r.id], false))}
+                    className="btn-secondary !px-2 !py-1 !text-[11px]">Block</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {!help && review && (
         <div className="mt-2 rounded-lg border border-primary/40 bg-primary/10 p-2">
           <p className="font-semibold text-foreground">Ready to submit{jobs.length > 1 && titleOf(review.url) ? `: ${titleOf(review.url)}` : ""}</p>
+          <p className="mt-1">Check the form in the browser and change anything you like, then submit it or skip. Skip sends nothing.</p>
           <div className="mt-1.5 flex gap-1.5">
             <button disabled={busy} onClick={() => act(() => reviewApplication(review.url, true))}
-              className="btn-primary flex-1 !px-2 !py-1 !text-[11px]"><Check className="h-3 w-3" /> Approve</button>
+              className="btn-primary flex-1 !px-2 !py-1 !text-[11px]"><Check className="h-3 w-3" /> Submit</button>
             <button disabled={busy} onClick={() => act(() => reviewApplication(review.url, false))}
               className="btn-secondary flex-1 !px-2 !py-1 !text-[11px]"><X className="h-3 w-3" /> Skip</button>
           </div>
@@ -133,7 +161,7 @@ export default function RunPanel() {
       )}
 
       <div className="mt-2 flex justify-between gap-1">
-        <button
+        {status.running && <button
           disabled={busy}
           onClick={() => act(paused ? resumeApplying : pauseApplying)}
           className="btn-secondary flex-1 !px-2 !py-1 !text-[11px]"
@@ -141,10 +169,10 @@ export default function RunPanel() {
         >
           {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
           {paused ? "Resume" : "Pause"}
-        </button>
+        </button>}
         <button
           disabled={busy}
-          onClick={() => act(stopApplying)}
+          onClick={() => act(status.running ? stopApplying : stopJobCollection)}
           className="btn-secondary !px-2 !py-1 !text-[11px] hover:!text-destructive"
           title="Stop the whole run"
           aria-label="Stop"

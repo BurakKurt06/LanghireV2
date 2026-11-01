@@ -14,14 +14,28 @@ auth_cookies:
   - name: reeduk.session
     domain: .reed.co.uk
 
-search_url: "https://www.reed.co.uk/jobs/{title}-jobs-in-{location}?datecreatedoffset=LastWeek"
+search_url: "https://www.reed.co.uk/jobs/{title}-jobs-in-{location}"
+
+search_params:
+  job_type:
+    values: { full_time: "fullTime=true", part_time: "partTime=true", contract: "contract=true", temporary: "temp=true" }
+  work_mode:
+    param: workingOption
+    values: { onsite: onSite, hybrid: hybrid, remote: remote }
+  posted_within:
+    param: dateCreatedOffSet
+    values: { "1": today, "3": lastthreedays, "7": lastweek, "14": lasttwoweeks }
+
+listing:
+  job_link: '/jobs/[^/?#]+/(\d{6,})'
+  next_page: { param: pageno, step: 1, first: 1 }
+  easy_apply: '\bEasy Apply\b'
 
 collection_prompt: |
-  SIGN-IN: If a sign-in or login page appears instead of the results, the user
-  must sign in in this browser window. Use the wait action
-  (30 seconds) at most 4 times, checking the page after each wait, then open the
-  search URL below again. If it is still signed out, call done with success=false
-  and the text 'Sign-in required: log in to Reed in this browser, then collect again.'
+  SIGN-IN: Collection reuses the session from the app's browser login. If a
+  sign-in page appears, call done with success=false and the text 'Sign-in
+  required: sign in using the app browser login, then collect again.' Do not
+  enter credentials or wait for a login inside this read-only collection run.
 
   START: This search page is already open when you begin:
   {search_url}

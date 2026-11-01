@@ -57,12 +57,38 @@ filters:
       - { value: "I", label: "Internship" }
     url_param: "f_JT"
 
+# The shared search preferences (Profile -> Job search) in LinkedIn's own codes.
+search_params:
+  job_type:
+    param: f_JT
+    join: ","
+    values: { full_time: F, part_time: P, contract: C, temporary: T, internship: I }
+  work_mode:
+    param: f_WT
+    join: ","
+    values: { onsite: "1", remote: "2", hybrid: "3" }
+  experience:
+    param: f_E
+    join: ","
+    values: { internship: "1", entry: "2", associate: "3", mid: "4", senior: "4", director: "5" }
+  posted_within:
+    param: f_TPR
+    values: { "1": r86400, "7": r604800, "30": r2592000 }
+
+# Quick collection: read the results list itself (signed in: /jobs/view/<id>/;
+# signed out: /jobs/view/<title>-at-<company>-<id>).
+listing:
+  job_link: '/jobs/view/(?:[^/?#]*-)?(\d{6,})'
+  job_url: 'https://www.linkedin.com/jobs/view/{id}/'
+  next_page: { param: start, step: 25 }
+  easy_apply: '\bEasy Apply\b'
+  skip_lines: ['Applied', 'Applied (on|\d+ \w+ ago).*']
+
 collection_prompt: |
-  SIGN-IN: If a sign-in or login page appears instead of the results, the user
-  must sign in in this browser window. Use the wait action
-  (30 seconds) at most 4 times, checking the page after each wait, then open the
-  search URL below again. If it is still signed out, call done with success=false
-  and the text 'Sign-in required: log in to LinkedIn in this browser, then collect again.'
+  SIGN-IN: Collection reuses the session from the app's browser login. If a
+  sign-in page appears, call done with success=false and the text 'Sign-in
+  required: sign in using the app browser login, then collect again.' Do not
+  enter credentials or wait for a login inside this read-only collection run.
 
   START: This search page is already open when you begin:
   {search_url}

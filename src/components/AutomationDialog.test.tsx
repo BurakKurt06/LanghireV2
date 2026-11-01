@@ -77,3 +77,37 @@ describe("AutomationDialog", () => {
     expect(onCancel).not.toHaveBeenCalled();
   });
 });
+
+describe("AutomationDialog keyboard and screen-reader behaviour", () => {
+  it("is a labelled modal dialog with a named close button", () => {
+    renderDialog({ title: "Apply to Jobs" });
+    const dialog = screen.getByRole("dialog", { name: "Apply to Jobs" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+  });
+
+  it("moves focus inside, keeps Tab inside, and Escape cancels", async () => {
+    const user = userEvent.setup();
+    const { onCancel } = renderDialog();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    for (let i = 0; i < 6; i++) {
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+    }
+    await user.keyboard("{Escape}");
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives focus back to what had it when it closes", () => {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    const props = { title: "T", onConfirm: vi.fn(), onCancel: vi.fn() };
+    const { rerender } = render(<AutomationDialog open {...props} />);
+    expect(document.activeElement).not.toBe(opener);
+    rerender(<AutomationDialog open={false} {...props} />);
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+});

@@ -17,7 +17,7 @@ if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
 }
 
 # Build with PyInstaller
-uv run python -m PyInstaller `
+uv run --locked python -m PyInstaller `
   --onefile `
   --name "langhirev2-backend-$Target" `
   --distpath src-tauri/binaries `
@@ -36,7 +36,6 @@ uv run python -m PyInstaller `
   --hidden-import uvicorn.protocols.websockets.auto `
   --hidden-import fastapi `
   --hidden-import langchain_openai `
-  --hidden-import langchain_anthropic `
   --hidden-import langchain_aws `
   --hidden-import browser_use `
   --hidden-import browser_use.agent `
@@ -53,6 +52,11 @@ uv run python -m PyInstaller `
   --collect-all playwright `
   --clean `
   backend/main.py
+if ($LASTEXITCODE -ne 0) {
+  # "Stop" doesn't apply to native programs: without this an old binary would be reported as built.
+  Write-Host "PyInstaller failed (exit code $LASTEXITCODE)." -ForegroundColor Red
+  exit $LASTEXITCODE
+}
 
 $BinaryPath = "src-tauri/binaries/langhirev2-backend-" + $Target + ".exe"
 Write-Host "Backend binary built: $BinaryPath"

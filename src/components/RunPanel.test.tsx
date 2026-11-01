@@ -10,6 +10,8 @@ import {
   skipJob,
   answerHelp,
   reviewApplication,
+  decideBrowserRequests,
+  stopJobCollection,
 } from "../lib/api";
 
 vi.mock("../lib/api", () => ({
@@ -20,6 +22,8 @@ vi.mock("../lib/api", () => ({
   skipJob: vi.fn(async () => ({ success: true })),
   answerHelp: vi.fn(async () => ({ success: true })),
   reviewApplication: vi.fn(async () => ({ success: true })),
+  decideBrowserRequests: vi.fn(async () => ({ success: true })),
+  stopJobCollection: vi.fn(async () => ({ success: true })),
 }));
 
 const mockStatus = vi.mocked(getApplyStatus);
@@ -31,6 +35,10 @@ const running = (extra = {}) => ({ running: true, mode: "all", workers: 1, log: 
   run_mode: "auto", current: [JOB], ...extra });
 
 describe("RunPanel", () => {
+  const requestRow = { id: "a".repeat(32), job_url: JOB.url, title: JOB.title, company: JOB.company,
+    mode: "trial", kind: "credentials", origin: "https://login.careers.example", tenant: "acme",
+    url: "https://login.careers.example/acme/sign-in", method: "", body: "",
+    description: "Allow account details on this exact site and tenant for this job?" };
   beforeEach(() => {
     mockStatus.mockResolvedValue(running() as never);
   });
@@ -40,6 +48,29 @@ describe("RunPanel", () => {
     const { container } = render(<RunPanel />);
     await waitFor(() => expect(mockStatus).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("shows the site asking for account details and decides only its displayed ID", async () => {
+    mockStatus.mockResolvedValue(running({ requests: [requestRow] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    expect(await screen.findByRole("group", { name: "Review https://login.careers.example" })).toBeInTheDocument();
+    expect(screen.getByText("Tenant: acme")).toBeInTheDocument();
+    expect(screen.getByText("https://login.careers.example/acme/sign-in")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Allow account details" }));
+    expect(decideBrowserRequests).toHaveBeenCalledWith([requestRow.id], true);
+    await user.click(screen.getByRole("button", { name: "Block" }));
+    expect(decideBrowserRequests).toHaveBeenCalledWith([requestRow.id], false);
+  });
+
+  it("shows collection approvals even when no application is running and can stop collection", async () => {
+    mockStatus.mockResolvedValue(running({ running: false, requests: [requestRow], current: [] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    await screen.findByRole("region", { name: "Account details approval" });
+    await user.click(screen.getByRole("button", { name: "Stop" }));
+    expect(stopJobCollection).toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
   });
 
   it("shows the current job, mode, step and time", async () => {
@@ -89,7 +120,7 @@ describe("RunPanel", () => {
     mockStatus.mockResolvedValue(running({ reviews: [{ url: JOB.url, title: "Data Intern", company: "Contoso", summary: "All set" }] }) as never);
     const user = userEvent.setup();
     render(<RunPanel />);
-    await user.click(await screen.findByRole("button", { name: /Approve/ }));
+    await user.click(await screen.findByRole("button", { name: /^Submit$/ }));
     expect(reviewApplication).toHaveBeenCalledWith(JOB.url, true);
     await user.click(screen.getByRole("button", { name: /^Skip$/ }));
     expect(reviewApplication).toHaveBeenCalledWith(JOB.url, false);

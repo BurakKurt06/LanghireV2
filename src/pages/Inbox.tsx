@@ -90,8 +90,9 @@ export default function Inbox() {
       <Section title="Check Gmail">
         <p className="text-[13px] text-muted-foreground mb-3">
           Reads job emails from Gmail through the sign-in in Settings → Accounts (a browser window opens briefly).
-          Nothing is sent, deleted or marked as read. The AI only sorts the emails, and it never runs during an
-          application run.
+          Nothing is sent from your Gmail, deleted or marked as read. The emails' text goes to your AI model so it can
+          sort them; it never runs during an application run. After a year, only an email's sender, subject and
+          category stay here (the email itself stays in Gmail).
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <button onClick={onCheck} disabled={working} className="btn-primary">

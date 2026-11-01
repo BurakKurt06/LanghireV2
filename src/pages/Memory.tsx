@@ -8,12 +8,12 @@ import { PageHeader, LoadingSpinner } from "../components/ui";
 import { useTranslation } from "react-i18next";
 
 const CATEGORY_COLORS: Record<string, string> = {
-  navigation: "bg-[#F0F4FF] text-[#3B5998]",
-  form_strategy: "bg-purple-50 text-purple-700",
-  element_interaction: "bg-amber-50 text-amber-700",
-  failure_recovery: "bg-red-50 text-red-700",
-  site_structure: "bg-green-50 text-green-700",
-  qa_pattern: "bg-indigo-50 text-indigo-700",
+  navigation: "bg-[#F0F4FF] text-[#3B5998] dark:bg-blue-500/15 dark:text-blue-300",
+  form_strategy: "bg-purple-50 text-purple-700 dark:bg-purple-500/15 dark:text-purple-300",
+  element_interaction: "bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+  failure_recovery: "bg-red-50 text-red-700 dark:bg-red-500/15 dark:text-red-400",
+  site_structure: "bg-green-50 text-green-700 dark:bg-green-500/15 dark:text-green-400",
+  qa_pattern: "bg-indigo-50 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300",
 };
 
 export default function Memory() {

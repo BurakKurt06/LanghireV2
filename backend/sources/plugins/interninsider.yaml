@@ -34,12 +34,16 @@ filters:
       - { value: "30", label: "Past month" }
     url_param: "posted"
 
+search_params:
+  posted_within:
+    param: posted
+    values: { "1": "1", "7": "7", "30": "30" }
+
 collection_prompt: |
-  SIGN-IN: If a sign-in or login page appears instead of the results, the user
-  must sign in in this browser window (do NOT try to enter credentials yourself). Use the wait action
-  (30 seconds) at most 4 times, checking the page after each wait, then open the
-  search URL below again. If it is still signed out, call done with success=false
-  and the text 'Sign-in required: log in to Intern Insider in this browser, then collect again.'
+  SIGN-IN: Collection reuses the session from the app's browser login. If a
+  sign-in page appears, call done with success=false and the text 'Sign-in
+  required: sign in using the app browser login, then collect again.' Do not
+  enter credentials or wait for a login inside this read-only collection run.
 
   START: This search page is already open when you begin:
   {search_url}

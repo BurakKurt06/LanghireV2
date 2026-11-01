@@ -20,7 +20,9 @@ GOOD_PROFILE = {"name": "Ada Lovelace", "email": "ada@example.com", "address": {
 class TestBuildAgentSecrets:
     def test_valid_profile_and_account_emails(self):
         s = apply_jobs.build_agent_secrets(GOOD_PROFILE, {"email": "login@example.com", "password": "hunter2hunter2"})
-        assert s == {"email": "ada@example.com", "account_email": "login@example.com", "password": "hunter2hunter2"}
+        # The Settings password is only the legacy sign-in password; new accounts get their own per site.
+        assert s == {"email": "ada@example.com", "account_email": "login@example.com",
+                     "previous_password": "hunter2hunter2"}
 
     def test_invalid_profile_email_falls_back_to_account_email(self):
         """A 4-letter typo must never be typed into forms or masked across page text."""
@@ -39,7 +41,7 @@ class TestBuildAgentSecrets:
     @pytest.mark.parametrize("password,kept", [("", False), ("abc", False), ("abcdef", True)])
     def test_short_or_empty_password_is_dropped(self, password, kept):
         s = apply_jobs.build_agent_secrets(GOOD_PROFILE, {"email": "", "password": password})
-        assert ("password" in s) is kept
+        assert ("previous_password" in s) is kept
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -108,17 +110,36 @@ def run(data_dir, monkeypatch):
                 raise FakeAgent.crash
             if FakeAgent.call_step:
                 await self.kwargs["register_new_step_callback"](None, None, 1)
+            if FakeAgent.during_run:
+                await FakeAgent.during_run(self)
             return self.history
 
         def stop(self):
             pass
 
+    class FakePage:
+        async def evaluate(self, js, *args):
+            return FakeBrowser.page_text
+
     class FakeBrowser:
+        # The page the run ends on: by default the employer's confirmation page.
+        page_text = "Thank you for applying! Your application has been received."
+        ended = []  # how each browser was ended
+
         def __init__(self, **kwargs):
             pass
 
-        async def close(self):
+        async def start(self):
             pass
+
+        async def get_current_page(self):
+            return FakePage()
+
+        async def close(self):
+            FakeBrowser.ended.append("close")
+
+        async def kill(self):
+            FakeBrowser.ended.append("kill")
 
     async def fake_save(url, status, error=None, agent_words=False):
         saved.append((status, error))
@@ -137,6 +158,7 @@ def run(data_dir, monkeypatch):
     FakeAgent.instances = []
     FakeAgent.crash = None
     FakeAgent.call_step = False
+    FakeAgent.during_run = None
     _run_fake_agent[0] = FakeAgent
     monkeypatch.setattr(apply_jobs, "Agent", FakeAgent)
     monkeypatch.setattr(apply_jobs, "_pause_state", {"paused": False})
@@ -154,15 +176,29 @@ def run(data_dir, monkeypatch):
     monkeypatch.setattr(apply_jobs.config, "get_llm", lambda: object())
     monkeypatch.setattr(apply_jobs.config, "maybe_apply_stealth", no_stealth)
     monkeypatch.setattr(apply_jobs.config, "build_browser_kwargs", lambda **kw: {})
+    class FakeGate:
+        sent = 0
+        failed = False
+        def __init__(self, *args, **kwargs):
+            pass
+        async def start(self):
+            pass
+        async def close(self):
+            pass
+        async def wait_idle(self):
+            pass
+    monkeypatch.setattr(apply_jobs.request_gate, "RequestGate", FakeGate)
     monkeypatch.setattr(apply_jobs.config, "load_runtime_settings", lambda: {"max_failures": 6})
 
-    def _run(url=GREENHOUSE, profile=GOOD_PROFILE, easy_apply=False, history=None):
+    def _run(url=GREENHOUSE, profile=GOOD_PROFILE, easy_apply=False, history=None, job_extra=None):
         FakeAgent.history = history or FakeHistory()
-        job = {"url": url, "title": "Intern", "company": "Acme", "location": "Boston"}
+        job = {"url": url, "title": "Intern", "company": "Acme", "location": "Boston", **(job_extra or {})}
         status = asyncio.run(apply_jobs.apply_to_job(job, profile, {}, [], easy_apply=easy_apply, worker_id=1))
         return status, (created[-1] if created else None), saved
 
     _run.agents = FakeAgent.instances
+    _run.browser = FakeBrowser
+    _run.saved = saved
     return _run
 
 
@@ -187,13 +223,22 @@ class TestAgentSetup:
         assert "linkedin.com/feed" not in task
         assert "mail.google.com/mail/u/0/#inbox" not in task
         assert "Wait up to 5 minutes" not in task
-        assert "at most 4 times" in task            # bounded wait, only when needed
+        # A bounded wait for a LinkedIn sign-in, only on LinkedIn (no Gmail checks at all).
+        assert ("at most 4 times" in task) == ("linkedin.com" in url)
 
     def test_linkedin_sign_in_rule_only_for_linkedin(self, run):
         _, gh, _ = run(url=GREENHOUSE)
         assert "LINKEDIN SIGN-IN" not in gh["task"]
         _, li, _ = run(url=LINKEDIN)
         assert "LINKEDIN SIGN-IN" in li["task"]
+
+    def test_a_letter_saved_for_this_job_replaces_the_profile_letter(self, run):
+        profile = {**GOOD_PROFILE, "cover_letter": "Dear Globex team"}
+        _, kwargs, _ = run(profile=profile, job_extra={"cover_letter": "Dear Acme team"})
+        assert "Dear Acme team" in kwargs["extend_system_message"]
+        assert "Dear Globex team" not in kwargs["extend_system_message"]
+        _, kwargs, _ = run(profile=profile)   # other jobs: the general letter
+        assert "Dear Globex team" in kwargs["extend_system_message"]
 
     def test_secrets_use_the_valid_email(self, run):
         _, kwargs, _ = run(profile={**GOOD_PROFILE, "email": "Zork"})
@@ -242,7 +287,7 @@ class TestLearningExtraction:
     def test_short_successful_run_spends_no_request(self, run, monkeypatch):
         calls = self._capture(monkeypatch)
         status, _, _ = run(history=FakeHistory(success=True, steps=3))
-        assert status == "applied"
+        assert status == "applied"  # the employer's confirmation page
         assert calls == []
 
 
@@ -314,6 +359,16 @@ def test_task_without_a_readable_resume_has_no_resume_block(run):
 
 # ── Failure reasons, form rules, pause ──────────────────────────────────────
 
+@pytest.mark.parametrize("crash", [None, RuntimeError("agent crashed")])
+def test_every_application_browser_is_ended_by_kill(run, crash):
+    """browser.close() is browser-use's stop(): it terminates the browser without the clean close, so
+    cookies and site data from the run's last moments were lost (collection and the Inbox use kill())."""
+    run.browser.ended.clear()
+    _run_fake_agent[0].crash = crash
+    run()
+    assert run.browser.ended == ["kill"]
+
+
 def test_failed_run_saves_the_agents_own_explanation(run):
     """errors()[-1] is None on a step without an error; that used to crash the save."""
     history = FakeHistory(success=False, steps=5, done_text="Salary field only takes digits.",
@@ -380,7 +435,7 @@ def test_settings_saved_after_startup_are_used(run, monkeypatch, tmp_path):
     _, kwargs, _ = run()
     assert kwargs["available_file_paths"] == [new_resume]
     assert kwargs["sensitive_data"]["account_email"] == "new-login@example.com"
-    assert kwargs["sensitive_data"]["password"] == "brand-new-password"
+    assert kwargs["sensitive_data"]["previous_password"] == "brand-new-password"
     assert "spam.example" in kwargs["task"]
 
 
@@ -425,16 +480,16 @@ def test_page_check_rules_always_and_review_rules_only_in_trial_runs(run):
     apply_jobs.set_trial_run(False)
     _, kwargs, _ = run()
     assert "PAGE BY PAGE" in kwargs["task"] and "record_guesses" in kwargs["task"]
-    assert "never stop the application over it" in kwargs["task"]
-    assert "referred by an employee, worked or applied here before" in kwargs["task"]
+    assert "NEVER GUESS these" in kwargs["task"] and "ask_for_answers" in kwargs["task"]
+    assert "having worked for or applied to this company before" in kwargs["task"]  # one of the never-guess questions
     assert "REVIEW BEFORE SUBMITTING" not in kwargs["task"]
-    assert kwargs["step_timeout"] == 300
+    assert kwargs["step_timeout"] == apply_jobs.REVIEW_STEP_TIMEOUT
     apply_jobs.set_trial_run(True)
     try:
         _, kwargs, _ = run()
     finally:
         apply_jobs.set_trial_run(False)
-    assert "REVIEW BEFORE SUBMITTING" in kwargs["task"]
+    assert "TRIAL: use live login" in kwargs["task"]
     assert kwargs["step_timeout"] == apply_jobs.REVIEW_STEP_TIMEOUT
     assert "request_submit_review" in kwargs["tools"].registry.registry.actions
 
@@ -448,6 +503,26 @@ def test_a_note_on_the_job_reaches_the_task(run, monkeypatch):
     monkeypatch.setattr(apply_jobs, "apply_to_job", with_note)
     _, kwargs, _ = run()
     assert "NOTE FROM THE USER ABOUT THIS JOB" in kwargs["task"] and "Tick the terms box first" in kwargs["task"]
+
+
+@pytest.mark.parametrize("latest", ["Use the saved field-of-study choice", ""])
+def test_queued_job_uses_latest_note_for_its_own_url_even_when_cleared(run, monkeypatch, latest):
+    monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {
+        GREENHOUSE: {"user_note": latest}, LINKEDIN: {"user_note": "OTHER JOB ONLY"}})
+    _, kwargs, _ = run(job_extra={"user_note": "STALE QUEUED NOTE"})
+    assert "STALE QUEUED NOTE" not in kwargs["task"]
+    assert "OTHER JOB ONLY" not in kwargs["task"]
+    assert ("NOTE FROM THE USER ABOUT THIS JOB" in kwargs["task"]) == bool(latest)
+    if latest:
+        assert latest in kwargs["task"]
+
+
+def test_same_title_jobs_have_different_windows_safe_log_paths(run):
+    from pathlib import Path
+    _, first, _ = run(job_extra={"title": "X" * 30 + ".", "company": "A" * 43 + "."})
+    _, second, _ = run(url=GREENHOUSE + "4", job_extra={"title": "X" * 30 + ".", "company": "A" * 43 + "."})
+    assert first["save_conversation_path"] != second["save_conversation_path"]
+    assert not Path(first["save_conversation_path"]).name.endswith(".")
 
 
 def test_trial_runs_get_more_steps(run):
@@ -475,25 +550,28 @@ def test_agents_own_explanation_is_saved_as_written(monkeypatch, agent_words, ex
 
 
 
-# ── training runs: fill in, never submit ────────────────────────────────────
+# ── trial runs: every page on its own; Skip at the final review is practice ──
 
-def test_training_run_never_submits_and_leaves_the_job_pending(run, monkeypatch):
-    updates = []
-    monkeypatch.setattr(apply_jobs, "update_job", lambda url, **fields: updates.append(fields))
-    apply_jobs.set_run_mode("training")
+def test_finishing_trial_is_practice_without_a_review_decision(run, monkeypatch):
+    updates=[]
+    monkeypatch.setattr(apply_jobs,'update_job',lambda url,**fields:updates.append(fields))
+    async def finish_trial(agent):
+        action=agent.kwargs['tools'].registry.registry.actions['request_submit_review']
+        result=await asyncio.wait_for(action.function(params=action.param_model(summary='Local fields done'),browser_session=run.browser()),1)
+        assert result.is_done and apply_jobs.pending_reviews()==[]
+    _run_fake_agent[0].during_run=finish_trial
+    apply_jobs.set_run_mode('training')
     try:
-        status, kwargs, saved = run(history=FakeHistory(success=True))
+        status,kwargs,saved=run(history=FakeHistory(success=False,done_text='Trial finished locally.'))
     finally:
-        apply_jobs.set_run_mode("auto")
-    assert status == "practised"
-    assert "TRAINING RUN (practice)" in kwargs["task"] and "NEVER click the final Submit" in kwargs["task"]
-    assert "REVIEW BEFORE SUBMITTING" not in kwargs["task"]
-    assert saved == []                                   # never marked applied
-    assert updates[-1]["status"] == "pending" and updates[-1]["practised_at"]
+        apply_jobs.set_run_mode('auto')
+    assert status=='practised' and saved==[]
+    assert 'TRIAL: use live login' in kwargs['task']
+    assert updates[-1]['status']=='pending' and updates[-1]['practised_at']
 
 
-def test_failed_training_run_is_a_normal_failure(run):
-    apply_jobs.set_run_mode("training")
+def test_a_failed_trial_run_is_a_normal_failure(run):
+    apply_jobs.set_run_mode("trial")
     try:
         status, _, saved = run(history=FakeHistory(success=False, done_text="Couldn't open the form."))
     finally:
@@ -501,13 +579,11 @@ def test_failed_training_run_is_a_normal_failure(run):
     assert status == "failed" and saved[-1] == ("failed", "Couldn't open the form.")
 
 
-@pytest.mark.parametrize("mode,trial,training", [
-    ("auto", False, False), ("trial", True, False), ("training", False, True), ("nonsense", False, False),
-])
-def test_run_modes(mode, trial, training):
+@pytest.mark.parametrize("mode,trial", [("auto", False), ("trial", True), ("training", True), ("nonsense", False)])
+def test_run_modes(mode, trial):
     apply_jobs.set_run_mode(mode)
     try:
-        assert (apply_jobs.is_trial_run(), apply_jobs.is_training_run()) == (trial, training)
+        assert apply_jobs.is_trial_run() == trial
     finally:
         apply_jobs.set_run_mode("auto")
 
@@ -562,10 +638,10 @@ def test_a_sites_human_check_is_left_for_the_user(run, monkeypatch):
     _run_fake_agent[0].call_step = True
     status, _, saved = run(history=FakeHistory(success=False, done_text="Blocked by a check."))
     assert status == "needs_you"
-    assert saved[-1][0] == "needs_you" and "Trial mode" in saved[-1][1]
+    assert saved[-1][0] == "needs_you" and "This run stopped" in saved[-1][1]
 
 
-def test_in_a_trial_run_the_agent_asks_for_help_with_the_human_check(run, monkeypatch):
+def test_trial_human_check_ends_promptly_and_cannot_be_reported_as_success(run, monkeypatch):
     async def human_check(browser, settings):
         raise apply_jobs._captcha.HumanCheckNeeded()
 
@@ -577,8 +653,8 @@ def test_in_a_trial_run_the_agent_asks_for_help_with_the_human_check(run, monkey
         status, kwargs, _ = run(history=FakeHistory(success=True))
     finally:
         apply_jobs.set_run_mode("auto")
-    assert status == "applied"
-    assert "the app ticks it for you; if it's still there, ask the user" in kwargs["task"]
+    assert status == "needs_you"  # a fake model success cannot erase a real blocking challenge
+    assert "use live login" in kwargs["task"]
 
 
 def test_an_unsolved_captcha_needs_you_and_skips_the_sites_other_jobs(run, monkeypatch):
@@ -684,7 +760,7 @@ def test_applying_to_a_skipped_job_by_hand_overrides_the_checks(run, monkeypatch
     status = asyncio.run(apply_jobs.apply_to_job(
         {"url": GREENHOUSE, "title": "Co-Op", "company": "Acme", "fit_override": True}, profile, {}, [],
         easy_apply=False, worker_id=1))
-    assert status == "applied"
+    assert status == "applied"  # the employer's confirmation page
 
 
 def test_needs_you_report_marks_the_job(run):
@@ -1018,11 +1094,11 @@ def test_secrets_are_only_filled_into_typing():
             seen[action_name] = sensitive_data
 
     tools = SimpleNamespace(registry=Registry())
-    apply_jobs.secrets_only_when_typing(tools)
-    secrets = {"password": "Hunter2-Secret!"}
+    apply_jobs.secrets_only_when_typing(tools, "https://jobs.example/1", {"email": "ada@example.com"})
     for name in ("input", "navigate", "done", "ask_user_for_help", "evaluate", "send_keys"):
-        asyncio.run(tools.registry.execute_action(name, {}, sensitive_data=secrets))
-    assert seen["input"] == secrets
+        asyncio.run(tools.registry.execute_action(name, {"text": "<secret>email</secret>"},
+                                                  sensitive_data={"email": "ada@example.com"}))
+    assert seen["input"] == {"email": "ada@example.com"}
     assert all(seen[name] is None for name in ("navigate", "done", "ask_user_for_help", "evaluate", "send_keys"))
 
 
@@ -1033,14 +1109,18 @@ def test_the_prompt_never_invites_writing_the_password_down(run, monkeypatch):
     assert "Never write <secret> tags" in task
 
 
-def test_verification_codes_only_from_the_site_that_asked(run):
+def test_the_agent_is_never_sent_to_gmail(run):
     _, kwargs, _ = run()
-    assert "sent BY THE SITE YOU ARE ON" in kwargs["task"] and "Never use a code from Google" in kwargs["task"]
+    task = kwargs["task"]
+    assert "get_email_verification" in task and "Never open Gmail" in task
+    assert "mail.google.com" not in task
+    # No shared password tricks: no variants, no resets.
+    assert "!A1" not in task and "Forgot your password" not in task and "Never use 'Forgot password'" in task
 
 
 def test_a_page_added_field_is_never_saved_as_your_answer(monkeypatch):
     saved = []
-    store = SimpleNamespace(qa_user_confirmed=lambda: {"Do you need sponsorship?"},
+    store = SimpleNamespace(qa_user_answers=lambda: {"Do you need sponsorship?": "No"},
                             qa_set_answer=lambda q, a, **k: saved.append((q, a)))
     monkeypatch.setattr(apply_jobs, "get_memory_store", lambda: store)
     monkeypatch.setattr(apply_jobs, "_pin_in_system_message", lambda agent: None)
@@ -1064,3 +1144,15 @@ def test_the_agents_temp_folder_is_removed(tmp_path):
     (folder / "screenshots" / "step_1.png").write_bytes(b"png")
     apply_jobs.remove_agent_files(SimpleNamespace(agent_directory=folder))
     assert not folder.exists()
+
+
+def test_each_jobs_metrics_carry_the_runs_id(run, monkeypatch):
+    """The Logs page joins a run's log lines and its results by run id (the rows had none)."""
+    rows = []
+    monkeypatch.setattr(apply_jobs, "MetricsStore", lambda: SimpleNamespace(record_run=lambda **kw: rows.append(kw)))
+    apply_jobs.new_run("run-1234")
+    try:
+        run()
+    finally:
+        apply_jobs.new_run()
+    assert [r["run_id"] for r in rows] == ["run-1234"]

@@ -454,3 +454,60 @@ describe("api — getChromiumStatus (bypasses request helper)", () => {
     expect(fetchMock.mock.calls.at(-1)![1]).toBeUndefined();
   });
 });
+
+describe("api — polling safety and timeouts", () => {
+  it("a GET already on its way is shared, never sent twice at once", async () => {
+    const api = await loadApi();
+    let release!: () => void;
+    fetchMock.mockImplementation(() => new Promise<Response>((r) => { release = () => r(jsonResponse({ running: true })); }));
+    const first = api.getApplyStatus();
+    const second = api.getApplyStatus();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    release();
+    expect(await first).toEqual({ running: true });
+    expect(await second).toEqual({ running: true });
+    fetchMock.mockResolvedValue(jsonResponse({ running: false }));
+    expect(await api.getApplyStatus()).toEqual({ running: false });   // a later poll asks again
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("POSTs are never shared", async () => {
+    const api = await loadApi();
+    await Promise.all([api.skipJob("u1"), api.skipJob("u1")]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("a backend that never answers is given up on with a clear message", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = await loadApi();
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => new Promise((_, reject) => {
+        init.signal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }));
+      const pending = api.getApplyStatus();
+      const check = expect(pending).rejects.toThrow(/didn't answer within 60 seconds/);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await check;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("AI calls get a longer wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = await loadApi();
+      let aborted = false;
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => new Promise((resolve) => {
+        init.signal!.addEventListener("abort", () => { aborted = true; });
+        setTimeout(() => resolve(jsonResponse({ success: true, cover_letter: "Dear Acme" })), 5 * 60_000);
+      }));
+      const letter = api.generateCoverLetter("desc", "Intern", "Acme");
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(await letter).toEqual({ success: true, cover_letter: "Dear Acme" });
+      expect(aborted).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -13,9 +13,14 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.request
 import urllib.error
 
@@ -23,6 +28,9 @@ TEST_PORT = 8799
 BASE_URL = f"http://127.0.0.1:{TEST_PORT}"
 STARTUP_TIMEOUT = 45
 TOKEN = ""
+# The backend under test gets a throwaway home folder, so it never reads or
+# writes the real settings, jobs, profile, API token or browser profiles.
+TEST_HOME = ""
 
 passed = 0
 failed = 0
@@ -43,13 +51,27 @@ def wait_for_backend() -> bool:
     return False
 
 
-def read_token() -> str:
+def data_dir(home: str) -> str:
+    """The backend's data folder for a given home folder (core.config.get_data_dir)."""
     if sys.platform == "darwin":
-        path = os.path.expanduser("~/Library/Application Support/langhirev2/.api_token")
-    elif sys.platform == "win32":
-        path = os.path.join(os.environ.get("APPDATA", ""), "langhirev2", ".api_token")
-    else:
-        path = os.path.expanduser("~/.config/langhirev2/.api_token")
+        return os.path.join(home, "Library", "Application Support", "langhirev2")
+    if sys.platform == "win32":
+        return os.path.join(home, "AppData", "Roaming", "langhirev2")
+    return os.path.join(home, ".config", "langhirev2")
+
+
+def isolated_env(home: str) -> dict:
+    """The environment for the backend under test: every home/app-data variable points into `home`."""
+    env = os.environ.copy()
+    env["PORT"] = str(TEST_PORT)
+    env["HOME"] = home
+    env["USERPROFILE"] = home
+    env["APPDATA"] = os.path.join(home, "AppData", "Roaming")
+    return env
+
+
+def read_token() -> str:
+    path = os.path.join(data_dir(TEST_HOME), ".api_token")
 
     for _ in range(10):
         if os.path.exists(path):
@@ -116,13 +138,15 @@ def test_plugins():
         assert expected in names, f"Missing plugin: {expected}"
 
 
-def test_profile_roundtrip():
-    # Save existing profile to restore after test
-    try:
-        existing_profile = api_request("GET", "/profile")
-    except Exception:
-        existing_profile = None
+def test_plugin_structure():
+    for plugin in api_request("GET", "/plugins")["plugins"]:
+        assert isinstance(plugin.get("name"), str) and plugin["name"]
+        assert isinstance(plugin.get("display_name"), str) and plugin["display_name"]
+        assert isinstance(plugin.get("website"), str) and plugin["website"].startswith("https://")
 
+
+def test_profile_roundtrip():
+    # The backend runs on a throwaway data folder: nothing real to save or restore.
     test_profile = {
         "name": "Test User",
         "email": "test@example.com",
@@ -157,10 +181,6 @@ def test_profile_roundtrip():
     assert loaded.get("country") == "IN", f"Profile country mismatch: {loaded.get('country')}"
     assert loaded.get("notice_period") == "30 days", f"Notice period mismatch: {loaded.get('notice_period')}"
 
-    # Restore original profile
-    if existing_profile:
-        api_request("PUT", "/profile", existing_profile)
-
 
 def test_llm_connection():
     api_key = os.environ.get("TEST_OPENROUTER_API_KEY", "")
@@ -187,9 +207,9 @@ def test_chromium_status():
 def test_chromium_launches():
     result = subprocess.run(
         [sys.executable, "-c",
-         "from playwright.sync_api import sync_playwright; "
+         "from playwright.sync_api import sync_playwright; from backend.core.browsers import find_browser; "
          "p = sync_playwright().start(); "
-         "b = p.chromium.launch(headless=True); "
+         "b = p.chromium.launch(headless=True, executable_path=find_browser('brave') or find_browser('chrome') or p.chromium.executable_path); "
          "page = b.new_page(); "
          "page.goto('about:blank'); "
          "assert page.title() is not None; "
@@ -202,21 +222,34 @@ def test_chromium_launches():
 
 
 def test_chromium_navigates():
-    result = subprocess.run(
+    class Page(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"<title>Local integration page</title>Local integration page")
+        def log_message(self, *args):
+            pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        result = subprocess.run(
         [sys.executable, "-c",
-         "from playwright.sync_api import sync_playwright; "
+         "from playwright.sync_api import sync_playwright; from backend.core.browsers import find_browser; "
          "p = sync_playwright().start(); "
-         "b = p.chromium.launch(headless=True); "
+         "b = p.chromium.launch(headless=True, executable_path=find_browser('brave') or find_browser('chrome') or p.chromium.executable_path); "
          "page = b.new_page(); "
-         "page.goto('https://example.com'); "
+         f"page.goto('http://127.0.0.1:{server.server_port}/'); "
          "title = page.title(); "
-         "assert 'Example' in title, f'Unexpected title: {title}'; "
+         "assert 'Local integration page' in title, f'Unexpected title: {title}'; "
          "content = page.content(); "
-         "assert 'Example Domain' in content; "
+         "assert 'Local integration page' in content; "
          "b.close(); p.stop(); "
          "print('NAVIGATE_OK')"],
         capture_output=True, text=True, timeout=30,
-    )
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
     assert result.returncode == 0, f"Chromium navigation failed: {result.stderr[-500:]}"
     assert "NAVIGATE_OK" in result.stdout, f"Navigation didn't complete: {result.stdout}"
 
@@ -244,26 +277,39 @@ def test_cover_letter_generation():
 
 
 def test_collection_dry_run():
+    """The collect endpoint is wired up, without starting a collection (no browser, no job board).
+
+    Collection is switched off in the throwaway settings first, so the request
+    must be refused with 409 before anything starts.
+    """
+    settings = api_request("GET", "/settings")
+    api_request("PUT", "/settings", {**settings, "job_collection_enabled": False})
     body = {"title": "Test Engineer", "max_jobs": 1, "source": "linkedin"}
     try:
         resp = api_request("POST", "/jobs/collect", body)
-        # Either succeeds (starts thread) or fails gracefully (no login)
-        assert "success" in resp or "error" in resp, f"Unexpected response: {resp}"
     except urllib.error.HTTPError as e:
-        # 400/429 is acceptable (rate limited or missing login)
-        assert e.code in (400, 429, 500), f"Unexpected HTTP error: {e.code}"
+        assert e.code == 409, f"Expected 409 (collection off), got HTTP {e.code}"
+    else:
+        raise AssertionError(f"Collection was not refused: {resp}")
+    status = api_request("GET", "/jobs/collect/status")
+    assert not status.get("running"), f"A collection started: {status}"
 
 
 def main():
-    global TOKEN
+    global TOKEN, TEST_HOME, TEST_PORT, BASE_URL
 
     parser = argparse.ArgumentParser(description="LangHire integration tests")
     parser.add_argument("--binary", help="Path to built backend binary (omit to test source)")
     args = parser.parse_args()
+    with socket.socket() as port_socket:
+        port_socket.bind(("127.0.0.1", 0))
+        TEST_PORT = port_socket.getsockname()[1]
+    BASE_URL = f"http://127.0.0.1:{TEST_PORT}"
 
-    # Start backend
-    env = os.environ.copy()
-    env["PORT"] = str(TEST_PORT)
+    # Start backend on its own throwaway home folder (removed afterwards).
+    TEST_HOME = tempfile.mkdtemp(prefix="langhire-integration-")
+    env = isolated_env(TEST_HOME)
+    print(f"Isolated data folder: {data_dir(TEST_HOME)}")
 
     if args.binary:
         cmd = [args.binary, str(TEST_PORT)]
@@ -292,7 +338,7 @@ def main():
         test("Backend health", test_health)
         test("Countries endpoint", test_countries)
         test("Plugins loaded", test_plugins)
-        test("Plugin structure valid", lambda: None)  # covered by test_plugins assertions
+        test("Plugin structure valid", test_plugin_structure)
         test("Profile round-trip (international)", test_profile_roundtrip)
         test("Chromium status", test_chromium_status)
         test("Chromium launches (headless)", test_chromium_launches)
@@ -317,6 +363,7 @@ def main():
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        shutil.rmtree(TEST_HOME, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -202,6 +202,31 @@ describe("Profile page", () => {
     expect(screen.getByText("coverLetter.title")).toBeInTheDocument();
   });
 
+  it("a new country brings its currency unless the user picked one", async () => {
+    const user = userEvent.setup();
+    render(<Profile />);
+    await screen.findByRole("button", { name: "save" });
+    await user.selectOptions(screen.getByDisplayValue("🇺🇸 United States"), "DE");
+    await user.click(screen.getByRole("button", { name: "save" }));
+    await waitFor(() => expect(mockSaveProfile).toHaveBeenCalled());
+    const saved = mockSaveProfile.mock.calls[0][0];
+    expect(saved.salary_expectation.currency).toBe("EUR");     // was the US default: follows the country
+    expect(saved.salary_expectation.period).toBe("annual");
+  });
+
+  it("a currency the user chose stays when the country changes", async () => {
+    mockGetProfile.mockResolvedValue({
+      ...sampleProfile, salary_expectation: { min: 1, max: 2, currency: "GBP", period: "annual" },
+    } as CandidateProfile);
+    const user = userEvent.setup();
+    render(<Profile />);
+    await screen.findByRole("button", { name: "save" });
+    await user.selectOptions(screen.getByDisplayValue("🇺🇸 United States"), "DE");
+    await user.click(screen.getByRole("button", { name: "save" }));
+    await waitFor(() => expect(mockSaveProfile).toHaveBeenCalled());
+    expect(mockSaveProfile.mock.calls[0][0].salary_expectation.currency).toBe("GBP");
+  });
+
   it("shows an error banner when saveProfile rejects (page stays mounted)", async () => {
     mockSaveProfile.mockRejectedValueOnce(new Error("network down"));
     const user = userEvent.setup();
@@ -215,14 +240,23 @@ describe("Profile page", () => {
     expect(screen.getByDisplayValue("Ada Lovelace")).toBeInTheDocument();
   });
 
-  it("renders with defaults when getProfile/getCountries reject", async () => {
+  it("a failed profile load offers Retry, never a form whose blanks could be saved", async () => {
+    const user = userEvent.setup();
     mockGetProfile.mockRejectedValueOnce(new Error("boom"));
-    mockGetCountries.mockRejectedValueOnce(new Error("boom"));
     render(<Profile />);
 
-    // Loading still resolves (finally) and the form renders with default English language tag.
-    expect(await screen.findByRole("button", { name: "save" })).toBeInTheDocument();
-    expect(screen.getByText("English")).toBeInTheDocument();
+    expect(await screen.findByText("loadError")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "save" })).not.toBeInTheDocument();
+    expect(mockSaveProfile).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "retry" }));
+    expect(await screen.findByDisplayValue("Ada Lovelace")).toBeInTheDocument();
+  });
+
+  it("a failed country list alone still shows the profile", async () => {
+    mockGetCountries.mockRejectedValueOnce(new Error("boom"));
+    render(<Profile />);
+    expect(await screen.findByDisplayValue("Ada Lovelace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "save" })).toBeInTheDocument();
   });
 
   it("sets a search area and a field-of-study fallback", async () => {
@@ -238,6 +272,34 @@ describe("Profile page", () => {
       expect(mockSaveProfile).toHaveBeenCalledWith(expect.objectContaining({
         search_area: { center_zip: "", radius: "50" },
         education: expect.objectContaining({ major_alternative: "Finance" }),
+      })),
+    );
+  });
+});
+
+describe("Profile labels", () => {
+  beforeEach(() => {
+    mockGetProfile.mockResolvedValue(sampleProfile as CandidateProfile);
+  });
+
+  it("each field is named by its label (screen readers)", async () => {
+    render(<Profile />);
+    await screen.findByRole("button", { name: "save" });
+    expect(screen.getByLabelText("country.label")).toHaveValue("US");
+    expect(screen.getAllByLabelText(/./).length).toBeGreaterThan(5);
+  });
+
+  it("saves the Job search preferences with the profile", async () => {
+    mockGetProfile.mockResolvedValue({ ...sampleProfile } as CandidateProfile);
+    const user = userEvent.setup();
+    render(<Profile />);
+    expect(await screen.findByText("jobSearch.title")).toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Part-time" }));
+    await user.type(screen.getByLabelText("jobSearch.notes"), "Mornings only");
+    await user.click(screen.getByRole("button", { name: "save" }));
+    await waitFor(() =>
+      expect(mockSaveProfile).toHaveBeenCalledWith(expect.objectContaining({
+        job_search: expect.objectContaining({ job_types: ["part_time"], notes: "Mornings only", mode: "quick" }),
       })),
     );
   });

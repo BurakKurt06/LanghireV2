@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from . import browser_policy
 
 try:
     from core.config import split_name
@@ -28,7 +29,13 @@ except ImportError:  # pragma: no cover
 
 _SCAN_JS = r"""() => {
   const out = [];
+  // Only the backend hashes these values; the checklist/prompt uses `fields`.
+  const approval = [];
+  const documents = [];
+  const visited = new Set();
   const seenRadio = new Set();
+  // Named form controls can shadow these properties even in an isolated world.
+  const formValue = (form, key) => Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, key).get.call(form);
   const text = (el) => (el ? (el.innerText || el.textContent || '') : '').replace(/\s+/g, ' ').trim();
   const shown = (el) => {
     const s = getComputedStyle(el), r = el.getBoundingClientRect();
@@ -79,12 +86,20 @@ _SCAN_JS = r"""() => {
 
   const add = (el, root) => {
     const tag = el.tagName, type = (el.getAttribute('type') || '').toLowerCase();
-    if (tag === 'INPUT' && ['hidden', 'submit', 'button', 'image', 'reset', 'file', 'password'].includes(type)) return;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return;
+    if (tag === 'INPUT' && ['hidden', 'submit', 'button', 'image', 'reset'].includes(type)) return;
     if (!shown(el)) return;
     let { t: label, star } = labelText(el, root);
     if (/robots only|do not enter if you'?re human/i.test(label)) return;  // honeypot
     let kind = 'text', value = '', options = [];
-    if (type === 'radio') {
+    if (type === 'password') {
+      kind = 'password';
+      // Report completeness, never put an account password into a prompt.
+      value = el.value ? 'entered' : '';
+    } else if (type === 'file') {
+      kind = 'file';
+      value = el.files && el.files.length ? 'attached' : '';
+    } else if (type === 'radio') {
       if (!el.name || seenRadio.has(el.name)) return;
       seenRadio.add(el.name);
       const group = Array.from((root.querySelectorAll ? root : document).querySelectorAll('input[type=radio]'))
@@ -105,11 +120,11 @@ _SCAN_JS = r"""() => {
     } else if (tag === 'SELECT') {
       kind = 'dropdown';
       const o = el.selectedOptions[0];
-      value = o && o.value !== '' && !/^\s*(select|choose|--)/i.test(o.text) ? text(o) : '';
+      value = o && o.value !== '' && !/^\s*(select|choose|no response|--)/i.test(o.text) ? text(o) : '';
     } else if (tag === 'BUTTON' || el.getAttribute('role') === 'combobox') {
       kind = 'dropdown';
       const shownText = text(el) || el.value || '';
-      value = /^(select one|select|choose one|choose|--)?$/i.test(shownText) ? '' : shownText;
+      value = /^(select one|select|choose one|choose|no response|--)?$/i.test(shownText) ? '' : shownText;
       // Workday's searchable lists show the choice as a pill next to the input.
       if (!value) {
         const box = el.closest('[data-automation-id^="formField"]') || el.parentElement;
@@ -119,9 +134,23 @@ _SCAN_JS = r"""() => {
     } else {
       value = (el.value || '').trim();
     }
+    // Workday's picker input is a search query, not a committed answer.
+    // Its selected pill survives when the query clears. Treating query text as
+    // an answer let Next proceed with 'FinTech' and Review show 'No Response'.
+    const workday = el.closest('[data-automation-id^="formField"]');
+    if (workday && (el.getAttribute('role') === 'combobox' ||
+        el.getAttribute('data-automation-id') === 'searchBox')) {
+      const pills = Array.from(workday.querySelectorAll('[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"] li'));
+      kind = 'dropdown';
+      value = pills.map(text).filter(Boolean).join('; ');
+      if (!value && el.value) options = ['Select a matching option; typed search text is not saved'];
+    }
     label = clean(label);
     if (!label) return;
-    out.push({ label: label.slice(0, 160), kind, required: requiredOf(el, star), value: value.slice(0, 80),
+    const form = el.form || el.closest('form');
+    out.push({ label: label.slice(0, 160), kind, required: requiredOf(el, star), value,
+               id: el.id || '', name: el.name || '', form_action: form ? formValue(form, 'action') : '',
+               form_method: form ? formValue(form, 'method') : '', form_target: form ? formValue(form, 'target') : '',
                error: errorOf(el).slice(0, 160), options: options.slice(0, 6) });
   };
 
@@ -130,13 +159,31 @@ _SCAN_JS = r"""() => {
     const all = root.querySelectorAll('*');
     for (const el of all) {
       if (el.matches(SELECTOR)) add(el, root);
+      if (el.tagName === 'FORM') {
+        approval.push({ document: el.ownerDocument.location.href, id: el.getAttribute('id') || '', action: formValue(el, 'action'),
+          method: formValue(el, 'method'), target: formValue(el, 'target'), controls: Array.from(formValue(el, 'elements')).map(c => ({
+            tag: c.tagName, type: c.type || '', name: c.name || '', id: c.id || '',
+            value: c.value || '', checked: !!c.checked, disabled: !!c.disabled,
+            action: c.getAttribute('formaction') || '', method: c.getAttribute('formmethod') || '',
+            target: c.getAttribute('formtarget') || ''
+          })) });
+      }
       if (el.shadowRoot) walk(el.shadowRoot);
+      if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+        try { if (el.contentDocument) visit(el.contentDocument); } catch (_) { /* unreadable: never authorize its submit */ }
+      }
     }
   };
-  walk(document);
+  const visit = (doc) => {
+    if (visited.has(doc)) return;
+    visited.add(doc);
+    documents.push(doc.location.href);
+    walk(doc);
+  };
+  visit(document);
   const errorBanner = Array.from(document.querySelectorAll('[data-automation-id="errorBanner"], [data-automation-id="errorSummary"], [role="alert"]'))
     .map(text).filter(Boolean).join(' ').slice(0, 300);
-  return JSON.stringify({ fields: out, errorBanner });
+  return JSON.stringify({ fields: out, errorBanner, approval_state: approval, scanned_documents: documents });
 }"""
 
 # Buttons that move on from the page.
@@ -152,7 +199,7 @@ async def scan(browser_session) -> dict:
         page = await browser_session.get_current_page()
         if page is None:
             return {}
-        raw = await page.evaluate(_SCAN_JS)
+        raw = await browser_policy.evaluate(browser_session, _SCAN_JS)
         data = json.loads(raw) if raw else {}
         return data if isinstance(data, dict) else {}
     except Exception:
@@ -171,6 +218,15 @@ def _describe(field: dict) -> str:
 
 def _digits(value: str) -> str:
     return re.sub(r"\D", "", value or "")
+
+
+def _degree_level(value: str) -> str:
+    value = re.sub(r"[.\s]", "", value or "").casefold()
+    for level, pattern in (("doctorate", r"doctor|phd|dphil"), ("master", r"master|^m(sc|s|a|ba|eng)$"),
+                           ("bachelor", r"bachelor|^b(sc|s|a|ba|eng)$"), ("associate", r"associate|^a(as|a|s)$")):
+        if re.search(pattern, value):
+            return level
+    return ""
 
 
 def profile_mismatches(data: dict, profile: dict | None) -> list[tuple[str, str, str]]:
@@ -193,6 +249,12 @@ def profile_mismatches(data: dict, profile: dict | None) -> list[tuple[str, str,
     out = []
     for field in data.get("fields", []):
         shown = (field.get("value") or "").strip()
+        degree = (profile.get("education") or {}).get("degree") if isinstance(profile.get("education"), dict) else ""
+        if shown and re.search(r"\bdegree\b|education level", field.get("label") or "", re.I):
+            expected_level, shown_level = _degree_level(degree or ""), _degree_level(shown)
+            if expected_level and shown_level and expected_level != shown_level:
+                out.append((field.get("label") or "Degree", shown, degree))
+            continue
         if not shown or field.get("kind") != "text":
             continue
         label = field.get("label") or ""

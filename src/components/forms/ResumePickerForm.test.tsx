@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { open } from "@tauri-apps/plugin-dialog";
 import ResumePickerForm from "./ResumePickerForm";
@@ -8,6 +8,18 @@ import { getSettings, saveSettings } from "../../lib/api";
 vi.mock("../../lib/api", () => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
+}));
+
+// The desktop app's own drag-and-drop event (it carries the dropped file's path).
+type DropHandler = (event: { payload: unknown }) => void;
+const dragDrop = vi.hoisted(() => ({ handler: undefined as DropHandler | undefined }));
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: async (handler: DropHandler) => {
+      dragDrop.handler = handler;
+      return () => { dragDrop.handler = undefined; };
+    },
+  }),
 }));
 
 const mockGetSettings = vi.mocked(getSettings);
@@ -149,27 +161,46 @@ describe("ResumePickerForm", () => {
     expect(zone.className).not.toContain("border-primary");
   });
 
-  it("saves and shows success when a PDF file is dropped", async () => {
-    const onSaved = vi.fn();
-    render(<ResumePickerForm onSaved={onSaved} />);
+  it("a dropped file that arrives without its location is refused, never saved as a bare name", async () => {
+    render(<ResumePickerForm />);
     await screen.findByText("Resume PDF Path");
 
-    const zone = getDropZone();
-    const file = new File(["%PDF-1.4"], "resume.pdf", {
-      type: "application/pdf",
-    });
+    const file = new File(["%PDF-1.4"], "resume.pdf", { type: "application/pdf" });
+    fireEvent.drop(getDropZone(), { dataTransfer: { files: [file], types: ["Files"] } });
 
-    fireEvent.drop(zone, { dataTransfer: { files: [file], types: ["Files"] } });
+    expect(await screen.findByText(/Couldn't read where that file is/)).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText("/path/to/your/resume.pdf")).toHaveValue("");
+  });
 
-    await waitFor(() =>
-      expect(mockSaveSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ resume_path: "resume.pdf" }),
-      ),
-    );
-    expect(onSaved).toHaveBeenCalled();
-    expect(await screen.findByText(/Saved/)).toBeInTheDocument();
-    const input = screen.getByPlaceholderText("/path/to/your/resume.pdf");
-    expect(input).toHaveValue("resume.pdf");
+  it("saves the real path from the desktop app's drop event over the zone", async () => {
+    const onSaved = vi.fn();
+    const box = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(
+      { left: 0, top: 0, right: 400, bottom: 100, width: 400, height: 100, x: 0, y: 0, toJSON: () => ({}) } as DOMRect);
+    try {
+      render(<ResumePickerForm onSaved={onSaved} />);
+      await screen.findByText("Resume PDF Path");
+      await waitFor(() => expect(dragDrop.handler).toBeDefined());
+
+      act(() => dragDrop.handler!({ payload: { type: "enter", paths: ["C:\\Users\\me\\cv.pdf"], position: { x: 50, y: 50 } } }));
+      expect(screen.getByText(/Drop your PDF resume/i)).toBeInTheDocument();
+      act(() => dragDrop.handler!({ payload: { type: "drop", paths: ["C:\\Users\\me\\cv.pdf"], position: { x: 50, y: 50 } } }));
+
+      await waitFor(() =>
+        expect(mockSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ resume_path: "C:\\Users\\me\\cv.pdf" })),
+      );
+      expect(onSaved).toHaveBeenCalled();
+      expect(await screen.findByText(/Saved/)).toBeInTheDocument();
+
+      // A drop elsewhere in the window is not for this field.
+      mockSaveSettings.mockClear();
+      act(() => dragDrop.handler!({ payload: { type: "drop", paths: ["C:\\Users\\me\\other.pdf"], position: { x: 900, y: 900 } } }));
+      await new Promise((r) => setTimeout(r, 100));
+      expect(mockSaveSettings).not.toHaveBeenCalled();
+    } finally {
+      box.mockRestore();
+    }
   });
 
   it("uses the real filesystem path when the dropped File exposes one (Tauri)", async () => {
@@ -213,12 +244,13 @@ describe("ResumePickerForm", () => {
 
     const zone = getDropZone();
     const file = new File(["%PDF-1.4"], "MyResume.PDF", { type: "" });
+    Object.defineProperty(file, "path", { value: "D:\\Docs\\MyResume.PDF" });
 
     fireEvent.drop(zone, { dataTransfer: { files: [file], types: ["Files"] } });
 
     await waitFor(() =>
       expect(mockSaveSettings).toHaveBeenCalledWith(
-        expect.objectContaining({ resume_path: "MyResume.PDF" }),
+        expect.objectContaining({ resume_path: "D:\\Docs\\MyResume.PDF" }),
       ),
     );
   });

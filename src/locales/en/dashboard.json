@@ -48,6 +48,7 @@
     "byStatus": "By status",
     "bySource": "By source",
     "topCompanies": "Top companies",
-    "trend": "Recent activity"
+    "trend": "Applications, last 14 days",
+    "loadFailed": "Couldn't load your jobs, so there's nothing to count right now."
   }
 }

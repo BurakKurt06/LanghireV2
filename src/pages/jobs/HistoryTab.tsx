@@ -412,6 +412,8 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
                         {row.job.title || "Untitled"}
                       </p>
                       <InboxBadge status={row.job.inbox_status} subject={row.job.inbox_subject} />
+                      {isSuccess && <p className="text-[11px] text-muted-foreground">{row.job.submission_evidence?.kind === "user_confirmed"
+                        ? "Receipt confirmed by you" : "Marked applied; no verified receipt recorded"}</p>}
                       <p className="text-[12px] text-muted-foreground truncate">
                         {row.job.company || "Unknown company"}
                       </p>
@@ -421,8 +423,8 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
                     <span
                       className={`px-2 py-0.5 rounded-full text-[11px] font-medium flex-shrink-0 ${
                         isSuccess
-                          ? "bg-green-50 text-green-700"
-                          : "bg-red-50 text-red-700"
+                          ? "bg-green-50 text-green-700 dark:bg-green-500/15 dark:text-green-400"
+                          : "bg-red-50 text-red-700 dark:bg-red-500/15 dark:text-red-400"
                       }`}
                     >
                       {isSuccess ? "Applied" : "Failed"}

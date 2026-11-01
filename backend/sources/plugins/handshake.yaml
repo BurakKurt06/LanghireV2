@@ -35,12 +35,23 @@ filters:
     url_param: "job.datePosted"
     default: "7"
 
+search_params:
+  job_type:
+    param: job.jobType
+    values: { internship: Internship, full_time: Job }
+  posted_within:
+    param: job.datePosted
+    values: { "1": "1", "7": "7", "30": "30" }
+
+listing:
+  job_link: '/(?:stu/)?jobs/(\d{5,})'
+  job_url: 'https://app.joinhandshake.com/stu/jobs/{id}'
+
 collection_prompt: |
-  SIGN-IN: If a sign-in or login page appears instead of the results, the user
-  must sign in in this browser window (they sign in through their university; do NOT enter credentials yourself). Use the wait action
-  (30 seconds) at most 4 times, checking the page after each wait, then open the
-  search URL below again. If it is still signed out, call done with success=false
-  and the text 'Sign-in required: log in to Handshake in this browser, then collect again.'
+  SIGN-IN: Collection reuses the session from the app's browser login. If a
+  sign-in page appears, call done with success=false and the text 'Sign-in
+  required: sign in using the app browser login, then collect again.' Do not
+  enter credentials or wait for a login inside this read-only collection run.
 
   START: This search page is already open when you begin:
   {search_url}

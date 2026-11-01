@@ -1,9 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useId } from "react";
 import { Save } from "lucide-react";
 import { getProfile, saveProfile, getCountries } from "../lib/api";
 import type { CandidateProfile, CountryConfig } from "../lib/types";
 import { PageHeader, LoadingSpinner, Section } from "../components/ui";
 import TagInputShared from "../components/ui/TagInput";
+import JobSearchForm from "../components/JobSearchForm";
+import { DEFAULT_JOB_SEARCH, withDefaults } from "../lib/jobSearch";
 import { useTranslation } from "react-i18next";
 
 const defaultProfile: CandidateProfile = {
@@ -36,9 +38,11 @@ const defaultProfile: CandidateProfile = {
     gender: "", race_ethnicity: "", veteran_status: "", disability_status: "",
   },
   search_area: { center_zip: "", radius: "any" },
+  job_search: DEFAULT_JOB_SEARCH,
 };
 
 export default function Profile() {
+  const uid = useId();  // links each label to its field
   const { t } = useTranslation("profile");
   const [profile, setProfile] = useState<CandidateProfile>(defaultProfile);
   const [countries, setCountries] = useState<Record<string, CountryConfig>>({});
@@ -50,41 +54,55 @@ export default function Profile() {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // The profile couldn't be read: no form (saving its blanks would replace it), just Retry.
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const countryConfig = profile.country ? countries[profile.country] : null;
 
-  useEffect(() => {
+  const load = useCallback(() => {
     Promise.all([
       getProfile().then((data) => setProfile({
         ...defaultProfile,
         ...data,
         screening: { ...defaultProfile.screening!, ...(data.screening || {}) },
         search_area: { ...defaultProfile.search_area!, ...(data.search_area || {}) },
+        job_search: withDefaults(data.job_search),
         education: { ...defaultProfile.education, ...(data.education || {}) },
-      })),
+      })).catch(() => setLoadFailed(true)),
       getCountries().then((data) => {
         setCountries(data.countries);
         setNoticePeriodOptions(data.notice_period_options || []);
-      }),
-    ])
-      .catch(() => {})
-      .finally(() => setLoading(false));
+      }).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, []);
+  useEffect(() => { load(); }, [load]);
+  const retry = () => {
+    setLoading(true);
+    setLoadFailed(false);
+    load();
+  };
 
   const handleCountryChange = (code: string) => {
     const config = countries[code];
     if (!config) return;
-    setProfile((p) => ({
-      ...p,
-      country: code,
-      phone_country_code: config.phone_prefix,
-      date_format: config.date_format,
-      salary_expectation: {
-        ...p.salary_expectation,
-        currency: p.salary_expectation.currency || config.currency,
-        period: config.salary_period as "annual" | "monthly",
-      },
-    }));
+    setProfile((p) => {
+      // The old country's defaults follow the country; anything the user picked stays.
+      // (Switching from the US to Germany used to keep USD but switch the period.)
+      const previous = countries[p.country];
+      const salary = p.salary_expectation;
+      return {
+        ...p,
+        country: code,
+        phone_country_code: config.phone_prefix,
+        date_format: config.date_format,
+        salary_expectation: {
+          ...salary,
+          currency: !salary.currency || salary.currency === previous?.currency ? config.currency : salary.currency,
+          period: (!salary.period || salary.period === previous?.salary_period
+            ? config.salary_period : salary.period) as "annual" | "monthly",
+        },
+      };
+    });
     setSaved(false);
   };
 
@@ -131,6 +149,17 @@ export default function Profile() {
 
   if (loading) return <LoadingSpinner />;
 
+  if (loadFailed) {
+    return (
+      <div className="max-w-3xl">
+        <div role="alert" className="error-banner flex items-center justify-between gap-3">
+          <span>{t("loadError")}</span>
+          <button type="button" onClick={retry} className="btn-secondary">{t("retry")}</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-3xl">
       <PageHeader
@@ -151,8 +180,8 @@ export default function Profile() {
       <Section title={t("country.title")}>
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-semibold text-foreground mb-1.5">{t("country.label")}</label>
-            <select
+            <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f1`}>{t("country.label")}</label>
+            <select id={`${uid}-f1`}
               value={profile.country}
               onChange={(e) => handleCountryChange(e.target.value)}
               className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card"
@@ -247,8 +276,8 @@ export default function Profile() {
             )}
           </div>
           <div>
-            <label className="block text-sm font-semibold text-foreground mb-1.5">{t("work.workMode")}</label>
-            <select
+            <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f2`}>{t("work.workMode")}</label>
+            <select id={`${uid}-f2`}
               value={profile.preferred_work_mode}
               onChange={(e) => update("preferred_work_mode", e.target.value)}
               className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card"
@@ -264,8 +293,8 @@ export default function Profile() {
           <Input label={t("work.yearsOfExperience")} type="number" value={String(profile.years_of_experience)} onChange={(v) => update("years_of_experience", Number(v))} />
           {countryConfig?.show_notice_period && (
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("work.noticePeriod")}</label>
-              <select
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f3`}>{t("work.noticePeriod")}</label>
+              <select id={`${uid}-f3`}
                 value={profile.notice_period}
                 onChange={(e) => update("notice_period", e.target.value)}
                 className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card"
@@ -326,8 +355,8 @@ export default function Profile() {
           <Input label={t("salary.maximum")} type="number" value={String(profile.salary_expectation.max)} onChange={(v) => updateNested("salary_expectation", "max", Number(v))} />
           <Input label={t("salary.currency")} value={profile.salary_expectation.currency} onChange={(v) => updateNested("salary_expectation", "currency", v)} />
           <div>
-            <label className="block text-sm font-semibold text-foreground mb-1.5">{t("salary.period")}</label>
-            <select
+            <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f4`}>{t("salary.period")}</label>
+            <select id={`${uid}-f4`}
               value={profile.salary_expectation.period}
               onChange={(e) => updateNested("salary_expectation", "period", e.target.value)}
               className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card"
@@ -380,6 +409,12 @@ export default function Profile() {
           onRemove={(v) => removeFromList("target_locations", v)} placeholder={t("targetLocations.placeholder")} />
       </Section>
 
+      <Section title={t("jobSearch.title")}>
+        <p className="text-[13px] text-muted-foreground mb-3">{t("jobSearch.hint")}</p>
+        <JobSearchForm value={withDefaults(profile.job_search)} onChange={(v) => update("job_search", v)}
+          currency={profile.salary_expectation.currency || "USD"} />
+      </Section>
+
       <Section title={t("skills.title")}>
         <TagInputShared tags={Array.isArray(profile.skills) ? profile.skills : []} value={newSkill} onChange={setNewSkill}
           onAdd={() => addToList("skills", newSkill, setNewSkill)}
@@ -411,10 +446,11 @@ function looksLikeEmail(value: string): boolean {
 function Input({ label, value, onChange, type = "text", className = "", placeholder = "" }: {
   label: string; value: string; onChange: (v: string) => void; type?: string; className?: string; placeholder?: string;
 }) {
+  const id = useId();
   return (
     <div className={className}>
-      <label className="block text-sm font-semibold text-foreground mb-1.5">{label}</label>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)}
+      <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={id}>{label}</label>
+      <input id={id} type={type} value={value} onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder} className="input-base" />
     </div>
   );

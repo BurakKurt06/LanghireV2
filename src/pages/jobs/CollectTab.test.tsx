@@ -11,6 +11,11 @@ import {
   addJob,
   addJobsBulk,
   getSettings,
+  getSavedSearches,
+  saveSavedSearches,
+  getFilteredJobs,
+  keepFilteredJob,
+  launchLogin,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
 
@@ -30,6 +35,13 @@ vi.mock("../../lib/api", () => ({
   addJob: vi.fn(),
   addJobsBulk: vi.fn(),
   getSettings: vi.fn(),
+  saveProfile: vi.fn(),
+  getSavedSearches: vi.fn(),
+  saveSavedSearches: vi.fn(),
+  getFilteredJobs: vi.fn(),
+  keepFilteredJob: vi.fn(),
+  clearFilteredJobs: vi.fn(),
+  launchLogin: vi.fn(),
 }));
 
 const mockStart = vi.mocked(startJobCollection);
@@ -41,6 +53,10 @@ const mockAddJob = vi.mocked(addJob);
 const mockAddJobsBulk = vi.mocked(addJobsBulk);
 const mockGetSettings = vi.mocked(getSettings);
 const mockTrackEvent = vi.mocked(trackEvent);
+const mockGetSaved = vi.mocked(getSavedSearches);
+const mockSaveSaved = vi.mocked(saveSavedSearches);
+const mockGetFiltered = vi.mocked(getFilteredJobs);
+const mockKeep = vi.mocked(keepFilteredJob);
 
 const idleStatus = {
   running: false,
@@ -69,7 +85,7 @@ const linkedinPlugin = {
 const indeedPlugin = { ...linkedinPlugin, name: "indeed", display_name: "Indeed" };
 
 describe("CollectTab", () => {
-  let onJobsChanged: ReturnType<typeof vi.fn>;
+  let onJobsChanged: ReturnType<typeof vi.fn<() => void>>;
 
   beforeEach(() => {
     vi.stubGlobal("alert", vi.fn());
@@ -84,6 +100,12 @@ describe("CollectTab", () => {
     mockStop.mockResolvedValue({ success: true } as never);
     mockAddJob.mockResolvedValue({ success: true } as never);
     mockGetSettings.mockResolvedValue({ job_collection_enabled: true } as never);
+    mockGetSaved.mockResolvedValue({ success: true, searches: [] } as never);
+    mockSaveSaved.mockImplementation(async (searches) =>
+      ({ success: true, searches: searches.map((x, i) => ({ id: `s${i}`, ...x })) }) as never);
+    mockGetFiltered.mockResolvedValue({ success: true, total: 0, jobs: [] } as never);
+    mockKeep.mockResolvedValue({ success: true, added: 1 } as never);
+    vi.mocked(launchLogin).mockResolvedValue({ success: true, message: "Sign in normally, then close the browser window." });
   });
 
   afterEach(() => {
@@ -99,6 +121,55 @@ describe("CollectTab", () => {
     expect(screen.getByRole("checkbox", { name: "Indeed" })).toBeInTheDocument();
   });
 
+  it("opens the selected board's normal sign-in without a confirmation dialog", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(await screen.findByRole("checkbox", { name: "Indeed" }));
+    await user.click(screen.getByRole("button", { name: "Sign in to Indeed" }));
+    expect(launchLogin).toHaveBeenCalledWith("indeed");
+    expect(await screen.findByRole("status")).toHaveTextContent("Sign in normally");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /collector\.start/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Sign in to LinkedIn" })).toBeDisabled();
+  });
+
+  it("offers sign-in only for selected bundled boards", async () => {
+    mockGetPlugins.mockResolvedValue({ success: true, plugins: [linkedinPlugin, indeedPlugin,
+      { ...indeedPlugin, name: "imported", display_name: "Imported", is_builtin: false }] } as never);
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await screen.findByRole("button", { name: "Sign in to LinkedIn" });
+    expect(screen.queryByRole("button", { name: "Sign in to Indeed" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "Imported" }));
+    expect(screen.queryByRole("button", { name: "Sign in to Imported" })).not.toBeInTheDocument();
+  });
+
+  it("keeps collection disabled while signing in and enables it after the window closes", async () => {
+    mockStatus.mockResolvedValue({ ...idleStatus, login_window_open: true } as never);
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: /collector\.start/ })).toBeDisabled());
+    expect(screen.getByRole("button", { name: "Sign in to LinkedIn" })).toBeDisabled();
+    mockStatus.mockResolvedValue({ ...idleStatus, login_window_open: false } as never);
+    await waitFor(() => expect(screen.getByRole("button", { name: /collector\.start/ })).toBeEnabled(), { timeout: 3500 });
+  });
+
+  it("shows a launch failure inline and allows retry without an alert or approval", async () => {
+    vi.mocked(launchLogin).mockResolvedValue({ success: false, message: "Applications are running." });
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(await screen.findByRole("button", { name: "Sign in to LinkedIn" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("Applications are running.");
+    expect(screen.getByRole("button", { name: "Sign in to LinkedIn" })).toBeEnabled();
+    expect(window.alert).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("disables board sign-in during collection", async () => {
+    mockStatus.mockResolvedValue({ ...idleStatus, running: true } as never);
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    expect(await screen.findByRole("button", { name: "Sign in to LinkedIn" })).toBeDisabled();
+  });
+
   it("opens the confirm dialog and starts collection on confirm", async () => {
     const user = userEvent.setup();
     render(<CollectTab onJobsChanged={onJobsChanged} />);
@@ -112,7 +183,8 @@ describe("CollectTab", () => {
     await user.click(confirm);
 
     await waitFor(() =>
-      expect(mockStart).toHaveBeenCalledWith("Engineer", 20, "linkedin", {}, ["linkedin"]),
+      expect(mockStart).toHaveBeenCalledWith("Engineer", 20, "linkedin", {}, ["linkedin"],
+        expect.objectContaining({ mode: "quick" })),
     );
     expect(mockTrackEvent).toHaveBeenCalledWith(
       "collection_started",
@@ -352,5 +424,94 @@ describe("CollectTab", () => {
     render(<CollectTab onJobsChanged={onJobsChanged} />);
     await waitFor(() => expect(mockGetPlugins).toHaveBeenCalled());
     expect(await screen.findByRole("checkbox", { name: "LinkedIn" })).toBeInTheDocument();
+  });
+
+  // ── Job search: Profile defaults, changed for one search ───────────────────
+  it("starts from Profile → Job search and sends this search's changes", async () => {
+    mockGetProfile.mockResolvedValue({
+      country: "US",
+      salary_expectation: { currency: "USD" },
+      job_search: { job_types: ["part_time"], min_pay: { amount: 20, period: "hour" }, notes: "No nights" },
+    } as never);
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await screen.findByRole("checkbox", { name: "LinkedIn" });
+    await user.click(screen.getByRole("radio", { name: /jobSearch\.modeDetailed/ }));
+    await user.click(screen.getByRole("button", { name: /collector\.start/ }));
+    await user.click(await screen.findByRole("button", { name: "Got it, Start" }));
+    await waitFor(() => expect(mockStart).toHaveBeenCalled());
+    expect(mockStart.mock.calls[0][5]).toMatchObject({
+      mode: "detailed", job_types: ["part_time"], min_pay: { amount: 20, period: "hour" }, notes: "No nights",
+    });
+  });
+
+  it("changes a filter for this search only", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await screen.findByRole("checkbox", { name: "LinkedIn" });
+    await user.click(screen.getByRole("button", { name: /collector\.searchSettings/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Remote/ }));
+    await user.click(screen.getByRole("button", { name: /collector\.start/ }));
+    await user.click(await screen.findByRole("button", { name: "Got it, Start" }));
+    await waitFor(() => expect(mockStart).toHaveBeenCalled());
+    expect(mockStart.mock.calls[0][5]).toMatchObject({ work_modes: ["remote"] });
+  });
+
+  it("offers only the board filters the shared ones don't cover", async () => {
+    const filters = [
+      { key: "job_type", label: "Job type", type: "select", options: [], url_param: "f_JT", default: "", shared: true },
+      { key: "min_rating", label: "Minimum company rating", type: "select", options: [], url_param: "minRating", default: "", shared: false },
+    ];
+    mockGetPlugins.mockResolvedValue({ success: true, plugins: [{ ...structuredClone(linkedinPlugin), filters }] } as never);
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    expect(await screen.findByText("Minimum company rating")).toBeInTheDocument();
+    expect(screen.queryByText("Job type")).not.toBeInTheDocument();
+  });
+
+  it("says which boards Quick collects one job at a time", async () => {
+    mockGetPlugins.mockResolvedValue({
+      success: true,
+      plugins: [{ ...structuredClone(linkedinPlugin), quick: true }, { ...structuredClone(indeedPlugin), name: "zip", display_name: "Zip", quick: false }],
+    } as never);
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(await screen.findByRole("checkbox", { name: "Zip" }));
+    expect(screen.getByText("collector.oneAtATimeHint")).toBeInTheDocument();
+  });
+
+  it("saves a search, loads it again and deletes it", async () => {
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await screen.findByRole("checkbox", { name: "LinkedIn" });
+    await user.type(screen.getByPlaceholderText("collector.jobTitlePlaceholder"), "Barista");
+    await user.click(screen.getByRole("button", { name: /collector\.saveSearch/ }));
+    const name = screen.getByRole("textbox", { name: "collector.searchName" });
+    await user.clear(name);
+    await user.type(name, "Weekend barista");
+    await user.click(screen.getByRole("button", { name: "collector.save" }));
+    await waitFor(() => expect(mockSaveSaved).toHaveBeenCalled());
+    expect(mockSaveSaved.mock.calls[0][0][0]).toMatchObject({ name: "Weekend barista", title: "Barista", sources: ["linkedin"] });
+
+    await user.clear(screen.getByPlaceholderText("collector.jobTitlePlaceholder"));
+    await user.click(await screen.findByRole("button", { name: "collector.loadSearch" }));
+    expect(screen.getByPlaceholderText("collector.jobTitlePlaceholder")).toHaveValue("Barista");
+
+    await user.click(screen.getByRole("button", { name: "collector.deleteSearch" }));
+    await waitFor(() => expect(mockSaveSaved).toHaveBeenLastCalledWith([]));
+  });
+
+  it("lists what the search left out and keeps one on request", async () => {
+    mockGetFiltered.mockResolvedValue({
+      success: true, total: 1,
+      jobs: [{ url: "https://jobs.example.com/9", title: "Data Analyst", company: "Acme Test Co", kind: "match",
+               reason: "Match 4/10, below 5" }],
+    } as never);
+    const user = userEvent.setup();
+    render(<CollectTab onJobsChanged={onJobsChanged} />);
+    await user.click(await screen.findByRole("button", { name: "collector.leftOut" }));
+    expect(screen.getByText("Match 4/10, below 5")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "collector.keep" }));
+    await waitFor(() => expect(mockKeep).toHaveBeenCalledWith("https://jobs.example.com/9"));
+    expect(onJobsChanged).toHaveBeenCalled();
   });
 });

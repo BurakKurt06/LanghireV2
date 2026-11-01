@@ -1,4 +1,7 @@
 #!/bin/bash
+# NOT MAINTAINED: this project targets Windows x64 only (see README). Kept from the upstream
+# project for reference; untested here. Use scripts/build-windows.ps1.
+#
 # Build the LangHire desktop app + installer for the CURRENT host OS.
 #
 #   macOS  → .app + .dmg   (src-tauri/target/release/bundle/{macos,dmg})

@@ -10,6 +10,8 @@ import {
   removePlugin,
   importPlugin,
   getBrowsers,
+  getEmployerPasswordSites,
+  revealEmployerPassword,
 } from "../lib/api";
 import { setTelemetryEnabled } from "../lib/analytics";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -48,6 +50,8 @@ vi.mock("../lib/api", () => ({
   removePlugin: vi.fn(),
   importPlugin: vi.fn(),
   getBrowsers: vi.fn(),
+  getEmployerPasswordSites: vi.fn(async () => ({ sites: [] })),
+  revealEmployerPassword: vi.fn(),
 }));
 
 const mockGetSettings = vi.mocked(getSettings);
@@ -443,5 +447,36 @@ describe("SettingsPage", () => {
         other_documents: [{ label: "Transcript", path: "C:/docs/transcript.pdf" }],
       })),
     );
+  });
+
+  it("a failed settings load offers Retry, never a form whose defaults could be saved", async () => {
+    const user = userEvent.setup();
+    mockGetSettings.mockRejectedValueOnce(new Error("boom"));
+    render(<SettingsPage />);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load your settings");
+    expect(screen.queryByRole("button", { name: /Save Settings/ })).not.toBeInTheDocument();
+    expect(mockSaveSettings).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("button", { name: /Save Settings/ })).toBeInTheDocument();
+  });
+
+  it("a failed plugin list alone still shows the settings", async () => {
+    mockGetPlugins.mockRejectedValueOnce(new Error("boom"));
+    render(<SettingsPage />);
+    expect(await screen.findByRole("button", { name: /Save Settings/ })).toBeInTheDocument();
+  });
+
+  it("lists the employer passwords the app made, each shown only on request", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getEmployerPasswordSites).mockResolvedValue({ sites: ["acme.wd5.myworkdayjobs.com"] });
+    vi.mocked(revealEmployerPassword).mockResolvedValue({ site: "acme.wd5.myworkdayjobs.com", password: "Fake-Pass-123" });
+    render(<SettingsPage />);
+    expect(await screen.findByText("acme.wd5.myworkdayjobs.com")).toBeInTheDocument();
+    expect(screen.queryByText("Fake-Pass-123")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Show the password for acme.wd5.myworkdayjobs.com" }));
+    expect(await screen.findByText("Fake-Pass-123")).toBeInTheDocument();
+    expect(revealEmployerPassword).toHaveBeenCalledWith("acme.wd5.myworkdayjobs.com");
+    await user.click(screen.getByRole("button", { name: "Hide the password for acme.wd5.myworkdayjobs.com" }));
+    expect(screen.queryByText("Fake-Pass-123")).not.toBeInTheDocument();
   });
 });

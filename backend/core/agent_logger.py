@@ -21,24 +21,6 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _logger: logging.Logger | None = None
 
 
-class _RedactSecrets(logging.Filter):
-    """Keep the account password, 2Captcha key and API keys out of the agent log."""
-
-    def filter(self, record):
-        try:
-            try:
-                from core.shared_config import redact_secrets
-            except ImportError:
-                from backend.core.shared_config import redact_secrets
-            message = record.getMessage()
-            clean = redact_secrets(message)
-            if clean != message:
-                record.msg, record.args = clean, ()
-        except Exception:
-            pass
-        return True
-
-
 def _get_logger() -> logging.Logger:
     global _logger
     if _logger is None:
@@ -51,11 +33,14 @@ def _get_logger() -> logging.Logger:
             backupCount=5,
             encoding="utf-8",
         )
-        handler.setFormatter(logging.Formatter(
+        try:
+            from core.shared_config import RedactingFormatter
+        except ImportError:
+            from backend.core.shared_config import RedactingFormatter
+        handler.setFormatter(RedactingFormatter(  # message and tracebacks
             "%(asctime)s [%(levelname)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         ))
-        handler.addFilter(_RedactSecrets())
         _logger.addHandler(handler)
     return _logger
 

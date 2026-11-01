@@ -109,7 +109,7 @@ class TestLinkedInParity:
 
     @pytest.mark.parametrize("needle", [
         "SIGN-IN",
-        "at most 4 times",
+        "app's browser login",
         "linkedin.com/jobs/search",
         "left side of the page",
         "currentJobId",
@@ -207,5 +207,7 @@ class TestSignInIsOnDemand:
         rendered = plugin.render_collection_prompt(["Engineer"], ["Boston, MA"], 10, None)
         assert "LOGIN CHECK" not in rendered
         assert "Wait up to 5 minutes" not in rendered
-        assert "at most 4 times" in rendered
+        assert "app's browser login" in rendered
+        assert "Do not enter credentials" in " ".join(rendered.split())
+        assert "read-only collection run" in rendered
         assert plugin.build_search_url(["Engineer"], ["Boston, MA"], 10, None) in rendered

@@ -16,10 +16,16 @@ import sys
 import os
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
+
+# `python backend/main.py` must also be able to import the sibling cli package.
+# Frozen builds already expose their bundled root on sys.path.
+_SOURCE_ROOT = str(Path(__file__).resolve().parent.parent)
+if not getattr(sys, "frozen", False) and _SOURCE_ROOT not in sys.path:
+    sys.path.insert(0, _SOURCE_ROOT)
 
 # Windows consoles default to cp1252, which can't encode the emoji browser-use
 # logs: every such line printed a "--- Logging error ---" traceback into the
@@ -59,6 +65,10 @@ async def lifespan(app: FastAPI):
     data_dir.mkdir(parents=True, exist_ok=True)
     _log.info(f"Data directory: {data_dir}")
     _log.info("API token ready")
+    # Secrets saved in plain by an older version: encrypted now (each file only after it reads back).
+    from core.config import migrate_secrets
+    if migrate_secrets():
+        _log.info("Encrypted saved passwords and keys")
     # Clean up orphaned browser processes from previous crash
     _kill_browser_processes()
     # Reset any jobs stuck in "in_progress" from a previous crash
@@ -80,10 +90,14 @@ async def lifespan(app: FastAPI):
     import traceback
     _log.info(f"Backend shutting down... (trigger: lifespan exit)")
     _log.info(f"Shutdown stack:\n{''.join(traceback.format_stack())}")
+    _stop_operations_and_browsers()
+
+
+def _stop_operations_and_browsers():
+    """Stop running operations, give workers a moment to clean up, then close this app's browsers."""
     for status_dict in (_collection_status, _apply_status):
         if status_dict.get("running"):
             _force_stop(status_dict)
-    # Give workers a moment to clean up, then force-kill browsers
     import time
     time.sleep(2)
     _kill_browser_processes()
@@ -96,37 +110,30 @@ import secrets as _secrets
 import logging
 from logging.handlers import RotatingFileHandler
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-    handlers=[
-        RotatingFileHandler(
-            get_data_dir() / "backend.log",
-            maxBytes=5 * 1024 * 1024,
-            backupCount=3,
-        ),
-        logging.StreamHandler(),
-    ],
-)
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
+# basicConfig ignores supplied handlers when a host already configured logging.
+# Constructing a file handler first would still open a file, then discard it
+# without closing it (notably when main is embedded or imported by pytest).
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format=_LOG_FORMAT,
+        handlers=[
+            RotatingFileHandler(
+                get_data_dir() / "backend.log",
+                maxBytes=5 * 1024 * 1024,
+                backupCount=3,
+            ),
+            logging.StreamHandler(),
+        ],
+    )
 
 
-class _RedactSecrets(logging.Filter):
-    """Keep the account password, 2Captcha key and API keys out of every log file."""
-
-    def filter(self, record):
-        try:
-            from core.shared_config import redact_secrets
-            message = record.getMessage()
-            clean = redact_secrets(message)
-            if clean != message:
-                record.msg, record.args = clean, ()
-        except Exception:
-            pass
-        return True
-
+# Secrets out of every log line, tracebacks included.
+from core.shared_config import RedactingFormatter as _RedactingFormatter
 
 for _handler in logging.getLogger().handlers:
-    _handler.addFilter(_RedactSecrets())
+    _handler.setFormatter(_RedactingFormatter(_LOG_FORMAT))
 # Silence noisy low-level loggers but keep browser_use agent logs visible
 for _noisy in (
     "browser_use.dom", "browser_use.browser.chrome",
@@ -153,7 +160,8 @@ _written = _token_path.read_text().strip()
 _log.info(f"Token written to {_token_path} (verified: {_written == _API_TOKEN})")
 
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import JSONResponse, PlainTextResponse
 import time as _time
 
 class _RateLimiter:
@@ -199,6 +207,19 @@ class _AuthMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(_AuthMiddleware)
 
+
+class _LoopbackHostMiddleware(TrustedHostMiddleware):
+    """Validate the entire authority, not just the part before its first colon."""
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            hosts = [value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == b"host"]
+            match = re.fullmatch(r"(?:127\.0\.0\.1|localhost)(?::([0-9]{1,5}))?", hosts[0]) if len(hosts) == 1 else None
+            if match is None or (match.group(1) and not 1 <= int(match.group(1)) <= 65535):
+                await PlainTextResponse("Invalid host header", status_code=400)(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
+
+
 # Allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
@@ -207,6 +228,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Registered last to run before CORS, including preflight requests. A page whose name resolves to
+# loopback still sends its own Host and must be refused before any middleware returns a response.
+app.add_middleware(_LoopbackHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -307,12 +331,28 @@ def _start_parent_watchdog():
                 if os.getppid() != parent_pid:
                     break
         
-        _log.info("Parent process died — shutting down backend")
-        os.kill(os.getpid(), signal.SIGTERM)
+        _on_parent_exit()
 
     t = threading.Thread(target=_watch, daemon=True, name="parent-watchdog")
     t.start()
     _log.info(f"Parent watchdog started (monitoring PID {parent_pid})")
+
+
+def _on_parent_exit():
+    """The app (our parent) is gone: shut down as the lifespan would, then end this process.
+
+    The SIGTERM below ends the process without running lifespan shutdown on Windows
+    (TerminateProcess) and in the packaged app (no signal handlers): this app's browsers,
+    and a running collection or application, would otherwise be left behind.
+    """
+    _log.info("Parent process died — shutting down backend")
+    try:
+        # An open sign-in window is the user's (no run can be going meanwhile): a forced close
+        # can lose a sign-in not yet saved to disk, so it stays for them to finish and close.
+        if not (_login_process is not None and _login_process.poll() is None):
+            _stop_operations_and_browsers()
+    finally:
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 INTERRUPTED_NOTE = "Interrupted: the app closed during this application. It will be tried again on the next run."
@@ -321,19 +361,29 @@ INTERRUPTED_NOTE = "Interrupted: the app closed during this application. It will
 def _recover_stale_jobs():
     """Reset jobs stuck in 'in_progress' back to 'pending' (crash recovery)."""
     try:
-        from core.shared_config import read_jobs, write_jobs
+        from core.shared_config import mutate_jobs
     except ImportError:
-        from backend.core.shared_config import read_jobs, write_jobs
-    jobs = read_jobs()
-    recovered = 0
-    for url, job in jobs.items():
-        if job.get("status") == "in_progress":
-            job["status"] = "pending"
-            job["error"] = INTERRUPTED_NOTE
-            recovered += 1
+        from backend.core.shared_config import mutate_jobs
+    from cli.apply_jobs import OUTCOME_UNKNOWN_NOTE
+
+    def recover(jobs):
+        recovered = 0
+        for job in jobs.values():
+            if job.get("status") == "in_progress":
+                if job.get("submit_attempted_at"):
+                    # Submit was clicked before the app closed: it may have been sent. Never retried
+                    # automatically; the user checks and decides.
+                    job["status"] = "needs_you"
+                    job["error"] = OUTCOME_UNKNOWN_NOTE.format(why="the app closed right after")
+                else:
+                    job["status"] = "pending"
+                    job["error"] = INTERRUPTED_NOTE
+                recovered += 1
+        return recovered
+
+    recovered = mutate_jobs(recover)
     if recovered:
-        write_jobs(jobs)
-        _log.info(f"Recovered {recovered} stale in_progress jobs back to pending")
+        _log.info(f"Recovered {recovered} stale in_progress jobs")
 
 
 def _api_error(code: str, message: str, status_code: int = 400) -> JSONResponse:
@@ -342,6 +392,23 @@ def _api_error(code: str, message: str, status_code: int = 400) -> JSONResponse:
         {"ok": False, "error": {"code": code, "message": message}},
         status_code=status_code,
     )
+
+
+def _text(body: dict, key: str, limit: int = 2000) -> str:
+    """A string field of a JSON body, trimmed and capped; "" when missing or not a string.
+
+    The raw-dict endpoints used to call .strip() on whatever came in, so a number
+    or a list (a bad client, a stale page) was a 500 instead of a clear 400.
+    """
+    value = body.get(key) if isinstance(body, dict) else None
+    return value.strip()[:limit] if isinstance(value, str) else ""
+
+
+def _str_list(value, limit: int = 1000) -> list[str] | None:
+    """A list of strings, or None when `value` is anything else."""
+    if not isinstance(value, list) or len(value) > limit or not all(isinstance(v, str) for v in value):
+        return None
+    return value
 
 
 def _get_jobs_file() -> Path:
@@ -383,70 +450,9 @@ def _get_metrics_store():
 
 # ── Playwright Chromium Discovery ─────────────────────────────────────────
 def _find_playwright_chromium() -> str | None:
-    """Find the Playwright-installed Chromium/Chrome binary.
-
-    Handles both old and new Playwright naming conventions:
-      Old: chromium-*/chrome-mac/Chromium.app/.../Chromium
-      New: chromium-*/chrome-mac-arm64/Google Chrome for Testing.app/.../Google Chrome for Testing
-    Searches in the correct OS-specific Playwright cache directory.
-    """
-    import glob as _glob
-
-    home = Path.home()
-
-    # Playwright browser cache directories (OS-specific)
-    cache_dirs = []
-    if sys.platform == "darwin":
-        cache_dirs.append(home / "Library" / "Caches" / "ms-playwright")
-    elif sys.platform == "win32":
-        local_app = os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local"))
-        cache_dirs.append(Path(local_app) / "ms-playwright")
-    cache_dirs.append(home / ".cache" / "ms-playwright")
-
-    # Also check inside the venv's playwright package
-    try:
-        import importlib
-        pw_module = importlib.import_module("playwright")
-        venv_browsers = Path(pw_module.__file__).parent / "driver" / "package" / ".local-browsers"
-        if venv_browsers.exists():
-            cache_dirs.insert(0, venv_browsers)
-    except (ImportError, AttributeError):
-        pass
-
-    # macOS executable patterns (both old and new Playwright naming)
-    mac_patterns = [
-        # New Playwright (v1.40+): Google Chrome for Testing
-        "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        # Old Playwright: Chromium
-        "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-        "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium",
-    ]
-
-    for cache_dir in cache_dirs:
-        if not cache_dir.exists():
-            continue
-        # Sort chromium dirs by version number descending (newest first)
-        chromium_dirs = sorted(cache_dir.glob("chromium-*"), reverse=True)
-        for chromium_dir in chromium_dirs:
-            if sys.platform == "darwin":
-                for pattern in mac_patterns:
-                    exe = chromium_dir / pattern
-                    if exe.exists():
-                        return str(exe)
-            elif sys.platform == "win32":
-                for pattern in ["chrome-win/chrome.exe", "chrome-win64/chrome.exe"]:
-                    exe = chromium_dir / pattern
-                    if exe.exists():
-                        return str(exe)
-            else:  # Linux
-                for pattern in ["chrome-linux/chrome", "chrome-linux64/chrome"]:
-                    exe = chromium_dir / pattern
-                    if exe.exists():
-                        return str(exe)
-
-    return None
-
+    """Use the same executable discovery as the collection browser."""
+    from core.browsers import find_playwright_chromium
+    return find_playwright_chromium()
 
 # ── Chromium Auto-Install ─────────────────────────────────────────────────
 _chromium_status: dict = {"state": "checking", "message": "Checking for Chromium..."}
@@ -610,8 +616,22 @@ async def health():
 async def get_profile():
     return load_profile()
 
+_PROFILE_OBJECTS = ("address", "education", "salary_expectation", "screening", "search_area", "job_search")
+_PROFILE_LISTS = ("target_job_titles", "target_locations", "languages", "skills")
+
+
 @app.put("/profile")
 async def update_profile(profile: dict):
+    # The agent reads these shapes: a wrong one (a string for the address) is refused, not saved.
+    for key in _PROFILE_OBJECTS:
+        if key in profile and not isinstance(profile[key], dict):
+            return _api_error("invalid_profile", f"{key} must be an object", 400)
+    for key in _PROFILE_LISTS:
+        if key in profile and _str_list(profile[key]) is None:
+            return _api_error("invalid_profile", f"{key} must be a list of text", 400)
+    if "job_search" in profile:
+        from core import job_search
+        profile["job_search"] = job_search.normalize(profile["job_search"])
     save_profile(profile)
     return {"success": True}
 
@@ -619,18 +639,70 @@ async def update_profile(profile: dict):
 # ── LLM Settings ──────────────────────────────────────────────────────────
 @app.get("/settings/llm")
 async def get_llm():
-    return load_llm_settings()
+    """The AI settings, with each saved key as SECRET_MASK (the page never gets the keys)."""
+    from core.config import LLM_SECRETS, mask_secrets
+    return mask_secrets(load_llm_settings(), LLM_SECRETS)
 
 @app.put("/settings/llm")
 async def update_llm(settings: dict):
-    save_llm_settings(settings)
+    from core.config import LLM_SECRETS, keep_masked
+    save_llm_settings(keep_masked(settings, load_llm_settings(), LLM_SECRETS))
     return {"success": True}
+
+
+_MODEL_LISTS = {
+    "openai": ("https://api.openai.com/v1/models", lambda key: {"Authorization": f"Bearer {key}"}),
+    "anthropic": ("https://api.anthropic.com/v1/models?limit=1000",
+                  lambda key: {"x-api-key": key, "anthropic-version": "2023-06-01"}),
+    "gemini": ("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", lambda key: {"x-goog-api-key": key}),
+    "openrouter": ("https://openrouter.ai/api/v1/models", lambda key: {}),
+}
+
+
+@app.post("/llm/models")
+async def list_provider_models(body: dict):
+    """A provider's model list (its JSON as is), fetched here rather than by the page.
+
+    The app's content policy blocks the page from calling AI providers (so live
+    lists never loaded in the installed app), and the saved key stays here: a
+    masked key means "the saved one".
+    """
+    import httpx
+    from core.config import SECRET_MASK
+    from core.shared_config import redact_secrets
+    provider = str(body.get("provider") or "")
+    stored = load_llm_settings().get(provider) or {}
+    key = str(body.get("api_key") or "").strip()
+    if not key or key == SECRET_MASK:
+        key = str(stored.get("api_key") or "")
+    if provider == "openai_compatible":
+        base = str(body.get("base_url") or stored.get("base_url") or "").strip().rstrip("/")
+        if not base.lower().startswith(("http://", "https://")):
+            return _api_error("invalid_url", "The server address must start with http:// or https://", 400)
+        url, headers = f"{base}/models", ({"Authorization": f"Bearer {key}"} if key else {})
+    elif provider in _MODEL_LISTS:
+        url, make_headers = _MODEL_LISTS[provider]
+        if provider != "openrouter" and not key:
+            return {"success": False, "data": None, "message": "No API key"}
+        headers = make_headers(key)
+    else:
+        return _api_error("invalid_provider", "Unknown provider", 400)
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            return {"success": True, "data": resp.json()}
+    except Exception as e:
+        return {"success": False, "data": None, "message": redact_secrets(str(e))[:300]}
+
 
 @app.post("/llm/test")
 async def test_llm(settings: dict):
-    """Test LLM connection with given settings."""
+    """Test LLM connection with given settings (masked keys are the saved ones)."""
     try:
+        from core.config import LLM_SECRETS, keep_masked
         from core.llm_factory import create_llm, test_connection
+        settings = keep_masked(settings, load_llm_settings(), LLM_SECRETS)
         llm = create_llm(settings)
         result = await test_connection(llm)
         return {"success": True, "message": result}
@@ -701,7 +773,29 @@ async def list_ollama_models(body: dict):
 # ── App Settings ──────────────────────────────────────────────────────────
 @app.get("/settings")
 async def get_settings():
-    return load_settings()
+    """App settings, with the saved password and 2Captcha key as SECRET_MASK."""
+    from core.config import SETTINGS_SECRETS, mask_secrets
+    return mask_secrets(load_settings(), SETTINGS_SECRETS)
+
+
+@app.get("/credentials/sites")
+async def employer_password_sites():
+    """Employer sites the app made an account password for (names only)."""
+    from core import secret_store
+    return {"sites": secret_store.site_password_sites()}
+
+
+@app.post("/credentials/reveal")
+async def reveal_employer_password(body: dict):
+    """One employer site's app-made password, shown when the user asks (to sign in by hand)."""
+    from core import secret_store
+    site = str(body.get("site") or "").strip().lower()
+    if site not in secret_store.site_password_sites():
+        return _api_error("not_found", "No saved password for that site", 404)
+    password = secret_store.site_password(site, create=False)
+    if not password:
+        return _api_error("unreadable", "That password can't be read on this Windows account", 409)
+    return {"site": site, "password": password}
 
 
 @app.get("/browsers")
@@ -721,16 +815,83 @@ async def update_settings(settings: dict):
     password and the 2Captcha key. Keys present in the request still win, so
     sending a full list (e.g. blocked_domains) replaces it as before.
     """
-    merged = load_settings()
-    merged.update(settings)
+    from core.config import SETTINGS_SECRETS, keep_masked
+    problem = _settings_problem(settings)
+    if problem:
+        return _api_error("invalid_settings", problem, 400)
+    stored = load_settings()
+    merged = {**stored, **keep_masked(settings, stored, SETTINGS_SECRETS)}
     save_settings(merged)
     return {"success": True}
+
+
+_SETTINGS_TYPES = {
+    "resume_path": str, "browser": str, "browser_path": str, "theme": str, "captcha_api_key": str,
+    "blocked_domains": list, "other_documents": list, "sensitive_data": dict,
+    "max_failures": int, "parallel_jobs": int, "human_delay_min": int, "human_delay_max": int,
+    "telemetry_enabled": bool, "job_collection_enabled": bool, "stealth_enabled": bool,
+    "human_delay_enabled": bool, "captcha_solver_enabled": bool, "performance_mode": bool,
+    "fit_check_enabled": bool, "cover_letter_boxes": bool, "onboarding_completed": bool,
+}
+
+
+def _settings_problem(settings: dict) -> str:
+    """Why a settings update can't be saved ("" when it can): each known key must have its type."""
+    for key, kind in _SETTINGS_TYPES.items():
+        if key not in settings:
+            continue
+        value = settings[key]
+        ok = (isinstance(value, (int, float)) and not isinstance(value, bool)) if kind is int else isinstance(value, kind)
+        if not ok:
+            return f"{key} must be {'a number' if kind is int else 'true or false' if kind is bool else 'a ' + kind.__name__}"
+    sensitive = settings.get("sensitive_data")
+    if isinstance(sensitive, dict) and not all(isinstance(sensitive.get(k, ""), str) for k in ("email", "password")):
+        return "sensitive_data must hold text"
+    return ""
 
 
 # ── In-process task runner ────────────────────────────────────────────────
 import asyncio
 import io
-import contextlib
+import contextvars
+
+# Which run (its run_id) the current code belongs to. Set in a run's thread; asyncio
+# tasks and asyncio.to_thread calls inherit it. A run's log takes only its own
+# prints and log records, never an API request's, the Inbox check's or another run's.
+_current_run: contextvars.ContextVar[str] = contextvars.ContextVar("langhire_run", default="")
+_run_captures: dict[str, "_LogCapture"] = {}
+
+
+class _RoutedStream:
+    """Stands in for sys.stdout/sys.stderr: a run's prints go to its log, the rest where they went before.
+
+    contextlib.redirect_stdout swapped the stream for the whole process, so with two
+    runs (or a run and an API request) printing at once, lines landed in the wrong log.
+    """
+
+    def __init__(self, real):
+        self._real = real
+
+    def _target(self):
+        return _run_captures.get(_current_run.get()) or self._real
+
+    def write(self, s):
+        target = self._target()
+        return target.write(s) if target is not None else len(s)  # no console in the packaged app
+
+    def flush(self):
+        target = self._target()
+        if target is not None:
+            target.flush()
+
+    def __getattr__(self, name):  # isatty(), encoding, ... of the stream in use
+        return getattr(self._target(), name)
+
+
+def _route_std_streams() -> None:
+    for name in ("stdout", "stderr"):
+        if not isinstance(getattr(sys, name), _RoutedStream):
+            setattr(sys, name, _RoutedStream(getattr(sys, name)))
 
 
 class _LogCapture(io.StringIO):
@@ -773,12 +934,21 @@ class _LogCapture(io.StringIO):
         pass
 
 
+_run_metrics_start_lock = threading.Lock()
+
+
 def _run_async_in_thread(coro_factory, status_dict):
     """Run an async function in a new thread with its own event loop, capturing stdout and logs."""
-    run_id = status_dict.get("run_id", "")
-    metrics = _get_metrics_store()
+    run_id = str(uuid.uuid4())[:8]
+    status_dict["run_id"] = run_id
 
     def _worker():
+        # SQLite connections belong to the thread that opens them. Constructing
+        # this store on the caller left an unused connection there, while logs
+        # opened another one on the worker. Own and close it on this thread.
+        # Concurrent first runs must not race SQLite's WAL/schema setup.
+        with _run_metrics_start_lock:
+            metrics = _get_metrics_store()
         capture = _LogCapture(status_dict["log"], status_dict=status_dict,
                               metrics_store=metrics, run_id=run_id)
 
@@ -788,9 +958,10 @@ def _run_async_in_thread(coro_factory, status_dict):
             _collected_re = __import__("re").compile(r"(\d+)\s+jobs?\s+collected", __import__("re").IGNORECASE)
             _ansi_re = __import__("re").compile(r"\x1b\[[0-9;]*m")
             def emit(self, record):
-                if record.name.split(".")[0] in self._noise:
+                if record.name.split(".")[0] in self._noise or _current_run.get() != run_id:
                     return
-                msg = self._ansi_re.sub("", record.getMessage()).strip()
+                from core.shared_config import redact_secrets
+                msg = redact_secrets(self._ansi_re.sub("", record.getMessage()).strip())
                 if msg and not msg.startswith("🌎"):
                     with _status_lock:
                         status_dict["log"].append(msg)
@@ -811,12 +982,14 @@ def _run_async_in_thread(coro_factory, status_dict):
         log_handler.setLevel(logging.INFO)
         logging.getLogger().addHandler(log_handler)
 
+        _current_run.set(run_id)
+        _run_captures[run_id] = capture
+        _route_std_streams()
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             status_dict["_loop"] = loop
-            with contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
-                loop.run_until_complete(coro_factory())
+            loop.run_until_complete(coro_factory())
             with _status_lock:
                 if status_dict.get("cancel_requested"):
                     status_dict["log"].append("🛑 Stopped by user")
@@ -835,6 +1008,9 @@ def _run_async_in_thread(coro_factory, status_dict):
                 status_dict["error"] = str(e)
         finally:
             logging.getLogger().removeHandler(log_handler)
+            _run_captures.pop(run_id, None)
+            if metrics:
+                metrics.close()
             loop.close()
             with _status_lock:
                 status_dict["running"] = False
@@ -842,8 +1018,6 @@ def _run_async_in_thread(coro_factory, status_dict):
                 status_dict["finished_at"] = datetime.now().isoformat()
             status_dict.pop("_loop", None)
 
-    run_id = str(uuid.uuid4())[:8]
-    status_dict["run_id"] = run_id
     status_dict["running"] = True
     status_dict["cancel_requested"] = False
     status_dict["error"] = None
@@ -853,18 +1027,45 @@ def _run_async_in_thread(coro_factory, status_dict):
     return t
 
 
+def _owned_profile_prefix() -> tuple[str, ...]:
+    """This app's automation profiles: <data folder>/browser_profile* (normalised for matching).
+
+    As written and as resolved: browser-use launches with the resolved path, which differs when
+    the data folder is reached through a link or a Windows 8.3 short name (RUNNER~1).
+    """
+    base = get_data_dir() / "browser_profile"
+    return tuple(dict.fromkeys(str(p).replace("\\", "/").lower() for p in (base, base.resolve())))
+
+
+def _uses_owned_profile(cmdline: list[str], prefixes: tuple[str, ...]) -> bool:
+    """True when a browser command line runs on one of this app's profiles (--user-data-dir=<prefix>...)."""
+    for arg in cmdline or []:
+        arg = arg.replace("\\", "/").lower().strip('"')
+        if arg.startswith("--user-data-dir="):
+            path = arg.split("=", 1)[1].strip('"')
+            if any(path == p or path.startswith(p + "_") or path.startswith(p + "/") for p in prefixes):
+                return True
+    return False
+
+
 def _kill_browser_processes():
-    """Kill any Chromium processes using the shared browser profile.
-    Uses psutil for cross-platform support (macOS, Linux, Windows)."""
+    """Close browsers running on this app's automation profiles (and nothing else).
+
+    Matched by the exact profile folders under this app's data folder, so the
+    user's own Chrome/Brave/Edge, another LangHire data folder (tests) and other
+    programs are never touched.
+    """
     try:
         import psutil
-        target = "langhirev2/browser_profile"
+    except ImportError:
+        _log.warning("psutil missing: leftover automation browsers were not closed")
+        return
+    try:
+        prefixes = _owned_profile_prefix()
         procs_to_kill = []
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
-                cmdline = proc.info.get("cmdline") or []
-                # Normalise Windows paths (backslashes, any case) before matching.
-                if any(target in arg.replace("\\", "/").lower() for arg in cmdline):
+                if _uses_owned_profile(proc.info.get("cmdline") or [], prefixes):
                     procs_to_kill.append(proc)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
@@ -880,30 +1081,46 @@ def _kill_browser_processes():
                 _log.warning(f"Force-killed browser process {proc.pid}")
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-    except ImportError:
-        import subprocess
-        try:
-            if sys.platform == "win32":
-                subprocess.run(
-                    ["taskkill", "/F", "/FI", "IMAGENAME eq chrome.exe"],
-                    timeout=5, capture_output=True,
-                )
-                subprocess.run(
-                    ["taskkill", "/F", "/FI", "IMAGENAME eq chromium.exe"],
-                    timeout=5, capture_output=True,
-                )
-            else:
-                subprocess.run(
-                    ["pkill", "-f", "user-data-dir=.*langhirev2/browser_profile"],
-                    timeout=3, capture_output=True,
-                )
-        except Exception:
-            pass
+    except Exception as e:
+        _log.warning(f"Couldn't close leftover automation browsers: {e}")
+
+
+# ── Who uses the agents' browser profiles ─────────────────────────────────
+# Applying, collecting, a sign-in window and the Gmail check all use the browser
+# profile folders under the data folder, and starting or stopping one closes every
+# browser on them. So one at a time: each start claims them under this lock
+# (the Inbox scheduler's thread too, through _inbox_busy).
+_browser_lock = threading.Lock()
+
+_BROWSER_BUSY = {
+    "apply": "Applications are running. Stop them first.",
+    "collect": "Job collection is running. Stop it first.",
+    "login": "A sign-in window is open. Finish there and close it first.",
+    "inbox": "The Inbox is checking Gmail right now. Try again in a moment.",
+}
+
+
+def _browser_user(exclude: str = "") -> str:
+    """Which operation is using the browser profiles now ("" for none)."""
+    users = (
+        ("apply", _apply_status.get("running")),
+        ("collect", _collection_status.get("running")),
+        ("login", _login_process is not None and _login_process.poll() is None),
+        ("inbox", _inbox_checking()),
+    )
+    return next((name for name, busy in users if busy and name != exclude), "")
 
 
 def _force_stop(status_dict):
-    """Force-stop a running operation: cancel async tasks and kill browser processes."""
+    """Force-stop a running operation: cancel async tasks and kill browser processes.
+
+    Only while this operation runs (it then owns the browser profiles): a Stop on
+    an operation that isn't running must not close another one's browsers or the
+    sign-in window.
+    """
     with _status_lock:
+        if not status_dict.get("running"):
+            return
         status_dict["cancel_requested"] = True
 
     # Cancel all tasks in the worker's event loop
@@ -940,12 +1157,17 @@ async def start_collection(body: CollectRequest):
             409,
         )
 
-    if _collection_status["running"]:
-        return {"success": False, "message": "Collection already running"}
-    if _inbox_checking():
-        # Starting kills every browser on the agents' profile, the Gmail check's included.
-        return {"success": False, "message": "The Inbox is checking Gmail right now. Start again in a moment."}
-    _collection_status["running"] = True  # claims the browser profile (the Gmail scheduler checks it)
+    problem = _start_problem(apply=False)
+    if problem:
+        return {"success": False, "message": problem}
+    with _browser_lock:
+        busy = _browser_user()
+        if busy == "collect":
+            return {"success": False, "message": "Collection already running"}
+        if busy:
+            # Starting closes every browser on the agents' profiles: theirs too.
+            return {"success": False, "message": _BROWSER_BUSY[busy]}
+        _collection_status["running"] = True  # claims the browser profiles
     try:
         # Kill any leftover browser processes from previous runs
         _kill_browser_processes()
@@ -956,6 +1178,7 @@ async def start_collection(body: CollectRequest):
     title = body.title
     max_jobs = body.max_jobs
     filters = body.filters or {}
+    search = body.search if isinstance(body.search, dict) else None
     # Sources to collect from. `sources` (list) wins; fall back to the single
     # `source` field so older callers keep working. Duplicates are dropped and
     # order is preserved.
@@ -1017,7 +1240,8 @@ async def start_collection(body: CollectRequest):
                 print(f"[{i+1}/{len(titles)}] Collecting: {t} — from {label}")
                 print(f"{'='*60}")
                 try:
-                    found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters, plugin=plugin)
+                    found = await collect_jobs.collect_for_title(t, jobs, profile, max_jobs=max_jobs, filters=filters,
+                                                                 plugin=plugin, search=search)
                     jobs = read_jobs()
                     # Don't increment collected here — it's already updated by the stdout/log handler
                     # parsing "total this title: N" and "N jobs collected" from agent output
@@ -1090,6 +1314,7 @@ async def collection_status():
             "error": _collection_status.get("error"),
             "finished_at": _collection_status.get("finished_at"),
             "run_id": _collection_status.get("run_id"),
+            "login_window_open": _login_process is not None and _login_process.poll() is None,
         }
 
 
@@ -1108,8 +1333,9 @@ def _reset_for_apply(url: str, job: dict) -> None:
     """Back to pending so a worker can claim it. Applying to a Skipped job by hand overrides the fit check."""
     from core.shared_config import update_job
     override = job.get("status") == "skipped" or job.get("fit_override", False)
-    update_job(url, status="pending", error=None, fit_override=override)
-    job["status"], job["fit_override"] = "pending", override
+    # Applying again is the user's decision about an unknown outcome: a fresh attempt.
+    update_job(url, status="pending", error=None, fit_override=override, submit_attempted_at=None)
+    job["status"], job["fit_override"], job["submit_attempted_at"] = "pending", override, None
 
 
 @app.post("/apply/start")
@@ -1117,15 +1343,23 @@ async def start_applying(body: ApplyRequest):
     """Start job application in-process."""
     global _apply_thread, _apply_status
 
-    if _apply_status["running"]:
-        return {"success": False, "message": "Application already running"}
-    if _login_process is not None and _login_process.poll() is None:
-        # Both would use the same browser profile, and killing the window could
-        # lose a sign-in that isn't saved to disk yet.
-        return {"success": False, "message": "Close the sign-in window first, then start applying."}
-    if _inbox_checking():
-        # Starting kills every browser process, the Gmail check's included.
-        return {"success": False, "message": "The Inbox is checking Gmail right now. Start again in a moment."}
+    problem = _start_problem(apply=True)
+    if problem:
+        return {"success": False, "message": problem}
+    requested = ([body.job_url] if body.job_url else body.job_urls or [])
+    jobs_before_start = _load_jobs()
+    if not body.acknowledge_unknown and any((jobs_before_start.get(url) or {}).get("submit_attempted_at") for url in requested):
+        return {"success": False, "message": "An earlier request may already have submitted this application. "
+            "Check the employer's site or email before retrying, then explicitly acknowledge the duplicate risk."}
+    with _browser_lock:
+        busy = _browser_user()
+        if busy == "apply":
+            return {"success": False, "message": "Application already running"}
+        if busy:
+            # Starting closes every browser on the agents' profiles: theirs too (and
+            # closing the sign-in window can lose a sign-in not yet saved to disk).
+            return {"success": False, "message": _BROWSER_BUSY[busy]}
+        _apply_status["running"] = True  # claims the browser profiles
     from core.shared_config import parallel_jobs
     workers = body.workers or parallel_jobs(load_settings())
     mode = body.mode
@@ -1134,12 +1368,10 @@ async def start_applying(body: ApplyRequest):
     target_job_urls = body.job_urls
     from cli import apply_jobs as _apply_jobs_module
 
-    # Claim the browser profile before closing browsers (the Gmail scheduler
-    # checks this flag); release it if starting fails before the run's thread
-    # takes over (it resets the flag when the run ends).
-    _apply_status["running"] = True
+    # Claimed above, before closing browsers; released if starting fails before
+    # the run's thread takes over (it resets the flag when the run ends).
     try:
-        _apply_jobs_module.set_run_mode(body.run_mode or ("trial" if body.review else "auto"))
+        _apply_jobs_module.set_run_mode(body.run_mode or "trial")
         # Kill any leftover browser processes from previous runs
         _kill_browser_processes()
         _set_apply_paused(False)
@@ -1220,14 +1452,16 @@ async def start_applying(body: ApplyRequest):
         queue = asyncio.Queue()
         for job in pending:
             queue.put_nowait(job)
-        apply_jobs.new_run()
+        apply_jobs.new_run(_apply_status.get("run_id"))
 
         stats = {}
         num_workers = min(workers, len(pending))
         if num_workers > 1:
             print(f"Copying your browser sign-ins for {num_workers} applications at the same time...")
-        from core.shared_config import prepare_worker_profiles
+        from core.shared_config import prepare_mail_profile, prepare_worker_profiles
         await asyncio.to_thread(prepare_worker_profiles, num_workers)
+        # The verification-email reader's own copy of the sign-in cookies (agents never open Gmail).
+        await asyncio.to_thread(prepare_mail_profile)
         cred_task = asyncio.create_task(credential_refresh_loop(CREDENTIAL_REFRESH_MINUTES))
 
         # For mode="all", pass True for easy_apply (agent handles both types via the job URL)
@@ -1289,7 +1523,7 @@ def _current_jobs() -> list[dict]:
 @app.post("/apply/skip")
 async def skip_current_job(body: dict):
     """Stop the application to one job and move on to the next (the job stays pending)."""
-    url = str(body.get("url") or "")
+    url = _text(body, "url")
     if not _apply_status.get("running") or not url:
         return {"success": False}
     from cli import apply_jobs as _aj
@@ -1340,7 +1574,7 @@ async def help_application(body: dict):
     """Reply to a trial-run agent that is stuck: a message and Continue, or Give up."""
     from cli import apply_jobs
     give_up = bool(body.get("give_up"))
-    ok = apply_jobs.answer_help(body.get("url", ""), body.get("message", ""), give_up)
+    ok = apply_jobs.answer_help(_text(body, "url"), _text(body, "message"), give_up)
     if ok:
         with _status_lock:
             _apply_status["log"].append("🛑 Gave up on this application." if give_up else "▶️ Continuing with your help.")
@@ -1351,21 +1585,34 @@ async def help_application(body: dict):
 async def review_application(body: dict):
     """Approve (submit) or skip an application that is waiting for the user's review."""
     from cli import apply_jobs
-    approve = bool(body.get("approve"))
-    ok = apply_jobs.decide_review(body.get("url", ""), approve)
+    if not isinstance(body.get("approve"), bool):
+        return _api_error("invalid_field", "approve must be a boolean", 400)
+    approve = body["approve"]
+    ok = apply_jobs.decide_review(_text(body, "url"), approve)
     if ok:
         with _status_lock:
             _apply_status["log"].append("✅ Approved: submitting." if approve else "⏭️ Skipped: not submitted.")
     return {"success": ok}
 
 
+@app.post("/apply/requests/decide")
+async def decide_browser_requests(body: dict):
+    from core import request_gate
+    ids = _str_list(body.get("ids"), limit=request_gate.MAX_PENDING)
+    if not ids or any(len(i) != 32 for i in ids) or not isinstance(body.get("approve"), bool):
+        return _api_error("invalid_field", "Supply displayed request IDs and a boolean approve", 400)
+    return {"success": request_gate.decide(ids, body["approve"])}
+
+
 @app.get("/apply/status")
 async def apply_status():
+    from core import request_gate
     with _status_lock:
         return {
             "running": _apply_status.get("running", False),
             "paused": _apply_status.get("running", False) and _apply_paused(),
             "reviews": _pending_reviews() if _apply_status.get("running") else [],
+            "requests": request_gate.pending(),
             "help": _pending_help() if _apply_status.get("running") else [],
             "current": _current_jobs() if _apply_status.get("running") else [],
             "run_mode": _run_mode() if _apply_status.get("running") else None,
@@ -1383,10 +1630,16 @@ async def apply_status():
 async def get_jobs(
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
-    limit: int = Query(500),
+    limit: int = Query(500, ge=1),
+    fields: Optional[str] = Query(None, description="Comma-separated fields to return (the url always)"),
 ):
-    """Get all jobs, optionally filtered by status and search."""
+    """Get all jobs, optionally filtered by status and search.
+
+    `fields` keeps the answer small for pages that count every job (Analytics):
+    the full jobs carry their descriptions.
+    """
     jobs = _load_jobs()
+    keep = {f.strip() for f in fields.split(",") if f.strip()} | {"url"} if fields else None
     result = []
     for url, job in jobs.items():
         job["url"] = url
@@ -1400,6 +1653,8 @@ async def get_jobs(
         result.append(job)
     # Sort by collected_at desc
     result.sort(key=lambda j: j.get("collected_at", ""), reverse=True)
+    if keep is not None:
+        return [{k: v for k, v in j.items() if k in keep} for j in result[:limit]]
     return result[:limit]
 
 
@@ -1414,7 +1669,7 @@ async def get_job_stats():
     return stats
 
 
-CSV_COLUMNS = ["Last Attempt", "Date Applied", "Practised (Training Run)", "Date Collected", "Job Title",
+CSV_COLUMNS = ["Last Attempt", "Date Applied", "Practised (Skipped at Review)", "Date Collected", "Job Title",
                "Company", "Location", "Status", "Reason", "Duration (s)", "Steps", "Source", "Easy Apply", "URL"]
 
 
@@ -1499,8 +1754,8 @@ async def save_jobs_csv(body: dict):
 @app.put("/jobs/status")
 async def update_job_status(body: dict):
     """Manually change a job's status."""
-    url = body.get("url", "").strip()
-    new_status = body.get("status", "").strip()
+    url = _text(body, "url")
+    new_status = _text(body, "status")
     if not url:
         return _api_error("missing_field", "Job URL is required", 400)
     valid_statuses = tuple(s for s in JOB_STATUSES if s != "in_progress")
@@ -1512,20 +1767,41 @@ async def update_job_status(body: dict):
         return _api_error("not_found", "Job not found", 404)
 
     from core.shared_config import update_job
-    update_job(url, status=new_status, error=None)
+    update_job(url, status=new_status, error=None, submission_evidence=(
+        {"kind": "user_confirmed", "confirmed_at": datetime.now(timezone.utc).isoformat()}
+        if new_status == "applied" else None))
     return {"success": True, "url": url, "status": new_status}
 
 
 @app.put("/jobs/note")
 async def update_job_note(body: dict):
     """A note for the agent on a job, used on its next attempt (e.g. how to get past a failure)."""
-    url = body.get("url", "").strip()
+    url = _text(body, "url")
+    if not url:
+        return _api_error("missing_field", "Job URL is required", 400)
+    if url not in _load_jobs():
+        return _api_error("not_found", "Job not found", 404)
+    if not isinstance(body.get("note"), str) or len(body["note"]) > 10000:
+        return _api_error("invalid_note", "The note must be text of at most 10,000 characters", 400)
+    from core.shared_config import update_job
+    update_job(url, user_note=_text(body, "note", 10000))
+    return {"success": True}
+
+
+@app.put("/jobs/cover-letter")
+async def save_job_cover_letter(body: dict):
+    """A cover letter written for one job, kept on that job ("" removes it).
+
+    It used to be saved as the profile's cover letter, which every later
+    application then used: one company's letter sent to all the others.
+    """
+    url = _text(body, "url")
     if not url:
         return _api_error("missing_field", "Job URL is required", 400)
     if url not in _load_jobs():
         return _api_error("not_found", "Job not found", 404)
     from core.shared_config import update_job
-    update_job(url, user_note=(body.get("note") or "").strip()[:2000])
+    update_job(url, cover_letter=_text(body, "cover_letter", 10000))
     return {"success": True}
 
 
@@ -1533,23 +1809,19 @@ async def update_job_note(body: dict):
 async def add_job_manually(body: dict):
     """Manually add a job URL to the collection queue."""
     from datetime import datetime, timezone
-    from core.shared_config import read_jobs, write_jobs, validate_job_url
+    from core.shared_config import mutate_jobs, validate_job_url
 
-    url = body.get("url", "").strip()
+    url = _text(body, "url")
     if not url:
         return _api_error("missing_field", "Job URL is required", 400)
-    if not validate_job_url(url):
+    if not await asyncio.to_thread(validate_job_url, url):  # resolves the host: off the event loop
         return _api_error("invalid_url", "Invalid or internal URL", 400)
 
-    jobs = read_jobs()
-    if url in jobs:
-        return _api_error("duplicate", "Job already exists in the queue", 409)
-
-    jobs[url] = {
+    entry = {
         "url": url,
-        "title": body.get("title", "").strip() or "Manually Added",
-        "company": body.get("company", "").strip() or "",
-        "location": body.get("location", "").strip() or "",
+        "title": _text(body, "title", 200) or "Manually Added",
+        "company": _text(body, "company", 200),
+        "location": _text(body, "location", 200),
         # A title or company typed by the user is never renamed automatically
         # (the other one is still filled in from the page or by the agent).
         **({"user_named": typed} if (typed := [f for f in ("title", "company") if (body.get(f) or "").strip()]) else {}),
@@ -1561,7 +1833,15 @@ async def add_job_manually(body: dict):
         "applied_at": None,
         "error": None,
     }
-    write_jobs(jobs)
+
+    def add(jobs):
+        if url in jobs:
+            return False
+        jobs[url] = entry
+        return True
+
+    if not mutate_jobs(add):
+        return _api_error("duplicate", "Job already exists in the queue", 409)
     _schedule_posting_details([url])
     return {"success": True, "url": url}
 
@@ -1592,7 +1872,8 @@ async def add_jobs_bulk(body: AddJobsBulkRequest):
     reported back rather than failing the whole batch.
     """
     from datetime import datetime, timezone
-    from core.shared_config import read_jobs, write_jobs, validate_job_url
+    from concurrent.futures import ThreadPoolExecutor
+    from core.shared_config import mutate_jobs, validate_job_url
 
     # Accept both shapes: a list, and/or a pasted/uploaded text blob.
     raw_lines: list[str] = []
@@ -1608,28 +1889,24 @@ async def add_jobs_bulk(body: AddJobsBulkRequest):
         if cleaned:
             candidates.append(cleaned)
 
-    jobs = read_jobs()
     now = datetime.now(timezone.utc).isoformat()
+    unique = list(dict.fromkeys(candidates))
+    skipped_duplicate = len(candidates) - len(unique)
+    # Each check resolves the host name: in a few threads, off the event loop
+    # (a slow DNS answer used to stall status and Stop requests).
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        valid = await asyncio.to_thread(lambda: list(pool.map(validate_job_url, unique)))
+    skipped_invalid = [url[:120] for url, ok in zip(unique, valid) if not ok]
+    invalid_count = len(skipped_invalid)
+    skipped_invalid = skipped_invalid[:10]  # a short sample for the UI
+    to_add = [url for url, ok in zip(unique, valid) if ok]
 
-    added: list[str] = []
-    skipped_invalid: list[str] = []
-    skipped_duplicate = 0
-    seen_in_batch: set[str] = set()
-
-    for url in candidates:
-        if url in seen_in_batch:
-            skipped_duplicate += 1
-            continue
-        seen_in_batch.add(url)
-        if not validate_job_url(url):
-            # Keep a short sample so the UI can show what was rejected.
-            if len(skipped_invalid) < 10:
-                skipped_invalid.append(url[:120])
-            continue
-        if url in jobs:
-            skipped_duplicate += 1
-            continue
-        jobs[url] = {
+    def add_all(jobs):
+        added = []
+        for url in to_add:
+            if url in jobs:
+                continue
+            jobs[url] = {
             "url": url,
             "title": "Pasted Link",
             "company": "",
@@ -1642,18 +1919,20 @@ async def add_jobs_bulk(body: AddJobsBulkRequest):
             "collected_at": now,
             "applied_at": None,
             "error": None,
-        }
-        added.append(url)
+            }
+            added.append(url)
+        return added
 
+    added = mutate_jobs(add_all) if to_add else []
+    skipped_duplicate += len(to_add) - len(added)
     if added:
-        write_jobs(jobs)
         _schedule_posting_details(added)
 
     return {
         "success": True,
         "added": len(added),
         "skipped_duplicate": skipped_duplicate,
-        "skipped_invalid": len(skipped_invalid),
+        "skipped_invalid": invalid_count,
         "invalid_samples": skipped_invalid,
         "total_submitted": len(candidates),
     }
@@ -1662,20 +1941,76 @@ async def add_jobs_bulk(body: AddJobsBulkRequest):
 @app.delete("/jobs")
 async def delete_jobs(body: dict):
     """Delete one or more jobs by URL."""
-    from core.shared_config import read_jobs, write_jobs
+    from core.shared_config import mutate_jobs
 
     urls = body.get("urls", [])
     if not urls or not isinstance(urls, list):
         return _api_error("missing_field", "urls array is required", 400)
+    if len(urls) > 10000:
+        return _api_error("too_many", "At most 10000 jobs at a time", 400)
 
-    jobs = read_jobs()
-    deleted = 0
-    for url in urls:
-        if url in jobs:
+    def delete(jobs):
+        gone = [url for url in dict.fromkeys(u for u in urls if isinstance(u, str)) if url in jobs]  # each once
+        for url in gone:
             del jobs[url]
-            deleted += 1
-    write_jobs(jobs)
-    return {"success": True, "deleted": deleted}
+        return len(gone)
+
+    return {"success": True, "deleted": mutate_jobs(delete)}
+
+
+# ── Collection: what was left out, and saved searches ─────────────────────
+@app.get("/jobs/filtered")
+async def get_filtered_jobs(limit: int = Query(200, ge=1, le=1000)):
+    """Listings the collector left out (they didn't fit the search), newest first, with why."""
+    from core import job_search
+    rows = [{**entry, "url": url} for url, entry in job_search.filtered_jobs().items() if isinstance(entry, dict)]
+    rows.sort(key=lambda r: str(r.get("filtered_at") or ""), reverse=True)
+    return {"success": True, "total": len(rows), "jobs": rows[:limit]}
+
+
+@app.post("/jobs/filtered/keep")
+async def keep_filtered_job(body: dict):
+    """Add a left-out listing to the job list after all (as pending)."""
+    from core import job_search
+    from cli import collect_jobs
+    from core.shared_config import validate_job_url
+    url = body.get("url") if isinstance(body.get("url"), str) else ""
+    if not url:
+        return _api_error("missing_field", "url is required", 400)
+    if not validate_job_url(url, resolve=False):
+        return _api_error("invalid_url", "Invalid or internal URL", 400)
+    def save(entry):
+        return collect_jobs.save_new_jobs([{**entry, "url": url}], str(entry.get("search_title") or ""),
+                                          str(entry.get("source") or "collected"))
+    added = job_search.keep_filtered(url, save)
+    if added is None:
+        return _api_error("not_found", "That listing isn't in the left-out list", 404)
+    return {"success": True, "added": added}
+
+
+@app.delete("/jobs/filtered")
+async def clear_filtered_jobs():
+    """Forget the left-out listings (a later collection may find them again)."""
+    from core import job_search
+    return {"success": True, "cleared": job_search.clear_filtered()}
+
+
+@app.get("/jobs/searches")
+async def get_saved_searches():
+    from core import job_search
+    return {"success": True, "searches": job_search.saved_searches()}
+
+
+@app.put("/jobs/searches")
+async def put_saved_searches(body: dict):
+    """Replace the saved searches (at most 50; each checked, malformed ones dropped)."""
+    from core import job_search
+    items = body.get("searches")
+    if not isinstance(items, list):
+        return _api_error("invalid_searches", "searches must be a list", 400)
+    if len(items) > job_search.MAX_SEARCHES:
+        return _api_error("too_many", f"At most {job_search.MAX_SEARCHES} saved searches", 400)
+    return {"success": True, "searches": job_search.save_searches(items)}
 
 
 # ── Auth / Login Sessions ─────────────────────────────────────────────────
@@ -1714,9 +2049,13 @@ def _get_browser_profile_dir() -> str:
 
 # ── Inbox (Gmail check, prep sheets) ──────────────────────────────────────
 def _inbox_busy() -> bool:
-    """The Gmail check shares the agents' browser profile: never during a run or a sign-in."""
-    return bool(_apply_status.get("running") or _collection_status.get("running")
-                or (_login_process is not None and _login_process.poll() is None))
+    """The Gmail check shares the agents' browser profile: never during a run or a sign-in.
+
+    The Inbox marks itself checking before asking, and a start claims under the same
+    lock, so the two can't both go ahead.
+    """
+    with _browser_lock:
+        return bool(_browser_user(exclude="inbox"))
 
 
 def _inbox_checking() -> bool:
@@ -1742,7 +2081,7 @@ def _inbox_check_now() -> dict:
     llm = create_llm(llm_settings)
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(inbox.run_check(llm, shared.build_browser_kwargs(), shared.read_jobs, shared.update_job))
+        return loop.run_until_complete(inbox.run_check(llm, shared.build_browser_kwargs(purpose="inbox"), shared.read_jobs, shared.update_job))
     finally:
         loop.close()
 
@@ -1857,7 +2196,7 @@ _login_process: subprocess.Popen | None = None
 
 @app.post("/auth/login/{service}")
 async def auth_login(service: str):
-    """Open a sign-in window for LinkedIn or Gmail in the agents' browser profile.
+    """Open a user-controlled sign-in window in the collector's browser profile.
 
     The window is a plain browser process (the browser picked in Settings, or
     Playwright's Chromium in automatic mode) started with the agents' profile
@@ -1868,39 +2207,50 @@ async def auth_login(service: str):
     """
     global _login_running, _login_process
 
-    if service not in ("linkedin", "gmail"):
-        return {"success": False, "message": f"Unknown service: {service}"}
-
-    if _login_process is not None and _login_process.poll() is None:
-        return {"success": False, "message": "A sign-in window is already open. Finish there, then close it."}
-    if _apply_status.get("running"):
-        return {"success": False, "message": "Applications are running in this browser profile. Stop them first, then sign in."}
-    if _inbox_checking():
-        return {"success": False, "message": "The Inbox is checking Gmail right now. Try again in a moment."}
-
-    urls = {
-        "linkedin": "https://www.linkedin.com/login",
-        "gmail": "https://accounts.google.com/ServiceLogin?service=mail&continue=https://mail.google.com/mail/",
-    }
-    profile_dir = _get_browser_profile_dir()
+    if service == "gmail":
+        url = "https://accounts.google.com/ServiceLogin?service=mail&continue=https://mail.google.com/mail/"
+        name = "Gmail"
+    else:
+        # Only bundled boards can launch an unrestricted, user-operated login.
+        # An imported plugin or caller-supplied URL must not gain this authority.
+        plugin = _get_plugin_registry().get_by_name(service)
+        if not plugin or not plugin.is_builtin or not plugin.login_url:
+            return {"success": False, "message": f"Unknown service: {service}"}
+        from urllib.parse import urlsplit
+        try:
+            target = urlsplit(plugin.login_url)
+            valid = (target.scheme == "https" and target.hostname and not target.username
+                     and not target.password and target.port in (None, 443))
+        except ValueError:
+            valid = False
+        if not valid:
+            return {"success": False, "message": "This board has no valid HTTPS sign-in address."}
+        url, name = plugin.login_url, plugin.display_name
     from core.browsers import resolve_browser
-    chosen, _ = resolve_browser(load_settings(), get_data_dir() / "browser_profile")
-    executable = chosen or _find_playwright_chromium()
-    if not executable:
-        return {"success": False, "message": "No browser found. Pick one in Settings → Browser."}
-
     from core.shared_config import forget_open_tabs
-    forget_open_tabs(profile_dir)
-    args = [executable, f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
-            "--new-window", urls[service]]
-    try:
-        _login_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
-        _log.error(f"Failed to open sign-in window: {e}")
-        return {"success": False, "message": f"Couldn't open the browser: {e}"}
+    with _browser_lock:  # the window is the profile's user from here until it's closed
+        busy = _browser_user()
+        if busy == "login":
+            return {"success": False, "message": "A sign-in window is already open. Finish there, then close it."}
+        if busy:
+            return {"success": False, "message": _BROWSER_BUSY[busy]}
+        # Profile preparation/migration must also wait until its current user
+        # has finished, not just the actual browser launch.
+        profile_dir = _get_browser_profile_dir()
+        chosen, _ = resolve_browser(load_settings(), get_data_dir() / "browser_profile")
+        executable = chosen or _find_playwright_chromium()
+        if not executable:
+            return {"success": False, "message": "No browser found. Pick one in Settings → Browser."}
+        args = [executable, f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
+                "--new-window", url]
+        forget_open_tabs(profile_dir)
+        try:
+            _login_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            _log.error(f"Failed to open sign-in window: {e}")
+            return {"success": False, "message": f"Couldn't open the browser: {e}"}
     _login_running = True
     _log.info(f"Opened {service} sign-in window ({Path(executable).name}) with profile {profile_dir}")
-    name = "Gmail" if service == "gmail" else "LinkedIn"
     return {"success": True, "message": f"Sign in to {name} in the window that opened, then close it."}
 
 
@@ -1968,6 +2318,15 @@ async def export_memories():
 
 
 # ── Profile: Parse Resume ─────────────────────────────────────────────────
+def _inside_home(path: Path) -> bool:
+    """`path` (resolved) is in the user's home folder (or /tmp off Windows), by path parts.
+
+    A text prefix check let C:/Users/ada2/... pass as inside C:/Users/ada (and /tmpx as /tmp).
+    """
+    roots = [Path.home().resolve()] + ([Path("/tmp").resolve()] if sys.platform != "win32" else [])
+    return any(path.is_relative_to(root) for root in roots)
+
+
 @app.post("/profile/parse-resume")
 async def parse_resume_to_profile():
     """Read the user's resume PDF and use the configured LLM to extract profile fields."""
@@ -1983,8 +2342,7 @@ async def parse_resume_to_profile():
         return {"success": False, "message": f"Resume file not found: {resume_path}"}
     if resume_file.suffix.lower() != ".pdf":
         return {"success": False, "message": "Resume must be a PDF file."}
-    home = Path.home()
-    if not (str(resume_file).startswith(str(home)) or str(resume_file).startswith("/tmp")):
+    if not _inside_home(resume_file):
         return {"success": False, "message": "Resume path must be within your home directory."}
 
     try:
@@ -2124,14 +2482,8 @@ RESUME TEXT:
 
 
 # ── Setup Status ──────────────────────────────────────────────────────────
-@app.get("/setup/status")
-async def get_setup_status():
-    """Check which onboarding steps are complete."""
-    profile = load_profile()
-    llm = load_llm_settings()
-    settings = load_settings()
-
-    profile_done = bool(profile.get("name", "").strip())
+def _llm_ready(llm: dict) -> bool:
+    """An AI model is set up: a provider and what it needs (a key, a server address or a sign-in)."""
     llm_done = False
     provider = llm.get("provider", "")
     if provider == "openai":
@@ -2158,7 +2510,31 @@ async def get_setup_status():
     elif provider == "chatgpt":
         from core import chatgpt_auth
         llm_done = chatgpt_auth.load() is not None
+    return llm_done
 
+
+def _start_problem(apply: bool) -> str:
+    """Why a run can't start yet ("" when it can): without these, every job would just fail."""
+    if not _llm_ready(load_llm_settings()):
+        return "Set up an AI model in LLM Settings first."
+    if apply:
+        resume = (load_settings().get("resume_path") or "").strip()
+        if not resume or not Path(resume).is_file():
+            return "Choose your resume PDF in Settings first."
+        if not (load_profile().get("name") or "").strip():
+            return "Fill in your name in Profile first."
+    return ""
+
+
+@app.get("/setup/status")
+async def get_setup_status():
+    """Check which onboarding steps are complete."""
+    profile = load_profile()
+    llm = load_llm_settings()
+    settings = load_settings()
+
+    profile_done = bool(profile.get("name", "").strip())
+    llm_done = _llm_ready(llm)
     resume_done = bool(settings.get("resume_path", "").strip())
     onboarding_completed = settings.get("onboarding_completed", False)
 
@@ -2282,7 +2658,9 @@ async def update_qa(qa_id: int, body: dict):
     if not store:
         return _api_error("no_store", "Memory store not available")
     answer = body.get("answer", "")
-    store.qa_update(qa_id, answer)
+    if not isinstance(answer, str):
+        return _api_error("invalid_field", "answer must be text", 400)
+    store.qa_update(qa_id, answer.strip()[:5000])
     return {"success": True}
 
 @app.delete("/qa/{qa_id}")
@@ -2294,11 +2672,14 @@ async def delete_qa(qa_id: int):
     return {"success": True}
 
 @app.post("/qa/{source_id}/merge/{target_id}")
-async def merge_qa(source_id: int, target_id: int):
+async def merge_qa(source_id: int, target_id: int, force: bool = False):
     store = _get_memory_store()
     if not store:
         return _api_error("no_store", "Memory store not available")
-    store.qa_merge(source_id, target_id)
+    problem = store.qa_merge_problem(source_id, target_id, allow_conflict=force)
+    if problem:
+        return _api_error("invalid_merge", problem, 409)
+    store.qa_merge(source_id, target_id, allow_conflict=force)
     return {"success": True}
 
 @app.post("/qa/auto-squash")
@@ -2345,14 +2726,24 @@ async def smart_squash_qa():
         if not match:
             return {"success": True, "merged": 0}
         groups = _json.loads(match.group(0))
-        merged_count = 0
-        for group in groups:
+        known = {q["id"] for q in questions}
+        merged_count, skipped = 0, 0
+        # The model only suggests: every merge is checked like a manual one (ids that
+        # exist, no self-merge or loop, no differing answers); bad suggestions are skipped.
+        for group in groups if isinstance(groups, list) else []:
+            if not isinstance(group, dict):
+                continue
             keep_id = group.get("keep")
             merge_ids = group.get("merge", [])
+            if not isinstance(keep_id, int) or keep_id not in known or not isinstance(merge_ids, list):
+                skipped += len(merge_ids) if isinstance(merge_ids, list) else 1
+                continue
             for mid in merge_ids:
-                store.qa_merge(mid, keep_id)
-                merged_count += 1
-        return {"success": True, "merged": merged_count}
+                if isinstance(mid, int) and mid in known and store.qa_merge(mid, keep_id):
+                    merged_count += 1
+                else:
+                    skipped += 1
+        return {"success": True, "merged": merged_count, "skipped": skipped}
     except Exception as e:
         return _api_error("llm_error", f"Smart squash failed: {str(e)}", 500)
 
@@ -2365,8 +2756,10 @@ async def tailor_resumes(body: dict):
     from resume.tailor import tailor_resume
     from core.shared_config import read_jobs, update_job
 
-    job_urls = body.get("job_urls", [])
+    job_urls = _str_list(body.get("job_urls", []), limit=200)
     options = body.get("options", {"skills": True, "overview": True, "experience": True, "title": False})
+    if job_urls is None or not isinstance(options, dict):
+        return _api_error("invalid_field", "job_urls must be a list of links and options an object", 400)
 
     if not job_urls:
         return _api_error("missing_field", "job_urls is required", 400)
@@ -2405,8 +2798,8 @@ async def refine_tailored_resume(body: dict):
     from resume.tailor import tailor_resume
     from core.shared_config import read_jobs, update_job
 
-    job_url = body.get("job_url", "")
-    instruction = body.get("instruction", "")
+    job_url = _text(body, "job_url")
+    instruction = _text(body, "instruction")
 
     if not job_url:
         return _api_error("missing_field", "job_url is required", 400)
@@ -2431,7 +2824,7 @@ async def refine_tailored_resume(body: dict):
 async def get_tailored_by_url(body: dict):
     """Get tailored resume content by job URL."""
     from resume.tailor import get_tailored_content
-    job_url = body.get("job_url", "")
+    job_url = _text(body, "job_url")
     if not job_url:
         return _api_error("missing_field", "job_url is required", 400)
     result = get_tailored_content(job_url)
@@ -2492,9 +2885,9 @@ def _describe_education(edu: dict) -> str:
 @app.post("/cover-letter/generate")
 async def generate_cover_letter(body: dict):
     """Generate a tailored cover letter using LLM based on job description + profile."""
-    job_description = body.get("job_description", "").strip()
-    job_title = body.get("job_title", "")
-    company = body.get("company", "")
+    job_description = _text(body, "job_description", 20000)
+    job_title = _text(body, "job_title", 200)
+    company = _text(body, "company", 200)
 
     if not job_description:
         return _api_error("missing_field", "Job description is required", 400)
@@ -2596,6 +2989,10 @@ async def get_plugins(country: Optional[str] = Query(None)):
                 "login_url": p.login_url,
                 "is_builtin": p.is_builtin,
                 "enabled": p.enabled,
+                # Quick collection reads this board's results pages; without it, one job at a time.
+                "quick": p.listing is not None,
+                # The shared Job search preferences this board takes in its search address.
+                "shared_filters": sorted(p.search_params),
                 "filters": [
                     {
                         "key": f.key,
@@ -2604,11 +3001,14 @@ async def get_plugins(country: Optional[str] = Query(None)):
                         "options": f.options,
                         "url_param": f.url_param,
                         "default": f.default,
+                        # Set by the shared Job search preferences: the page doesn't offer it twice.
+                        "shared": f.url_param in shared,
                     }
                     for f in p.filters
                 ],
             }
             for p in plugins
+            for shared in [p.shared_filter_params()]
         ],
     }
 

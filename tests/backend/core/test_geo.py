@@ -56,3 +56,14 @@ def test_unplaceable_and_missing_locations_are_unknown():
     assert geo.check(["Chanin Corporate Headquarters"], "10001", "50")[0] == "unknown"
     assert geo.check([], "10001", "50")[0] == "unknown"
     assert geo.check(["New York, NY"], "00000", "50")[0] == "unknown"
+
+
+def test_a_far_place_plus_an_unplaced_town_is_not_out():
+    """One location outside and one the table can't place: the second may be inside, so unknown."""
+    status, why = geo.check(["Los Angeles, CA", "Smallville Township"], "10001", "50")
+    assert status == "unknown" and "Smallville" in why
+
+
+def test_office_codes_next_to_a_far_place_are_still_out():
+    assert geo.check(["Los Angeles, CA", "VADU01"], "10001", "50")[0] == "out"
+    assert geo.check(["Los Angeles, CA", "US-LAX-12"], "10001", "50")[0] == "out"

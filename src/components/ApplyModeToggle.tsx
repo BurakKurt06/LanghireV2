@@ -7,7 +7,7 @@ interface ApplyModeToggleProps {
   compact?: boolean;
 }
 
-/** Full auto, a trial run that waits for the user's OK before each Submit, or training (never submits). */
+/** Full auto, or the same live flow with the agent's final-submit action stopped. */
 export default function ApplyModeToggle({ value, onChange, compact }: ApplyModeToggleProps) {
   const option = (mode: ApplyMode, label: string) => (
     <button
@@ -28,15 +28,12 @@ export default function ApplyModeToggle({ value, onChange, compact }: ApplyModeT
       <div role="radiogroup" aria-label="Apply mode" className="inline-flex gap-1 p-1 rounded-xl border border-border">
         {option("auto", APPLY_MODE_LABELS.auto)}
         {option("trial", APPLY_MODE_LABELS.trial)}
-        {option("training", APPLY_MODE_LABELS.training)}
       </div>
       {!compact && (
         <p className="text-xs text-muted-foreground">
           {value === "trial"
-            ? "Fills in each application, then waits before Submit so you can check it (History tab: Approve & submit, or Skip)."
-            : value === "training"
-            ? "Practice: fills in each application up to the final Submit, never submits, then closes it. Jobs stay pending; answers and site tips are saved for the real run."
-            : "Fills in and submits each application on its own."}
+            ? "Live trial: signs in, uploads, saves and moves through Next like Full auto, but the agent stops before pressing the final Submit application button. No approval prompts. The site can still save data or submit during intermediate steps or through its own scripts; the job stays pending for you to check."
+            : "Applies on its own, final Submit included. Account details are typed only on the employer's own site; any other sign-in becomes Needs you."}
         </p>
       )}
     </div>

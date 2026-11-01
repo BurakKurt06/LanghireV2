@@ -1,4 +1,7 @@
 #!/bin/bash
+# NOT MAINTAINED: this project targets Windows x64 only (see README). Kept from the upstream
+# project for reference; untested here. Use scripts/build-windows.ps1.
+#
 # Build the DMG installer for distribution.
 # Run after: cargo tauri build --bundles app
 set -e

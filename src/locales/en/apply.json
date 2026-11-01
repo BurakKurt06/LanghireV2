@@ -39,8 +39,8 @@
   "starting": "Starting...",
   "review": {
     "title": "Ready to submit: {{title}} at {{company}}",
-    "hint": "Check the application in the browser and fix anything that's wrong. Your changes are kept and saved as answers. Then approve it, or skip it to leave it unsent.",
-    "approve": "Approve & submit",
+    "hint": "Check the application in the browser and fix any errors. Approve this form, then approve its outgoing request in the sidebar. Skipping stops the run; requests already allowed may have been sent. Edits are checked against your saved answers.",
+    "approve": "Approve form",
     "skip": "Skip, don't submit"
   },
   "help": {

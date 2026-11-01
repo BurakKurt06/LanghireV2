@@ -1,6 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Save, FolderOpen, X, Upload, Trash2, Sun, Moon, Monitor } from "lucide-react";
-import { getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin, getBrowsers } from "../lib/api";
+import {
+  getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin, getBrowsers,
+  getEmployerPasswordSites, revealEmployerPassword,
+} from "../lib/api";
 import { setTelemetryEnabled as setAnalyticsTelemetry } from "../lib/analytics";
 import { getStoredTheme, setTheme, type ThemeMode } from "../lib/theme";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -25,11 +28,13 @@ export default function SettingsPage() {
   const [humanDelayMax, setHumanDelayMax] = useState(15);
   const [captchaEnabled, setCaptchaEnabled] = useState(false);
   const [captchaApiKey, setCaptchaApiKey] = useState("");
-  const [telemetryEnabled, setTelemetryEnabled] = useState(true);
+  const [telemetryEnabled, setTelemetryEnabled] = useState(false);
   const [theme, setThemeState] = useState<ThemeMode>(getStoredTheme());
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Settings couldn't be read: no form (saving its defaults would replace them), just Retry.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [plugins, setPlugins] = useState<PluginConfig[]>([]);
   const [browser, setBrowser] = useState("");
   const [browserPath, setBrowserPath] = useState("");
@@ -40,7 +45,7 @@ export default function SettingsPage() {
   const [coverLetterBoxes, setCoverLetterBoxes] = useState(false);
   const [parallelJobs, setParallelJobs] = useState(1);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     Promise.all([
       getSettings().then((data) => {
         setResumePath(data.resume_path || "");
@@ -51,7 +56,7 @@ export default function SettingsPage() {
         setParallelJobs(Math.max(1, Math.min(4, data.parallel_jobs || 1)));
         setBlockedDomains(data.blocked_domains || []);
         setMaxFailures(data.max_failures || 8);
-        setTelemetryEnabled(data.telemetry_enabled !== false);
+        setTelemetryEnabled(data.telemetry_enabled === true);  // opt-in
         // Reconcile theme: a value saved on the backend wins over the local
         // default and is applied immediately.
         if (data.theme && data.theme !== getStoredTheme()) {
@@ -72,13 +77,17 @@ export default function SettingsPage() {
         setCaptchaApiKey(data.captcha_api_key || "");
         setBrowser(data.browser || "");
         setBrowserPath(data.browser_path || "");
-      }),
-      getPlugins().then((res) => setPlugins(res.plugins || [])),
+      }).catch(() => setLoadFailed(true)),
+      getPlugins().then((res) => setPlugins(res.plugins || [])).catch(() => {}),
       getBrowsers().then((res) => setBrowsers(res.browsers || [])).catch(() => {}),
-    ])
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    ]).finally(() => setLoading(false));
   }, []);
+  useEffect(() => { load(); }, [load]);
+  const retry = () => {
+    setLoading(true);
+    setLoadFailed(false);
+    load();
+  };
 
   const handleTogglePlugin = async (name: string, enabled: boolean) => {
     await togglePlugin(name, enabled);
@@ -155,6 +164,18 @@ export default function SettingsPage() {
 
   if (loading) return <LoadingSpinner />;
 
+  if (loadFailed) {
+    return (
+      <div className="max-w-2xl">
+        <PageHeader title="Settings" subtitle="General application settings" />
+        <div role="alert" className="error-banner flex items-center justify-between gap-3">
+          <span>Couldn't load your settings, so they can't be changed right now (saving could replace them with defaults).</span>
+          <button type="button" onClick={retry} className="btn-secondary">Try again</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-2xl">
       <PageHeader
@@ -170,7 +191,7 @@ export default function SettingsPage() {
       {saveError && (
         <div className="error-banner mb-5 flex items-center justify-between">
           {saveError}
-          <button onClick={() => setSaveError(null)} className="text-destructive hover:text-destructive/80"><X className="w-4 h-4" /></button>
+          <button onClick={() => setSaveError(null)} aria-label="Dismiss" className="text-destructive hover:text-destructive/80"><X className="w-4 h-4" /></button>
         </div>
       )}
 
@@ -301,21 +322,25 @@ export default function SettingsPage() {
       {/* Sensitive Data */}
       <Section title="Account Credentials">
         <p className="text-[13px] text-muted-foreground mb-4">
-          Used for creating accounts on external ATS platforms during applications.
-          Stored locally in plaintext. Prefer using SSO (Sign in with LinkedIn/Google) when possible.
+          The email is used for accounts on employer application sites. Each site the agent
+          creates an account on gets its own password, made by the app and listed below. The
+          password here is only used to sign in to accounts you created earlier with it.
+          Both are saved encrypted for your Windows account. Prefer SSO (Sign in with
+          LinkedIn/Google) when a site offers it.
         </p>
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-semibold text-foreground mb-1.5">Email</label>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+            <label htmlFor="account-email" className="block text-sm font-semibold text-foreground mb-1.5">Email</label>
+            <input id="account-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
               className="input-base" />
           </div>
           <div>
-            <label className="block text-sm font-semibold text-foreground mb-1.5">Password</label>
-            <PasswordInput value={password} onChange={(e) => setPassword(e.target.value)}
+            <label htmlFor="account-password" className="block text-sm font-semibold text-foreground mb-1.5">Earlier password (sign-in only)</label>
+            <PasswordInput id="account-password" value={password} onChange={(e) => setPassword(e.target.value)}
               className="input-base" />
           </div>
         </div>
+        <EmployerPasswords />
       </Section>
 
       {/* Browser */}
@@ -491,7 +516,7 @@ export default function SettingsPage() {
             setTelemetryEnabled(on);
             setAnalyticsTelemetry(on);
           }}
-          description="Help improve LangHireV2 by sending anonymous usage data (feature usage, crash reports). No personal information or job data is transmitted."
+          description="Off unless you turn it on. Sends which features you use and error reports (an error message can include a page or file name). Never your profile, resume, answers or job list. Only in builds set up with analytics keys."
           className=""
         />
       </Section>
@@ -547,7 +572,7 @@ export default function SettingsPage() {
                   <div className="w-9 h-5 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
                 </label>
                 {!plugin.is_builtin && (
-                  <button onClick={() => handleRemovePlugin(plugin.name)} className="text-destructive hover:text-destructive/80">
+                  <button onClick={() => handleRemovePlugin(plugin.name)} aria-label={`Remove ${plugin.name}`} className="text-destructive hover:text-destructive/80">
                     <Trash2 className="w-4 h-4" />
                   </button>
                 )}
@@ -586,6 +611,58 @@ function SettingSwitch({ label, description, checked, onChange, disabled = false
         />
         <div className="w-11 h-6 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
       </label>
+    </div>
+  );
+}
+
+
+/** The passwords the app made for employer sites: names listed, each shown only when asked. */
+function EmployerPasswords() {
+  const [sites, setSites] = useState<string[]>([]);
+  const [shown, setShown] = useState<Record<string, string>>({});
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    getEmployerPasswordSites().then((r) => setSites(r.sites || [])).catch(() => {});
+  }, []);
+
+  const toggle = async (site: string) => {
+    setError("");
+    if (shown[site]) {
+      setShown((prev) => {
+        const next = { ...prev };
+        delete next[site];
+        return next;
+      });
+      return;
+    }
+    try {
+      const { password } = await revealEmployerPassword(site);
+      setShown((prev) => ({ ...prev, [site]: password }));
+    } catch {
+      setError(`Couldn't read the password for ${site}.`);
+    }
+  };
+
+  if (sites.length === 0) return null;
+  return (
+    <div className="mt-5">
+      <h3 className="text-sm font-semibold text-foreground mb-1.5">Passwords the app made for employer sites</h3>
+      {error && <p role="alert" className="text-[13px] text-destructive mb-2">{error}</p>}
+      <ul className="space-y-1.5">
+        {sites.map((site) => (
+          <li key={site} className="flex items-center justify-between gap-3 text-[13px]">
+            <span className="font-mono truncate">{site}</span>
+            <span className="flex items-center gap-2">
+              {shown[site] && <code className="font-mono select-all">{shown[site]}</code>}
+              <button type="button" className="btn-secondary" onClick={() => toggle(site)}
+                aria-label={`${shown[site] ? "Hide" : "Show"} the password for ${site}`}>
+                {shown[site] ? "Hide" : "Show"}
+              </button>
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

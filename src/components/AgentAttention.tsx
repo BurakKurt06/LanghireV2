@@ -13,7 +13,7 @@ export default function AgentAttention() {
   const navigate = useNavigate();
   const location = useLocation();
   const status = useApplyStatus();
-  const waiting = status?.running ? (status.help?.length ?? 0) + (status.reviews?.length ?? 0) : 0;
+  const waiting = (status?.running ? (status.help?.length ?? 0) + (status.reviews?.length ?? 0) : 0) + (status?.requests?.length ?? 0);
 
   useEffect(() => {
     const base = document.title.replace(/^❗ /, "");

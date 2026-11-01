@@ -12,7 +12,7 @@ interface TagInputProps {
 
 export default function TagInput({ tags, value, onChange, onAdd, onRemove, placeholder = "Add...", variant = "default" }: TagInputProps) {
   const tagColors = variant === "destructive"
-    ? "bg-[#FFF0F0] text-destructive"
+    ? "bg-[#FFF0F0] text-destructive dark:bg-red-500/15 dark:text-red-400"
     : "bg-secondary text-foreground";
 
   return (
@@ -25,7 +25,7 @@ export default function TagInput({ tags, value, onChange, onAdd, onRemove, place
           placeholder={placeholder}
           className="input-base flex-1"
         />
-        <button onClick={onAdd} className="btn-primary !px-3">
+        <button onClick={onAdd} aria-label="Add" className="btn-primary !px-3">
           <Plus className="w-4 h-4" />
         </button>
       </div>
@@ -33,7 +33,7 @@ export default function TagInput({ tags, value, onChange, onAdd, onRemove, place
         {tags.map((tag) => (
           <span key={tag} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[13px] font-semibold ${tagColors}`}>
             {tag}
-            <button onClick={() => onRemove(tag)} className="hover:opacity-60">
+            <button onClick={() => onRemove(tag)} aria-label={`Remove ${tag}`} className="hover:opacity-60">
               <X className="w-3 h-3" />
             </button>
           </span>

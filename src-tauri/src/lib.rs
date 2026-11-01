@@ -46,8 +46,9 @@ fn get_api_token() -> Result<String, String> {
 /// never another path, program or URL, and never through a shell.
 #[tauri::command]
 fn open_file(path: String) -> Result<(), String> {
+    // The folder the backend writes them to (resume/tailor.py: "tailored_resumes").
     let allowed = data_dir()?
-        .join("tailored")
+        .join("tailored_resumes")
         .canonicalize()
         .map_err(|_| "No tailored resumes yet".to_string())?;
     let file = std::path::Path::new(&path)

@@ -56,12 +56,27 @@ filters:
       - { value: "4", label: "4.0 stars and up" }
     url_param: "minRating"
 
+search_params:
+  job_type:
+    param: jobType
+    values: { full_time: fulltime, part_time: parttime, contract: contract, temporary: temporary, internship: internship }
+  work_mode:
+    param: remoteWorkType
+    values: { remote: "1" }
+  posted_within:
+    param: fromAge
+    values: { "1": "1", "3": "3", "7": "7", "14": "14", "30": "30" }
+
+listing:
+  job_link: '/job-listing/[^?#]+\.htm\?(?:[^#]*&)?jl=(\d{6,})'
+  keep_query: [jl]
+  easy_apply: '\bEasy Apply\b'
+
 collection_prompt: |
-  SIGN-IN: If a sign-in or login page appears instead of the results, the user
-  must sign in in this browser window. Use the wait action
-  (30 seconds) at most 4 times, checking the page after each wait, then open the
-  search URL below again. If it is still signed out, call done with success=false
-  and the text 'Sign-in required: log in to Glassdoor in this browser, then collect again.'
+  SIGN-IN: Collection reuses the session from the app's browser login. If a
+  sign-in page appears, call done with success=false and the text 'Sign-in
+  required: sign in using the app browser login, then collect again.' Do not
+  enter credentials or wait for a login inside this read-only collection run.
 
   START: This search page is already open when you begin:
   {search_url}

@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useId } from "react";
 import { TestTube, CheckCircle, XCircle, Loader2, ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
 import {
-  getLLMSettings, saveLLMSettings, testLLMConnection, fetchOllamaModels,
+  getLLMSettings, saveLLMSettings, testLLMConnection, fetchOllamaModels, fetchProviderModels,
   startChatGPTLogin, getChatGPTStatus, chatGPTLogout, getChatGPTModels,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
@@ -83,15 +83,17 @@ const OR_CUSTOM = "__custom__";
 
 const byNewest = (a: string, b: string) => b.localeCompare(a, undefined, { numeric: true });
 
-async function getJson(url: string, headers: Record<string, string>) {
-  const res = await fetch(url, { headers });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+// Lists come through the backend: the app's content policy blocks the page from
+// AI providers, and a saved key (shown masked) stays in the backend.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function providerModels(provider: string, key = "", baseUrl = ""): Promise<any> {
+  const res = await fetchProviderModels(provider, key, baseUrl);
+  if (!res.success) throw new Error(res.message || "model list unavailable");
+  return res.data || {};
 }
 
-// Keys always travel in headers, never in the URL.
 async function loadOpenAIModels(key: string): Promise<string[]> {
-  const data = await getJson("https://api.openai.com/v1/models", { Authorization: `Bearer ${key}` });
+  const data = await providerModels("openai", key);
   return (data.data || [])
     .map((m: { id: string }) => m.id)
     .filter((id: string) => /^(gpt-|o\d|chatgpt-)/.test(id) && !OPENAI_EXCLUDE.test(id))
@@ -99,19 +101,13 @@ async function loadOpenAIModels(key: string): Promise<string[]> {
 }
 
 async function loadAnthropicModels(key: string): Promise<string[]> {
-  const data = await getJson("https://api.anthropic.com/v1/models?limit=1000", {
-    "x-api-key": key,
-    "anthropic-version": "2023-06-01",
-    "anthropic-dangerous-direct-browser-access": "true",
-  });
+  const data = await providerModels("anthropic", key);
   // The API already returns newest first.
   return (data.data || []).map((m: { id: string }) => m.id);
 }
 
 async function loadGeminiModels(key: string): Promise<string[]> {
-  const data = await getJson("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", {
-    "x-goog-api-key": key,
-  });
+  const data = await providerModels("gemini", key);
   return (data.models || [])
     .filter((m: { name: string; supportedGenerationMethods?: string[] }) =>
       m.name.startsWith("models/gemini") &&
@@ -123,8 +119,7 @@ async function loadGeminiModels(key: string): Promise<string[]> {
 }
 
 async function loadCompatibleModels(baseUrl: string, key: string): Promise<string[]> {
-  const headers: Record<string, string> = key ? { Authorization: `Bearer ${key}` } : {};
-  const data = await getJson(`${baseUrl.replace(/\/+$/, "")}/models`, headers);
+  const data = await providerModels("openai_compatible", key, baseUrl);
   return (data.data || []).map((m: { id: string }) => m.id).sort();
 }
 
@@ -161,10 +156,12 @@ interface ModelPickerProps {
   onChange: (model: string) => void;
   customLabel: string;
   placeholder?: string;
+  /** For the label above it (htmlFor). */
+  id?: string;
 }
 
 /** Model dropdown with a "Custom model ID…" escape hatch; a plain input when there is no list. */
-function ModelPicker({ value, options, onChange, customLabel, placeholder }: ModelPickerProps) {
+function ModelPicker({ value, options, onChange, customLabel, placeholder, id }: ModelPickerProps) {
   const [custom, setCustom] = useState(false);
   const optionsKey = options.join("\n");
 
@@ -175,12 +172,13 @@ function ModelPicker({ value, options, onChange, customLabel, placeholder }: Mod
   }, [value, optionsKey]);
 
   if (options.length === 0) {
-    return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="input-base" />;
+    return <input id={id} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className="input-base" />;
   }
 
   return (
     <>
       <select
+        id={id}
         value={custom ? OR_CUSTOM : value}
         onChange={(e) => {
           if (e.target.value === OR_CUSTOM) {
@@ -200,6 +198,7 @@ function ModelPicker({ value, options, onChange, customLabel, placeholder }: Mod
           value={value}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder ?? options[0]}
+          aria-label={customLabel}
           className="input-base font-mono mt-2"
         />
       )}
@@ -344,6 +343,7 @@ interface LLMSettingsFormProps {
 }
 
 export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormProps) {
+  const uid = useId();  // links each label to its field
   const { t } = useTranslation("llm");
   const [settings, setSettings] = useState<LLMSettings>(defaultSettings);
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "success" | "error">("idle");
@@ -351,6 +351,9 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
+  // The saved settings couldn't be read: show that (and Retry) instead of a form
+  // whose defaults would be saved over them by the first change.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaFetching, setOllamaFetching] = useState(false);
@@ -358,14 +361,24 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
   const [openrouterFetching, setOpenrouterFetching] = useState(false);
   const [openrouterCustom, setOpenrouterCustom] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latest = useRef<LLMSettings>(defaultSettings);  // what the next save sends
   const ollamaFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     getLLMSettings()
-      .then((data) => setSettings({ ...defaultSettings, ...data }))
-      .catch(() => {})
+      .then((data) => {
+        latest.current = { ...defaultSettings, ...data };
+        setSettings(latest.current);
+      })
+      .catch(() => setLoadFailed(true))
       .finally(() => setLoading(false));
   }, []);
+  useEffect(() => { load(); }, [load]);
+  const retry = () => {
+    setLoading(true);
+    setLoadFailed(false);
+    load();
+  };
 
   useEffect(() => {
     return () => {
@@ -396,8 +409,7 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
   useEffect(() => {
     if (settings.provider !== "openrouter" || openrouterModels.length > 0) return;
     setOpenrouterFetching(true);
-    fetch("https://openrouter.ai/api/v1/models")
-      .then(r => r.json())
+    providerModels("openrouter")
       .then(data => {
         const formatPrice = (p: string | number | undefined) => {
           if (!p) return "free";
@@ -447,35 +459,47 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
     if (!known) setOpenrouterCustom(true);
   }, [settings.provider, settings.openrouter?.model, openrouterModels]);
 
-  // Autosave with debounce
-  const autoSave = useCallback((newSettings: LLMSettings) => {
-    setSaved(false);
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      setSaving(true);
-      try {
-        await saveLLMSettings(newSettings);
-        setSaved(true);
-        setTimeout(() => setSaved(false), 2000);
-        onSaved?.();
-      } catch { /* silent */ }
-      finally { setSaving(false); }
-    }, 800);
-  }, [onSaved]);
+  // Saves go out one at a time, in order, and each sends the newest settings: a
+  // debounced save holding an older copy used to land after a later one (a typed
+  // key, then a model pick within the debounce) and put the old model back.
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const [saveFailed, setSaveFailed] = useState(false);
 
-  // Immediate save (for dropdown/radio changes)
-  const immediateSave = useCallback(async (newSettings: LLMSettings) => {
+  const saveLatest = useCallback((track: boolean) => {
+    if (saveTimer.current) { clearTimeout(saveTimer.current); saveTimer.current = null; }
     setSaving(true);
     setSaved(false);
-    try {
-      await saveLLMSettings(newSettings);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-      trackEvent("llm_provider_configured", { provider: newSettings.provider });
-      onSaved?.();
-    } catch { /* silent */ }
-    finally { setSaving(false); }
+    saveQueue.current = saveQueue.current.then(async () => {
+      const toSave = latest.current;
+      try {
+        await saveLLMSettings(toSave);
+        setSaveFailed(false);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2000);
+        if (track) trackEvent("llm_provider_configured", { provider: toSave.provider });
+        onSaved?.();
+      } catch {
+        setSaveFailed(true);
+      } finally {
+        setSaving(false);
+      }
+    });
+    return saveQueue.current;
   }, [onSaved]);
+
+  // Autosave with debounce (typing)
+  const autoSave = useCallback((newSettings: LLMSettings) => {
+    latest.current = newSettings;
+    setSaved(false);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => { saveTimer.current = null; saveLatest(false); }, 800);
+  }, [saveLatest]);
+
+  // Immediate save (for dropdown/radio changes); also sends anything still waiting to autosave
+  const immediateSave = useCallback(async (newSettings: LLMSettings) => {
+    latest.current = newSettings;
+    await saveLatest(true);
+  }, [saveLatest]);
 
   const updateProvider = (provider: LLMProvider) => {
     const ns = { ...settings, provider };
@@ -547,8 +571,20 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
 
   if (loading) return <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-primary" /></div>;
 
+  if (loadFailed) {
+    return (
+      <div role="alert" className="error-banner flex items-center justify-between gap-3">
+        <span>{t("status.loadFailed")}</span>
+        <button type="button" onClick={retry} className="btn-secondary">{t("status.retry")}</button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
+      {saveFailed && (
+        <div role="alert" className="error-banner">{t("status.saveFailed")}</div>
+      )}
       {/* API Key Guide — OpenAI & Anthropic only */}
       {(settings.provider === "openai" || settings.provider === "anthropic" || settings.provider === "openrouter") && (
         <div className="rounded-2xl border border-border overflow-hidden">
@@ -683,15 +719,15 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
         {settings.provider === "openai" && (
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <PasswordInput value={settings.openai?.api_key || ""} onChange={(e) => updateOpenAI("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f1`}>{t("labels.apiKey")}</label>
+              <PasswordInput id={`${uid}-f1`} value={settings.openai?.api_key || ""} onChange={(e) => updateOpenAI("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f2`}>
                 {t("labels.model")}
                 {openaiLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
               </label>
-              <ModelPicker
+              <ModelPicker id={`${uid}-f2`}
                 value={settings.openai?.model ?? "gpt-5.4-mini"}
                 options={openaiLive.models.length > 0 ? openaiLive.models : OPENAI_MODELS}
                 onChange={(m) => updateOpenAI("model", m)}
@@ -704,15 +740,15 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
         {settings.provider === "anthropic" && (
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <PasswordInput value={settings.anthropic?.api_key || ""} onChange={(e) => updateAnthropic("api_key", e.target.value)} placeholder="sk-ant-..." className="input-base font-mono" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f3`}>{t("labels.apiKey")}</label>
+              <PasswordInput id={`${uid}-f3`} value={settings.anthropic?.api_key || ""} onChange={(e) => updateAnthropic("api_key", e.target.value)} placeholder="sk-ant-..." className="input-base font-mono" />
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f4`}>
                 {t("labels.model")}
                 {anthropicLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
               </label>
-              <ModelPicker
+              <ModelPicker id={`${uid}-f4`}
                 value={settings.anthropic?.model ?? "claude-sonnet-5"}
                 options={anthropicLive.models.length > 0 ? anthropicLive.models : ANTHROPIC_MODELS}
                 onChange={(m) => updateAnthropic("model", m)}
@@ -725,15 +761,15 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
         {settings.provider === "gemini" && (
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <PasswordInput value={settings.gemini?.api_key || ""} onChange={(e) => updateGemini("api_key", e.target.value)} placeholder="AIza..." className="input-base font-mono" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f5`}>{t("labels.apiKey")}</label>
+              <PasswordInput id={`${uid}-f5`} value={settings.gemini?.api_key || ""} onChange={(e) => updateGemini("api_key", e.target.value)} placeholder="AIza..." className="input-base font-mono" />
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f6`}>
                 {t("labels.model")}
                 {geminiLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
               </label>
-              <ModelPicker
+              <ModelPicker id={`${uid}-f6`}
                 value={settings.gemini?.model ?? "gemini-3-flash-preview"}
                 options={geminiLive.models.length > 0 ? geminiLive.models : GEMINI_MODELS}
                 onChange={(m) => updateGemini("model", m)}
@@ -754,24 +790,24 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
             </div>
             {(settings.bedrock?.auth_mode || "profile") === "profile" ? (
               <div>
-                <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.profileName")}</label>
-                <input value={settings.bedrock?.profile_name || "default"} onChange={(e) => updateBedrock("profile_name", e.target.value)} className="input-base" />
+                <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f7`}>{t("labels.profileName")}</label>
+                <input id={`${uid}-f7`} value={settings.bedrock?.profile_name || "default"} onChange={(e) => updateBedrock("profile_name", e.target.value)} className="input-base" />
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.accessKey")}</label>
-                  <PasswordInput value={settings.bedrock?.access_key || ""} onChange={(e) => updateBedrock("access_key", e.target.value)} placeholder="AKIA..." className="input-base font-mono" />
+                  <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f8`}>{t("labels.accessKey")}</label>
+                  <PasswordInput id={`${uid}-f8`} value={settings.bedrock?.access_key || ""} onChange={(e) => updateBedrock("access_key", e.target.value)} placeholder="AKIA..." className="input-base font-mono" />
                 </div>
                 <div>
-                  <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.secretKey")}</label>
-                  <PasswordInput value={settings.bedrock?.secret_key || ""} onChange={(e) => updateBedrock("secret_key", e.target.value)} className="input-base font-mono" />
+                  <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f9`}>{t("labels.secretKey")}</label>
+                  <PasswordInput id={`${uid}-f9`} value={settings.bedrock?.secret_key || ""} onChange={(e) => updateBedrock("secret_key", e.target.value)} className="input-base font-mono" />
                 </div>
               </div>
             )}
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.region")}</label>
-              <input value={settings.bedrock?.region || "us-west-2"} onChange={(e) => updateBedrock("region", e.target.value)} className="input-base" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f10`}>{t("labels.region")}</label>
+              <input id={`${uid}-f10`} value={settings.bedrock?.region || "us-west-2"} onChange={(e) => updateBedrock("region", e.target.value)} className="input-base" />
             </div>
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.model")}</label>
@@ -789,8 +825,8 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
         {settings.provider === "ollama" && (
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.serverUrl")}</label>
-              <input value={settings.ollama?.base_url || "http://localhost:11434"} onChange={(e) => updateOllama("base_url", e.target.value)} placeholder="http://localhost:11434" className="input-base font-mono" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f11`}>{t("labels.serverUrl")}</label>
+              <input id={`${uid}-f11`} value={settings.ollama?.base_url || "http://localhost:11434"} onChange={(e) => updateOllama("base_url", e.target.value)} placeholder="http://localhost:11434" className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">{t("ollama.serverUrlHint")}</p>
             </div>
             <div>
@@ -818,19 +854,19 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
         {settings.provider === "openrouter" && (
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")}</label>
-              <PasswordInput value={settings.openrouter?.api_key || ""} onChange={(e) => updateOpenRouter("api_key", e.target.value)} placeholder="sk-or-v1-..." className="input-base font-mono" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f12`}>{t("labels.apiKey")}</label>
+              <PasswordInput id={`${uid}-f12`} value={settings.openrouter?.api_key || ""} onChange={(e) => updateOpenRouter("api_key", e.target.value)} placeholder="sk-or-v1-..." className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">
                 {t("openrouter.keyHint")}{" "}
                 <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">openrouter.ai/keys</a>
               </p>
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f13`}>
                 {t("labels.modelVision")}
                 {openrouterFetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
               </label>
-              <select
+              <select id={`${uid}-f13`}
                 value={openrouterCustom ? OR_CUSTOM : (settings.openrouter?.model || "openai/gpt-4o")}
                 onChange={(e) => {
                   if (e.target.value === OR_CUSTOM) {
@@ -887,21 +923,21 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
         {settings.provider === "openai_compatible" && (
           <div className="space-y-3">
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.baseUrl")}</label>
-              <input value={settings.openai_compatible?.base_url || ""} onChange={(e) => updateOpenAICompatible("base_url", e.target.value)} placeholder="https://api.together.xyz/v1" className="input-base font-mono" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f14`}>{t("labels.baseUrl")}</label>
+              <input id={`${uid}-f14`} value={settings.openai_compatible?.base_url || ""} onChange={(e) => updateOpenAICompatible("base_url", e.target.value)} placeholder="https://api.together.xyz/v1" className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">{t("openaiCompatible.baseUrlHint")}</p>
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">{t("labels.apiKey")} <span className="text-muted-foreground font-normal">({t("openaiCompatible.optional")})</span></label>
-              <PasswordInput value={settings.openai_compatible?.api_key || ""} onChange={(e) => updateOpenAICompatible("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f15`}>{t("labels.apiKey")} <span className="text-muted-foreground font-normal">({t("openaiCompatible.optional")})</span></label>
+              <PasswordInput id={`${uid}-f15`} value={settings.openai_compatible?.api_key || ""} onChange={(e) => updateOpenAICompatible("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">{t("openaiCompatible.apiKeyHint")}</p>
             </div>
             <div>
-              <label className="block text-sm font-semibold text-foreground mb-1.5">
+              <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f16`}>
                 {t("labels.model")}
                 {compatLive.fetching && <Loader2 className="w-3 h-3 animate-spin inline ml-2" />}
               </label>
-              <ModelPicker
+              <ModelPicker id={`${uid}-f16`}
                 value={settings.openai_compatible?.model || ""}
                 options={compatLive.models}
                 onChange={(m) => updateOpenAICompatible("model", m)}

@@ -4,7 +4,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
 <BaseLayout
   title="Privacy - LangHire"
-  description="LangHire is 100% local. All your data stays on your machine. Nothing leaves your computer except LLM API calls."
+  description="LangHire keeps your data on your machine. What it sends, and to whom, is listed here."
 >
   <article class="max-w-3xl mx-auto px-6 py-16">
     <h1 class="text-4xl font-extrabold tracking-tight mb-8">Privacy</h1>
@@ -17,7 +17,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       <h2>What stays on your machine</h2>
       <ul>
         <li><strong>Your profile data</strong> &mdash; name, email, resume, work history, and all personal information</li>
-        <li><strong>Job listings</strong> &mdash; all collected jobs are stored in a local SQLite database</li>
+        <li><strong>Job listings</strong> &mdash; all collected jobs are stored in a local file (<code>jobs.json</code>); the memory system and logs use a local SQLite database</li>
         <li><strong>Application history</strong> &mdash; records of which jobs you applied to and their status</li>
         <li><strong>Memory system</strong> &mdash; all learned ATS knowledge, navigation patterns, and form strategies</li>
         <li><strong>Logs</strong> &mdash; all application and agent logs</li>
@@ -25,24 +25,29 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
       <h2>What leaves your machine</h2>
       <ul>
-        <li><strong>LLM API calls</strong> &mdash; when the AI agent needs to make decisions (filling forms, answering questions), it sends context to your configured LLM provider (OpenAI, Anthropic, or AWS Bedrock). This is the only external communication.</li>
-        <li><strong>Browser automation</strong> &mdash; the agent interacts with LinkedIn and ATS websites through a real browser on your machine, just as you would manually.</li>
+        <li><strong>AI model calls</strong> &mdash; page contents, your profile and resume text go to the AI provider you choose (ChatGPT plan, OpenAI, Anthropic, Gemini, OpenRouter, AWS Bedrock, a compatible server, or a local Ollama). Model lists are fetched from that provider too.</li>
+        <li><strong>Job and employer sites</strong> &mdash; the agent fills in applications in a real browser on your machine, and the app fetches posting pages to read job details. What you submit goes to that employer.</li>
+        <li><strong>Gmail</strong> &mdash; when you use the Inbox or an application needs an email code, the app opens your Gmail in its own browser profile on your machine and reads matching emails. The emails are not sent anywhere else except to your AI provider for sorting, when you check the Inbox.</li>
+        <li><strong>2Captcha</strong> &mdash; only if you turn on the CAPTCHA solver: the CAPTCHA and the page address go to 2Captcha.</li>
+        <li><strong>Usage analytics and crash reports</strong> &mdash; off unless you turn them on in Settings, and only in builds made with analytics keys (Google Analytics, Sentry). They contain feature usage and error messages, never your profile, resume, answers or job list.</li>
       </ul>
 
       <h2>Data storage</h2>
       <p>All data is stored in your OS application data directory:</p>
       <ul>
-        <li><strong>macOS:</strong> <code>~/Library/Application Support/langhire/</code></li>
-        <li><strong>Windows:</strong> <code>%APPDATA%/langhire/</code></li>
-        <li><strong>Linux:</strong> <code>~/.config/langhire/</code></li>
+        <li><strong>Windows:</strong> <code>%APPDATA%/langhirev2/</code></li>
+        <li><strong>macOS:</strong> <code>~/Library/Application Support/langhirev2/</code></li>
+        <li><strong>Linux:</strong> <code>~/.config/langhirev2/</code></li>
       </ul>
       <p>You can delete this directory at any time to remove all LangHire data from your machine.</p>
 
-      <h2>No telemetry</h2>
-      <p>LangHire does not collect analytics, telemetry, crash reports, or usage data of any kind. There is no phone-home behavior.</p>
+      <p>On Windows, saved passwords, API keys and the ChatGPT sign-in are encrypted for your Windows account.</p>
+
+      <h2>Telemetry</h2>
+      <p>Usage analytics and crash reports are opt-in: nothing is sent unless you turn on Usage Analytics in Settings, and builds without analytics keys never send any.</p>
 
       <h2>This website</h2>
-      <p>This website (langhire.org) is a static site. It does not use cookies, tracking pixels, or third-party analytics.</p>
+      <p>This website is a static site. When it is built with a Google Analytics id, it loads Google Analytics, which sets cookies; otherwise it uses no cookies or tracking.</p>
     </div>
   </article>
 </BaseLayout>

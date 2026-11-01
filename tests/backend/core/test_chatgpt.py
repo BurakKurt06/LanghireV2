@@ -275,3 +275,57 @@ class TestChatModel:
         assert e.value.status_code == 401
         # The Test button shows it as-is instead of "Invalid API key".
         assert _friendly_llm_error(e.value.message, 401) == e.value.message
+
+
+def test_a_reply_cut_off_before_it_finished_is_an_error(codex):
+    """Text deltas without the final event: a dropped stream, not a whole answer."""
+    from browser_use.llm.exceptions import ModelProviderError
+    codex["reply"] = (200, _sse({"type": "response.output_text.delta", "delta": '{"action": [{"cli'}))
+    with pytest.raises(ModelProviderError, match="cut off"):
+        asyncio.run(chatgpt_llm.ChatChatGPT().ainvoke(_messages()))
+
+
+class TestSignOutRaces:
+    """Signing out while tokens are being saved never leaves the user signed in."""
+
+    def test_sign_out_during_the_sign_in_exchange(self, data_dir, monkeypatch):
+        monkeypatch.setattr(chatgpt_auth, "CALLBACK_PORTS", (0,))
+        attempt = chatgpt_auth._Login()
+        monkeypatch.setattr(chatgpt_auth, "_login", attempt)
+        try:
+            def exchange(url, data=None, **kwargs):
+                if "revoke" in url:
+                    return FakeResponse()
+                chatgpt_auth.logout()      # the user signs out while the code is being exchanged
+                return FakeResponse(body=_tokens())
+
+            monkeypatch.setattr(chatgpt_auth.httpx, "post", exchange)
+            ok, message = attempt.handle_callback({"state": [attempt.state], "code": ["c"]})
+            assert not ok and "cancelled" in message
+            assert chatgpt_auth.load() is None and not chatgpt_auth.status()["signed_in"]
+        finally:
+            attempt.server.server_close()
+
+    def test_sign_out_waits_for_a_refresh_and_wins(self, data_dir, monkeypatch):
+        import threading
+        chatgpt_auth._save(_tokens(exp_in=60))
+        refreshing, release = threading.Event(), threading.Event()
+
+        def slow_refresh(url, json=None, **kwargs):
+            if "revoke" in url:
+                return FakeResponse()
+            refreshing.set()
+            release.wait(5)
+            return FakeResponse(body={"access_token": _jwt({"exp": time.time() + 3600}), "refresh_token": "r2"})
+
+        monkeypatch.setattr(chatgpt_auth.httpx, "post", slow_refresh)
+        refresher = threading.Thread(target=chatgpt_auth.credentials)
+        refresher.start()
+        assert refreshing.wait(5)
+        signer_out = threading.Thread(target=chatgpt_auth.logout)
+        signer_out.start()
+        signer_out.join(0.3)   # the old sign-out removed the file right here, before the refresh saved
+        release.set()
+        refresher.join(5)
+        signer_out.join(5)
+        assert chatgpt_auth.load() is None   # the refreshed tokens were not written back after sign-out

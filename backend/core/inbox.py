@@ -31,6 +31,10 @@ except ImportError:  # pragma: no cover
 CATEGORIES = ("applied", "assessment", "interview", "offer", "rejected")
 SCHEDULES = {"off": None, "daily": timedelta(days=1), "weekly": timedelta(days=7)}
 FIRST_CHECK_DAYS = 60
+# Kept emails: after a year only what the Inbox lists (sender, subject, category, date)
+# stays, not the text; and at most this many (newest). The originals stay in Gmail.
+KEEP_TEXT_DAYS = 365
+MAX_KEPT_EMAILS = 5000
 MAX_EMAILS_PER_CHECK = 40
 # A results page with at least this many rows may have older matches after it.
 RESULT_PAGE_ROWS = 20
@@ -259,6 +263,159 @@ async def read_gmail(since: datetime, known_ids: set[str], browser_kwargs: dict)
             pass
 
 
+# ── verification emails for a running application (narrow reader) ──────────
+# The application agent never opens Gmail (its browser can't reach it). When a
+# site emails a code or a link, the app reads it here, in a separate browser on
+# a copy of the sign-in cookies, and hands back only that code or link, after
+# checking the sender belongs to the site that asked and the email is new.
+
+VERIFY_TERMS = '(code OR verify OR verification OR confirm OR activate OR passcode OR OTP OR "one-time")'
+
+_VERIFY_JS = r"""(expected) => {
+  const norm = (t) => (t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const subject = (document.querySelector('h2.hP') || {}).innerText || '';
+  const bodies = Array.from(document.querySelectorAll('.a3s')).filter((b) => b.innerText.trim());
+  const body = bodies.length ? bodies[bodies.length - 1] : null;
+  const same = !expected || norm(subject) === norm(expected) || norm(subject).includes(norm(expected).slice(0, 40));
+  const links = body ? Array.from(body.querySelectorAll('a[href]')).map((a) => a.href).slice(0, 50) : [];
+  const to = Array.from(document.querySelectorAll('.hb span[email], span.g2[email]')).map((s) => s.getAttribute('email'));
+  return JSON.stringify({ text: body ? body.innerText.slice(0, 5000) : '', links, subject, to, ready: !!body && same });
+}"""
+
+_CODE_WORD = re.compile(r"\b(code|passcode|otp|pin|verification|one[- ]time)\b", re.I)
+# A code: 4-10 capitals/digits with at least one digit (case-sensitive, so words never count).
+_CODE_TOKEN = re.compile(r"\b(?=[A-Z0-9]*[0-9])[A-Z0-9]{4,10}\b")
+# Whitespace that stays on the code's line: "\s*" ran across blank lines, quadratic on a body of them.
+_CODE_ALONE = re.compile(r"^[^\S\n]*([0-9]{4,8})[^\S\n]*$", re.M)
+_LINK_WORDS = re.compile(r"verif|confirm|activat|validat|registration|account", re.I)
+
+
+def registrable(host: str) -> str:
+    """'careers.acme.co.uk' -> 'acme.co.uk', 'mail.acme.com' -> 'acme.com' (for sender checks)."""
+    try:
+        from core.domains import registrable as site_of
+    except ImportError:
+        from backend.core.domains import registrable as site_of
+    return site_of(host)
+
+
+def _letters(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def about_employer(subject: str, text: str, names) -> bool:
+    """The email names one of the employer's names (3+ letters), in its subject or text."""
+    haystack = " ".join(re.findall(r"[a-z0-9]+", f"{subject or ''} {text or ''}".lower()))
+    for name in names or []:
+        words = re.findall(r"[a-z0-9]+", (name or "").lower())
+        if len("".join(words)) >= 3 and re.search(r"(?<!\w)" + re.escape(" ".join(words)) + r"(?!\w)", haystack):
+            return True
+    return False
+
+
+def addressed_to(recipients, address: str) -> bool:
+    """Verification codes require a readable recipient matching the application account."""
+    recipients = [r.strip().lower() for r in recipients or [] if isinstance(r, str) and r.strip()]
+    return bool(address and address.strip().lower() in recipients)
+
+
+def _domain_ok(domain: str, allowed: set[str]) -> bool:
+    domain = (domain or "").lower().strip(".")
+    return any(domain == a or domain.endswith("." + a) for a in allowed)
+
+
+def _unwrap(link: str) -> str:
+    """Gmail wraps outside links as https://www.google.com/url?q=<real link>."""
+    from urllib.parse import parse_qs, urlparse
+    parsed = urlparse(link)
+    if parsed.hostname in ("www.google.com", "google.com") and parsed.path == "/url":
+        return (parse_qs(parsed.query).get("q") or [link])[0]
+    return link
+
+
+def extract_verification(kind: str, text: str, links: list[str], allowed: set[str]) -> str:
+    """The code (kind="code") or the https link to an allowed domain (kind="link") in an email; "" if none."""
+    from urllib.parse import urlparse
+    if kind == "code":
+        text = text or ""
+        for word in _CODE_WORD.finditer(text):
+            token = _CODE_TOKEN.search(text[word.end():word.end() + 80])
+            if token:
+                return token.group(0)
+        alone = _CODE_ALONE.search(text)
+        return alone.group(1) if alone else ""
+    for link in links or []:
+        link = _unwrap(link)
+        parsed = urlparse(link)
+        if parsed.scheme == "https" and _domain_ok(parsed.hostname or "", allowed) and _LINK_WORDS.search(link):
+            return link
+    return ""
+
+
+async def find_verification(kind: str, allowed_domains: set[str], since: datetime, browser_kwargs: dict,
+                            wait_seconds: float = 90, *, employer_domains: set[str] | None = None,
+                            employer_names=(), recipient: str = "", link_validator=None) -> dict:
+    """{"code"|"link": value} from the newest matching email since `since`, or {"error": ...}.
+
+    Only emails whose sender address is at one of `allowed_domains` (the site
+    that asked and its application system) count; everything else in the inbox
+    is never read beyond its list row. An email from a shared application system
+    (myworkday.com sends for every Workday employer) also has to name this
+    employer (`employer_names`); one from the employer's own domain
+    (`employer_domains`) doesn't. Its recipients must be readable and match
+    `recipient`; ambiguous matches and unapproved link destinations are refused.
+    """
+    if not recipient:
+        return {"error": "No application email is configured for verification."}
+    own = {d.lower() for d in employer_domains or set() if d}
+    from browser_use import BrowserSession
+    allowed = {d.lower() for d in allowed_domains if d}
+    query = f"after:{int(since.timestamp())} {VERIFY_TERMS}"
+    url = GMAIL + "#search/" + quote(query, safe="")
+    browser = BrowserSession(**browser_kwargs)
+    deadline = time.monotonic() + wait_seconds
+    try:
+        await browser.start()
+        while True:
+            candidates = set()
+            await browser.navigate_to(url)
+            listing = await _poll(await browser.get_current_page(), _LIST_JS, f"after:{int(since.timestamp())}")
+            if listing.get("signedOut"):
+                return {"error": "Gmail isn't signed in (Settings -> Accounts)."}
+            for row in listing.get("rows", []):
+                sender = (row.get("sender_email") or "").split("@")[-1]
+                if not row.get("id") or not _domain_ok(sender, allowed):
+                    continue
+                await browser.navigate_to(f"{GMAIL}#all/{row['id']}")
+                message = await _poll(await browser.get_current_page(), _VERIFY_JS, row.get("subject", ""), wait=12)
+                if not message.get("ready"):
+                    continue
+                if not addressed_to(message.get("to"), recipient):
+                    continue
+                if not _domain_ok(sender, own) and not about_employer(message.get("subject", ""), message.get("text", ""),
+                                                                     employer_names):
+                    continue  # a shared application system's email for another employer
+                value = extract_verification(kind, message.get("text", ""), message.get("links", []), allowed)
+                if value and kind == "link" and (link_validator is None or not link_validator(value)):
+                    continue
+                if value:
+                    candidates.add(value)
+                    if len(candidates) > 1:
+                        return {"error": "Multiple verification messages match this application. Choose the correct email yourself."}
+            if candidates:
+                return {kind: next(iter(candidates))}
+            if time.monotonic() >= deadline:
+                return {"error": f"No {kind} email from {', '.join(sorted(allowed))} arrived."}
+            await asyncio.sleep(10)  # emails can take a moment to arrive
+    except Exception as e:
+        return {"error": f"Couldn't read the verification email: {type(e).__name__}"}
+    finally:
+        try:
+            await browser.kill()
+        except Exception:
+            pass
+
+
 # ── sorting with the AI ─────────────────────────────────────────────────────
 class EmailLabel(BaseModel):
     index: int
@@ -321,11 +478,16 @@ def _same_company(a: str, b: str) -> bool:
 
 
 def match_job(email: dict, jobs: dict) -> str | None:
-    """The job URL this email is about (company must match; the role breaks ties), or None."""
+    """The job URL this email is about (company must match; the role breaks ties), or None.
+
+    None too when two of the employer's jobs fit it equally well: an interview
+    email shown on the wrong application is worse than one shown on none (it
+    stays in the Inbox either way).
+    """
     company = email.get("company") or ""
     if len(_letters(company)) < 3:
         return None
-    best, best_score = None, 0.0
+    scores = {}
     for url, job in jobs.items():
         name = job.get("company") or ""
         if not _letters(name) or not _same_company(company, name):
@@ -334,8 +496,12 @@ def match_job(email: dict, jobs: dict) -> str | None:
         score = 1.0 + (len(role_words & title_words) / max(1, len(role_words)) if role_words else 0)
         if job.get("status") == "applied":
             score += 0.05  # only breaks ties; the role decides
-        if score > best_score:
-            best, best_score = url, score
+        scores[url] = score
+    if not scores:
+        return None
+    best = max(scores, key=scores.get)
+    if sum(1 for s in scores.values() if abs(s - scores[best]) < 1e-9) > 1:
+        return None
     return best
 
 
@@ -372,13 +538,25 @@ async def run_check(llm, browser_kwargs: dict, read_jobs, update_job) -> dict:
             job["inbox_date"] = email["date"]
     with _lock:
         data = load()
-        data["emails"] = data["emails"] + [{k: v for k, v in e.items() if k != "body"} | {"text": e.get("body", "")[:2500]}
-                                           for e in sorted_emails]
+        data["emails"] = _retained(data["emails"] + [
+            {k: v for k, v in e.items() if k != "body"} | {"text": e.get("body", "")[:2500]} for e in sorted_emails])
         data["ignored_ids"] = sorted(set(data.get("ignored_ids", [])) | (labeled - kept_ids))[-2000:]
         data["last_checked"] = datetime.now(timezone.utc).isoformat()
         data["search_from"] = None if complete else since.isoformat()
         save(data)
     return {"error": "", "new": len(sorted_emails), "read": len(emails)}
+
+
+def _retained(emails: list[dict], now: datetime | None = None) -> list[dict]:
+    """The newest MAX_KEPT_EMAILS, with the text (and prep sheet) of those over KEEP_TEXT_DAYS old dropped."""
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=KEEP_TEXT_DAYS)).strftime("%Y-%m-%d")
+    kept = []
+    for email in sorted(emails, key=lambda e: e.get("date") or "", reverse=True)[:MAX_KEPT_EMAILS]:
+        date = email.get("date") or ""
+        if date[:4].isdigit() and date[:10] < cutoff and (email.get("text") or email.get("prep")):
+            email = {**email, "text": "", "prep": ""}
+        kept.append(email)
+    return kept
 
 
 def _iso_date(text: str) -> str:

@@ -67,10 +67,10 @@
     @apply bg-card rounded-2xl border border-border p-6 shadow-sm;
   }
   .error-banner {
-    @apply px-4 py-3 bg-[#FFF0F0] border border-[#FFD0D0] rounded-xl text-sm text-destructive;
+    @apply px-4 py-3 bg-[#FFF0F0] border border-[#FFD0D0] rounded-xl text-sm text-destructive dark:bg-red-500/15 dark:border-red-500/40 dark:text-red-400;
   }
   .info-box {
-    @apply bg-[#F7F7F7] rounded-2xl p-4 text-[13px] text-foreground;
+    @apply bg-muted rounded-2xl p-4 text-[13px] text-foreground;
   }
   .section-title {
     @apply text-lg font-bold text-foreground;

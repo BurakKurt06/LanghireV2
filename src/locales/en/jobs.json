@@ -20,8 +20,8 @@
   "searchPlaceholder": "Search by job title or company...",
   "collector": {
     "title": "Job Collector",
-    "description": "Search for job listings matching your profile. Select a source platform, enter a job title, and start collecting. Collection typically takes 3-10 minutes per job title as the agent scrolls through results.",
-    "loginInfo": "<strong>Login:</strong> A browser will open and check if you're logged into the selected platform. If not, the agent will wait for you to log in manually — then proceed automatically.",
+    "description": "Search job boards for listings that fit your profile. Quick reads whole results pages (a few minutes per title); Detailed opens each job in turn and takes longer.",
+    "loginInfo": "<strong>Sign-in:</strong> select your boards and use their sign-in buttons before starting collection. Sign in normally in the window that opens, then close it. Collection reuses your saved sign-in; if it expires, sign in again here and retry.",
     "sourcePlatform": "Source Platform",
     "jobTitlePlaceholder": "Job title (e.g. 'Data Analyst') or leave blank for all",
     "maxJobsPlaceholder": "Max jobs",
@@ -30,7 +30,26 @@
     "start": "Start",
     "startingCollection": "Starting collection...",
     "collectedProgress": "Collected {{collected}} of {{max}} jobs",
-    "collectionLog": "Collection Log"
+    "collectionLog": "Collection Log",
+    "searchSettings": "Filters for this search",
+    "searchSettingsHint": "Start from Profile → Job search. Changes here apply to this search only.",
+    "resetToProfile": "Use my Profile settings",
+    "saveAsDefault": "Save as my Profile settings",
+    "savedAsDefault": "Saved to Profile",
+    "boardFilters": "More {{board}} filters",
+    "oneAtATime": "one job at a time",
+    "oneAtATimeHint": "{{boards}} can't be read a page at a time, so Quick collects them one job at a time.",
+    "savedSearches": "Saved searches",
+    "saveSearch": "Save this search",
+    "searchName": "Name for this search",
+    "save": "Save",
+    "cancel": "Cancel",
+    "loadSearch": "Load {{name}}",
+    "deleteSearch": "Delete {{name}}",
+    "leftOut": "Left out ({{count}})",
+    "leftOutHint": "Listings that didn't fit this search. Keep one to add it to Review & Apply.",
+    "keep": "Keep",
+    "clearLeftOut": "Clear list"
   },
   "emptyState": {
     "noMatching": "No matching jobs",
@@ -55,7 +74,11 @@
     "applying": "Applying...",
     "retry": "Retry",
     "apply": "Apply",
-    "openOnLinkedIn": "Open on LinkedIn"
+    "openOnLinkedIn": "Open on LinkedIn",
+    "payNotListed": "Pay not listed",
+    "match": "Match {{score}}/10",
+    "aiSuggestion": "AI match {{score}}/10",
+    "sourceFit": "Source fit {{score}}/10"
   },
   "showingJobs": "Showing {{count}} job",
   "showingJobs_plural": "Showing {{count}} jobs",
@@ -73,8 +96,15 @@
     "generatedLabel": "Generated Cover Letter",
     "copy": "Copy",
     "saved": "Saved!",
-    "saveToProfile": "Save to Profile",
+    "saveToProfile": "Use for this job",
     "failedGenerate": "Failed to generate cover letter",
-    "failedSave": "Failed to save to profile"
+    "failedSave": "Failed to save the cover letter"
+  },
+  "sort": {
+    "label": "Sort",
+    "newest": "Newest",
+    "match": "Best match",
+    "pay": "Highest pay",
+    "company": "Employer A–Z"
   }
 }

@@ -45,9 +45,9 @@ export default function App() {
     getSettings()
       .then((s) => {
         measureAndTrack("backend_connect");
-        initAnalytics(s.telemetry_enabled !== false);
+        initAnalytics(s.telemetry_enabled === true);  // opt-in
       })
-      .catch(() => initAnalytics(true));
+      .catch(() => initAnalytics(false));  // settings unknown: no consent
   }, []);
 
   useEffect(() => {

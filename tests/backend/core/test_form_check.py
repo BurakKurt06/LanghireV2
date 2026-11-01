@@ -127,6 +127,14 @@ def test_form_check_note_is_added_after_the_page(monkeypatch):
 PROFILE = {"name": "Ada Lovelace", "phone": "5551234567", "email": "ada@example.com", "address": {"zip": "10001"}}
 
 
+def test_wrong_degree_level_is_flagged_without_rejecting_equivalent_spelling():
+    profile={"education":{"degree":"B.S."}}
+    page={'fields':[{'label':'Degree','value':'Doctorate','kind':'dropdown'}]}
+    assert form_check.profile_mismatches(page,profile)==[('Degree','Doctorate','B.S.')]
+    page['fields'][0]['value']='Bachelor of Science'
+    assert form_check.profile_mismatches(page,profile)==[]
+
+
 def _field(label, value, kind="text"):
     return {"label": label, "kind": kind, "required": True, "value": value, "error": "", "options": []}
 

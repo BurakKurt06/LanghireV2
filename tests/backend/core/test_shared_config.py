@@ -11,6 +11,18 @@ import types
 
 import pytest
 
+
+@pytest.mark.parametrize("title", ["x" * 79 + ".tail", "CON", "con.txt", "COM1", "LPT².log", "😀" * 90,
+                                  "CON." + "😀" * 90, "\ud800"])
+def test_folder_names_are_accepted_by_windows_after_truncation(tmp_path, title):
+    from core.shared_config import safe_folder_name
+    name = safe_folder_name(title)
+    assert not name.endswith((".", " "))
+    assert len(name.encode("utf-16-le")) <= 160
+    folder = tmp_path / name
+    folder.mkdir()
+    assert folder.is_dir()
+
 from core import shared_config as sc
 
 
@@ -339,7 +351,7 @@ def no_op_store(monkeypatch):
         def extract_domain(self, url):
             return "example.com"
 
-        def format_for_prompt(self, memories):
+        def format_for_prompt(self, memories, job_url=""):
             return "MEM"
 
     monkeypatch.setattr(sc, "_memory_store", FakeStore())
@@ -400,7 +412,7 @@ def test_build_memory_context_injects_website_memory(base_profile, monkeypatch):
         def extract_domain(self, url):
             return "acme.io"
 
-        def format_for_prompt(self, memories):
+        def format_for_prompt(self, memories, job_url=""):
             return "WEBSITE-MEMORY-BLOCK"
 
     monkeypatch.setattr(sc, "_memory_store", FakeStore())

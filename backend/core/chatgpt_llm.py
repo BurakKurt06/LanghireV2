@@ -100,7 +100,7 @@ class ChatChatGPT:
 
         headers = {**chatgpt_auth.request_headers(access, account), "Accept": "text/event-stream",
                    "session_id": self.session_id, "conversation_id": self.session_id}
-        parts, usage = [], None
+        parts, usage, completed = [], None, False
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=20)) as client:
                 async with client.stream("POST", f"{chatgpt_auth.CODEX_BASE_URL}/responses",
@@ -121,6 +121,7 @@ class ChatChatGPT:
                         if kind == _TEXT_DELTA:
                             parts.append(event.get("delta", ""))
                         elif kind == _DONE:
+                            completed = True
                             final = event.get("response") or {}
                             usage = _usage(final.get("usage"))
                             if not parts:  # some replies arrive only in the final event
@@ -133,6 +134,11 @@ class ChatChatGPT:
             raise ModelProviderError(message=f"ChatGPT request timed out: {e}", status_code=504, model=self.name) from e
         except httpx.HTTPError as e:
             raise ModelProviderError(message=f"Couldn't reach ChatGPT: {e}", model=self.name) from e
+        if not completed:
+            # The stream ended without its final event (a dropped connection): what arrived is
+            # a cut-off reply, never to be used as the whole answer.
+            raise ModelProviderError(message="ChatGPT's reply was cut off before it finished", status_code=502,
+                                     model=self.name)
         return "".join(parts), usage
 
 

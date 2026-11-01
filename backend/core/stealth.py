@@ -23,7 +23,9 @@ import random
 # advertises itself as automated regardless of any JS patching.
 STEALTH_ARGS: list[str] = [
     "--disable-blink-features=AutomationControlled",
-    "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
+    # Only AutomationControlled: turning off site isolation (IsolateOrigins, site-per-process)
+    # would let one site's page read another's data in memory, and nothing here needs it.
+    "--disable-features=AutomationControlled",
     "--exclude-switches=enable-automation",
     "--no-default-browser-check",
     "--no-first-run",

@@ -129,6 +129,9 @@ def _state_min_miles(state: str, center: tuple[float, float]) -> float:
     return min(miles(center, p) for p in _table()[2].get(state, [center]))
 
 
+_OFFICE_CODE = re.compile(r"^(?=[A-Z0-9_-]*\d)[A-Z0-9_-]{3,16}$")
+
+
 def check(location_texts: list[str], center_zip: str, radius: str | int | None) -> tuple[str, str]:
     """("in" | "out" | "unknown", explanation) for a posting's locations against the search area.
 
@@ -164,8 +167,9 @@ def check(location_texts: list[str], center_zip: str, radius: str | int | None) 
             outside.append(f"{text.strip()[:40]} (outside the US)")
         else:
             unknown.append(text.strip()[:60])
-    if outside:
-        # Placed somewhere, and nowhere inside: out (a job's unplaceable office
-        # codes like "VADU01" usually repeat a place that was found).
+    # Office codes ("VADU01", "US-NYC-12") usually repeat a place that was found; any other
+    # unplaced location (a small town the table lacks) could be inside the area.
+    unplaced = [u for u in unknown if not _OFFICE_CODE.match(u)]
+    if outside and not unplaced:
         return "out", f"Outside your {limit}-mile search area around {center_zip}: " + "; ".join(dict.fromkeys(outside))
-    return "unknown", "Couldn't place: " + "; ".join(unknown)
+    return "unknown", "Couldn't place: " + "; ".join(unplaced or unknown)

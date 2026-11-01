@@ -193,6 +193,30 @@ class TestExtractSections:
         assert "overview" in types  # "Summary"
         assert "skills" in types    # "Technologies"
 
+    @pytest.mark.parametrize("heading, kind", [
+        ("TECHNICAL SKILLS", "skills"), ("Professional Experience:", "experience"), ("Career Summary", "overview"),
+        ("Projects", "other"), ("Awards & Honors", "other"), ("Certifications", "other"),
+    ])
+    def test_headings_in_any_case_and_wording(self, tmp_path, heading, kind):
+        p = tmp_path / "h.pdf"
+        _make_pdf(p, [(40, 60, heading), (40, 90, "content line")])
+        doc = fitz.open(str(p))
+        try:
+            sections = _extract_sections(doc)
+        finally:
+            doc.close()
+        assert [(s["section_type"], s["heading"]) for s in sections] == [(kind, heading.rstrip(":"))]
+
+    def test_a_company_name_in_capitals_stays_content(self, tmp_path):
+        p = tmp_path / "c.pdf"
+        _make_pdf(p, [(40, 60, "Experience"), (40, 90, "Engineer"), (40, 120, "GLOBEX CORPORATION"), (40, 150, "- Shipped")])
+        doc = fitz.open(str(p))
+        try:
+            sections = _extract_sections(doc)
+        finally:
+            doc.close()
+        assert len(sections) == 1 and "GLOBEX CORPORATION" in sections[0]["text"]
+
     def test_empty_pdf_yields_no_sections(self, tmp_path):
         p = tmp_path / "empty.pdf"
         doc = fitz.open()
@@ -342,7 +366,36 @@ class TestTailorResume:
         # Markdown sidecar written and retrievable.
         content = get_tailored_content("https://job/1")
         assert content is not None
-        assert "## SKILLS" in content["content"] or "## EXPERIENCE" in content["content"]
+        # Under the resume's own headings.
+        assert "## Skills\n\nPython, GCP" in content["content"]
+        assert "## Experience\n\n- Led cloud migration" in content["content"]
+
+    async def test_every_section_reaches_the_pdf_in_order_under_its_own_heading(self, monkeypatch, data_dir, tmp_path):
+        """A tailored summary and sections like Projects used to be left out of the new PDF."""
+        pdf = tmp_path / "full.pdf"
+        _make_pdf(pdf, [
+            (40, 60, "PROFESSIONAL SUMMARY"), (40, 85, "Analyst who builds dashboards for teams."),
+            (40, 130, "Technical Skills:"), (40, 155, "Python, SQL"),
+            (40, 200, "Work Experience"), (40, 225, "Analyst"), (40, 250, "ACME CORP"), (40, 275, "- Built reports"),
+            (40, 320, "Projects"), (40, 345, "- Budget tracker in Python"),
+            (40, 390, "Licenses and Certifications"), (40, 415, "AWS Cloud Practitioner"),
+            (40, 460, "Education"), (40, 485, "BS Economics, State University"),
+        ])
+        resp = _Completion(json.dumps({"0": "Analyst building finance dashboards."}))  # within the original's length
+        self._configure(monkeypatch, data_dir, pdf, resp, profile={"name": "Jane", "email": "j@x.com"})
+        result = await tailor_resume("https://job/9", "Finance analyst", {"overview": True})
+        doc = fitz.open(result["path"])
+        try:
+            text = "\n".join(page.get_text() for page in doc)
+        finally:
+            doc.close()
+        order = ["Professional Summary", "Analyst building finance dashboards.", "Technical Skills",
+                 "Python, SQL", "Work Experience", "ACME CORP", "Built reports", "Projects", "Budget tracker",
+                 "Licenses and Certifications", "AWS Cloud Practitioner", "Education", "BS Economics"]
+        positions = [text.find(part) for part in order]
+        assert -1 not in positions, [p for p, i in zip(order, positions) if i == -1]
+        assert positions == sorted(positions)
+        assert "dashboards for teams" not in text   # the tailored summary replaced the original
 
     async def test_missing_resume_path_raises(self, monkeypatch, data_dir):
         monkeypatch.setattr(tailor, "load_settings", lambda: {"resume_path": ""})
@@ -634,3 +687,51 @@ class TestGenerateFreshPdf:
             assert all(x > 36 for x in xs)
         finally:
             doc.close()
+
+
+def test_the_desktop_app_opens_pdfs_from_the_folder_they_are_saved_in(data_dir):
+    """Open PDF only allows one folder; it named "tailored" while the PDFs went to "tailored_resumes"."""
+    import re
+    lib_rs = (Path(__file__).resolve().parents[3] / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    body = lib_rs[lib_rs.index("fn open_file"):]
+    allowed = re.search(r'\.join\("([^"]+)"\)', body).group(1)
+    assert allowed == tailor._get_tailored_dir().name == "tailored_resumes"
+
+
+class TestTailoredResumeFreshness:
+    """A tailored PDF made from an older or different resume is never applied with."""
+
+    async def _tailor(self, monkeypatch, data_dir, pdf):
+        monkeypatch.setattr(tailor, "load_settings", lambda: {"resume_path": str(pdf)})
+        monkeypatch.setattr(tailor, "load_llm_settings", lambda: {"provider": "anthropic"})
+        monkeypatch.setattr(tailor, "create_llm", lambda s: _FakeLLM(_Completion(json.dumps({"0": "Python, GCP"}))))
+        import core.config as config
+        monkeypatch.setattr(config, "load_profile", lambda: {"name": "Jane"})
+        await tailor_resume("https://job/fresh", "jd", {"skills": True})
+
+    async def test_used_while_the_resume_is_unchanged(self, monkeypatch, data_dir, resume_pdf):
+        await self._tailor(monkeypatch, data_dir, resume_pdf)
+        path, why = tailor.usable_tailored_resume("https://job/fresh", str(resume_pdf))
+        assert path and path.endswith(".pdf") and why == ""
+
+    async def test_not_used_after_the_resume_changed(self, monkeypatch, data_dir, resume_pdf, tmp_path):
+        await self._tailor(monkeypatch, data_dir, resume_pdf)
+        _make_pdf(resume_pdf, [(40, 60, "Skills"), (40, 90, "Rust, Go")])      # the user updated the resume
+        path, why = tailor.usable_tailored_resume("https://job/fresh", str(resume_pdf))
+        assert path is None and "different version" in why
+        other = tmp_path / "other.pdf"
+        _make_pdf(other, _resume_blocks())
+        assert tailor.usable_tailored_resume("https://job/fresh", str(other))[0] is None   # another file
+
+    def test_older_tailored_files_go_by_date(self, data_dir, resume_pdf):
+        import os
+        pdf = tailor._get_tailored_dir() / f"{tailor._url_hash('https://job/old')}.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        os.utime(pdf, (1_000_000, 1_000_000))                       # made long before the resume's last change
+        assert tailor.usable_tailored_resume("https://job/old", str(resume_pdf))[0] is None
+        os.utime(pdf, None)
+        os.utime(resume_pdf, (1_000_000, 1_000_000))
+        assert tailor.usable_tailored_resume("https://job/old", str(resume_pdf))[0] == str(pdf)
+
+    def test_no_tailored_file(self, data_dir, resume_pdf):
+        assert tailor.usable_tailored_resume("https://job/none", str(resume_pdf)) == (None, "")

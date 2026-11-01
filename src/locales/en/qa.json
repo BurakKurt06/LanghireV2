@@ -34,7 +34,8 @@
       "needsAnswer": "Needs your answer",
       "yours": "Your answer",
       "fromAI": "AI's answer: check it",
-      "guess": "AI's guess: check it"
+      "guess": "AI's guess: check it",
+      "observed": "Filled in during a paused run: check it"
     }
   },
   "toast": {
@@ -45,7 +46,9 @@
     "smartSquashResult": "Smart-merged {{count}} duplicate(s)",
     "noSemanticDuplicates": "No semantic duplicates found",
     "autoSquashFailed": "Auto-squash failed",
-    "smartSquashFailed": "Smart squash failed"
+    "smartSquashFailed": "Smart squash failed",
+    "mergeFailed": "Couldn't merge those questions",
+    "saveFailed": "Your answer wasn't saved. Check that the app is running, then type it again."
   },
   "error": {
     "loadFailed": "Failed to load Q&A"

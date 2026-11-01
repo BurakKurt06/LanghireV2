@@ -1,7 +1,7 @@
 /**
  * Tests for src/lib/analytics.ts — Google Analytics Measurement Protocol client.
  *
- * analytics.ts reads `import.meta.env.VITE_GA_MEASUREMENT_ID` / `VITE_GA_API_SECRET`
+ * analytics.ts reads `import.meta.env.VITE_GA_MEASUREMENT_ID` (and must ignore any `VITE_GA_API_SECRET`)
  * into module-scope constants AT IMPORT TIME. To exercise both the "no GA id"
  * (telemetry disabled) and the "configured" code paths we stub the env with
  * `vi.stubEnv`, reset the module registry, and dynamically re-import a fresh
@@ -161,15 +161,25 @@ describe("analytics — configured GA, initialized", () => {
     expect(payload.events[0].params.description).toHaveLength(500);
   });
 
-  it("appends api_secret to the URL when configured", async () => {
+  it("never puts an API secret in a request, even when a build defines one", async () => {
     const analytics = await loadAnalytics({
       measurementId: "G-TEST123",
       apiSecret: "secret-abc",
     });
     await analytics.initAnalytics(true);
     const url = fetchMock.mock.calls[0][0] as string;
-    expect(url).toContain("api_secret=secret-abc");
+    expect(url).not.toContain("secret-abc");
+    expect(url).not.toContain("api_secret");
     expect(url).toContain("measurement_id=G-TEST123");
+  });
+
+  it("is off until the user turns it on, and remembers the choice for crash reports", async () => {
+    const analytics = await loadAnalytics({ measurementId: "G-TEST123" });
+    analytics.trackEvent("before_consent");
+    expect(fetchMock).not.toHaveBeenCalled();
+    await analytics.initAnalytics(false);
+    expect(localStorage.getItem("langhire_telemetry")).toBe("false");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("swallows fetch rejections (no unhandled error escapes)", async () => {

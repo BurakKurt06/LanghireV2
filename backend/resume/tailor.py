@@ -29,11 +29,51 @@ def _url_hash(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
 
+# Headings of sections that are kept as they are (never tailored), so their content
+# isn't folded into the section before them or left out of the new PDF.
+_OTHER_SECTIONS = (
+    "projects", "personal projects", "selected projects", "certifications", "certificates", "licenses",
+    "awards", "honors", "honours", "achievements", "publications", "research", "leadership",
+    "activities", "extracurricular activities", "volunteering", "volunteer", "languages",
+    "interests", "courses", "coursework", "relevant coursework", "training", "references",
+    "affiliations", "memberships", "patents", "presentations",
+)
+_HEADER_KEYWORDS = (
+    ("skill", "skills"), ("technolog", "skills"), ("experience", "experience"), ("employment", "experience"),
+    ("work history", "experience"), ("summary", "overview"), ("objective", "overview"), ("profile", "overview"),
+    ("education", "education"), ("academic", "education"),
+)
+
+
+def _heading_type(text: str, exact: dict) -> str | None:
+    """The section type a block starts ("other" for a known non-tailored section), or None for content.
+
+    A heading is one short line: "TECHNICAL SKILLS", "Professional Experience:",
+    "Certifications". Only exact or keyword matches count, so a company name in
+    capitals stays content.
+    """
+    if "\n" in text.strip():
+        return None
+    key = " ".join(text.strip().rstrip(":").lower().split())
+    if not key or len(key) > 40 or len(key.split()) > 4:
+        return None
+    if key in exact:
+        return exact[key]
+    for word, kind in _HEADER_KEYWORDS:
+        if word in key:
+            return kind
+    if key in _OTHER_SECTIONS or key.replace("&", "and") in _OTHER_SECTIONS:
+        return "other"
+    if any(key.startswith(name + " ") or key.endswith(" " + name) for name in _OTHER_SECTIONS):
+        return "other"  # "Awards & Honors", "Licenses and Certifications"
+    return None
+
+
 def _extract_sections(doc: fitz.Document) -> list[dict]:
     """Extract text blocks from the PDF grouped into logical sections.
 
     Groups a section header block with all content blocks that follow it
-    until the next section header.
+    until the next section header. Each section keeps its own heading text.
     """
     SECTION_HEADERS = {
         "skills": "skills",
@@ -80,8 +120,7 @@ def _extract_sections(doc: fitz.Document) -> list[dict]:
     current_section = None
 
     for block in all_blocks:
-        lower = block["text"].lower().strip()
-        section_type = SECTION_HEADERS.get(lower)
+        section_type = _heading_type(block["text"], SECTION_HEADERS)
 
         if section_type:
             # This block is a header — start a new section
@@ -120,9 +159,20 @@ def _extract_sections(doc: fitz.Document) -> list[dict]:
             "text": content_text,
             "char_count": len(content_text),
             "section_type": section["section_type"],
+            "heading": section["header_block"]["text"].strip().rstrip(":").strip(),
             "content_blocks": section["content_blocks"],
         })
     return result
+
+
+_DEFAULT_HEADINGS = {"skills": "Skills", "experience": "Experience", "overview": "Summary",
+                     "education": "Education", "contact": "Contact", "other": ""}
+
+
+def _heading_of(section: dict) -> str:
+    """The resume's own heading for a section, in title case when it was all capitals."""
+    heading = (section.get("heading") or "").strip() or _DEFAULT_HEADINGS.get(section["section_type"], "")
+    return heading.title() if heading.isupper() else heading
 
 
 def _identify_tailorable_sections(sections: list[dict], options: dict) -> list[dict]:
@@ -384,71 +434,76 @@ def _generate_fresh_pdf(
                            line_height=14, baseline_pad=10)
     state["y"] += 10
 
-    # ─── Skills Section ───
-    skills_section = next(
-        ((i, s) for i, s in enumerate(sections) if s["section_type"] == "skills"),
-        None,
-    )
-    if skills_section:
-        idx, s = skills_section
-        draw_section_header("Skills")
-        content = tailored.get(idx, s["text"])
+    def draw_lines(content: str):
         for line in content.split("\n"):
-            if line.strip():
+            if not line.strip():
+                continue
+            if _is_bullet(line):
+                draw_wrapped("• " + _strip_bullet(line), x=_MARGIN_LEFT + _BULLET_INDENT,
+                             hang_x=_MARGIN_LEFT + _HANGING_INDENT, width=_TEXT_WIDTH - _BULLET_INDENT,
+                             fontsize=_BODY_SIZE, fontname="helv", color=body_color)
+            else:
                 draw_wrapped(line.strip(), x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
                              width=_TEXT_WIDTH, fontsize=_BODY_SIZE,
                              fontname="helv", color=body_color)
         state["y"] += 10
 
-    # ─── Experience Section ───
-    experience_sections = [
-        (i, s) for i, s in enumerate(sections) if s["section_type"] == "experience"
-    ]
-    if experience_sections:
-        draw_section_header("Experience")
-        for idx, s in experience_sections:
-            content = tailored.get(idx, s["text"])
-            entries = _split_entries(content)
-            for entry in entries:
-                # Determine where the bullets begin so header lines (title /
-                # company / date) before them get header styling.
-                first_bullet_idx = next(
-                    (i for i, l in enumerate(entry) if _is_bullet(l)), len(entry)
-                )
-                for ei, eline in enumerate(entry):
-                    if _is_bullet(eline):
-                        bullet_text = "• " + _strip_bullet(eline)
-                        draw_wrapped(
-                            bullet_text, x=_MARGIN_LEFT + _BULLET_INDENT,
-                            hang_x=_MARGIN_LEFT + _HANGING_INDENT,
-                            width=_TEXT_WIDTH - _BULLET_INDENT,
-                            fontsize=_BODY_SIZE, fontname="helv", color=body_color,
-                        )
-                    elif ei == 0 and ei < first_bullet_idx:
-                        # Job title
-                        draw_wrapped(eline, x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
-                                     width=_TEXT_WIDTH, fontsize=9.5,
-                                     fontname="helvetica-bold", color=body_color)
-                    elif ei == 1 and ei < first_bullet_idx:
-                        # Company
-                        draw_wrapped(eline, x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
-                                     width=_TEXT_WIDTH, fontsize=_BODY_SIZE,
-                                     fontname="helv", color=body_color)
-                    else:
-                        # Date / secondary line
-                        draw_wrapped(eline, x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
-                                     width=_TEXT_WIDTH, fontsize=_BODY_SIZE,
-                                     fontname="helv", color=light_color)
-                state["y"] += _ENTRY_GAP
+    def draw_experience(content: str):
+        entries = _split_entries(content)
+        for entry in entries:
+            # Determine where the bullets begin so header lines (title /
+            # company / date) before them get header styling.
+            first_bullet_idx = next(
+                (i for i, l in enumerate(entry) if _is_bullet(l)), len(entry)
+            )
+            for ei, eline in enumerate(entry):
+                if _is_bullet(eline):
+                    bullet_text = "• " + _strip_bullet(eline)
+                    draw_wrapped(
+                        bullet_text, x=_MARGIN_LEFT + _BULLET_INDENT,
+                        hang_x=_MARGIN_LEFT + _HANGING_INDENT,
+                        width=_TEXT_WIDTH - _BULLET_INDENT,
+                        fontsize=_BODY_SIZE, fontname="helv", color=body_color,
+                    )
+                elif ei == 0 and ei < first_bullet_idx:
+                    # Job title
+                    draw_wrapped(eline, x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
+                                 width=_TEXT_WIDTH, fontsize=9.5,
+                                 fontname="helvetica-bold", color=body_color)
+                elif ei == 1 and ei < first_bullet_idx:
+                    # Company
+                    draw_wrapped(eline, x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
+                                 width=_TEXT_WIDTH, fontsize=_BODY_SIZE,
+                                 fontname="helv", color=body_color)
+                else:
+                    # Date / secondary line
+                    draw_wrapped(eline, x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
+                                 width=_TEXT_WIDTH, fontsize=_BODY_SIZE,
+                                 fontname="helv", color=light_color)
+            state["y"] += _ENTRY_GAP
 
-    # ─── Education Section (at the bottom) ───
-    if education_text:
+    # ─── Every section, in the resume's own order and with its own heading ───
+    # (Only Skills, Experience and Education used to be drawn: a tailored summary
+    # and sections like Projects or Certifications never reached the new PDF.)
+    previous_heading = None
+    for idx, s in enumerate(sections):
+        kind = s["section_type"]
+        if kind == "contact" and contact_info.strip():
+            continue  # the contact lines above come from the profile
+        heading = _heading_of(s)
+        if heading != previous_heading:  # several experience blocks under one heading
+            draw_section_header(heading)
+            previous_heading = heading
+        content = tailored.get(idx, s["text"])
+        if kind == "experience":
+            draw_experience(content)
+        else:
+            draw_lines(content)
+
+    # ─── Education from the profile, when the resume has no education section ───
+    if education_text and not any(s["section_type"] == "education" for s in sections):
         draw_section_header("Education")
-        for line in education_text.split("\n"):
-            if line.strip():
-                draw_wrapped(line.strip(), x=_MARGIN_LEFT, hang_x=_MARGIN_LEFT,
-                             width=_TEXT_WIDTH, fontsize=_BODY_SIZE,
-                             fontname="helv", color=body_color)
+        draw_lines(education_text)
 
     doc.save(str(output_path))
     doc.close()
@@ -553,31 +608,26 @@ async def tailor_resume(
         except Exception:
             pass
 
-    # Pass ALL sections to the PDF (not just tailored ones)
-    # Map tailored indices back to full section list
-    all_sections_for_pdf = [s for s in sections if s["section_type"] in ("skills", "experience", "overview")]
-    # Build a tailored_text map using full section indices
+    # Every section goes to the PDF (tailored ones with their new text), in order.
     full_tailored = {}
-    for i, s in enumerate(all_sections_for_pdf):
-        # Find if this section was tailored
-        for ti, ts in enumerate(tailorable):
-            if ts["text"] == s["text"] and ts["section_type"] == s["section_type"]:
-                if ti in tailored_text:
-                    full_tailored[i] = tailored_text[ti]
-                break
+    for ti, ts in enumerate(tailorable):
+        if ti in tailored_text:
+            full_tailored[next(i for i, s in enumerate(sections) if s is ts)] = tailored_text[ti]
 
-    _generate_fresh_pdf(all_sections_for_pdf, full_tailored, profile_name, contact_info, education_text, output_pdf)
+    _generate_fresh_pdf(sections, full_tailored, profile_name, contact_info, education_text, output_pdf)
     doc.close()
 
     content_parts = []
     for i, s in enumerate(tailorable):
-        section_type = s["section_type"].upper()
         original = s["text"]
         tailored = tailored_text.get(i, original)
-        content_parts.append(f"## {section_type}\n\n{tailored}")
+        content_parts.append(f"## {_heading_of(s)}\n\n{tailored}")
 
     content = "\n\n".join(content_parts)
     output_md.write_text(content, encoding="utf-8")
+    # Which resume it was made from: a tailored copy of an older resume is never used for applying.
+    _source_file(job_url).write_text(json.dumps(
+        {"resume_path": str(Path(resume_path).resolve()), "sha256": _file_sha256(Path(resume_path))}), encoding="utf-8")
 
     return {
         "path": str(output_pdf),
@@ -620,6 +670,7 @@ def delete_tailored_resume(job_url: str) -> bool:
     if pdf_path.exists():
         pdf_path.unlink()
         deleted = True
+    _source_file(job_url).unlink(missing_ok=True)
     return deleted
 
 
@@ -630,3 +681,37 @@ def get_tailored_resume_path(job_url: str) -> Optional[str]:
     if pdf_path.exists():
         return str(pdf_path)
     return None
+
+
+def _source_file(job_url: str) -> Path:
+    return _get_tailored_dir() / f"{_url_hash(job_url)}.source.json"
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def usable_tailored_resume(job_url: str, current_resume: str) -> tuple[Optional[str], str]:
+    """(tailored PDF to apply with, or None; why not) for a job, given the resume in Settings.
+
+    A tailored PDF made from another resume, or from this one before it changed, is
+    out of date: applying with it would send old content. Older tailored files have
+    no record of their resume, so their date decides (made before the resume's last change).
+    """
+    pdf = get_tailored_resume_path(job_url)
+    if not pdf:
+        return None, ""
+    current = Path(current_resume) if current_resume else None
+    if current is None or not current.exists():
+        return pdf, ""
+    try:
+        source = json.loads(_source_file(job_url).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        source = None
+    if source:
+        if source.get("resume_path") != str(current.resolve()) or source.get("sha256") != _file_sha256(current):
+            return None, "it was made from a different version of your resume"
+        return pdf, ""
+    if Path(pdf).stat().st_mtime < current.stat().st_mtime:
+        return None, "your resume changed after it was made"
+    return pdf, ""

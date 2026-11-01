@@ -5,8 +5,70 @@ No hardcoded values.
 """
 import copy
 import json
+import logging
 import platform
 from pathlib import Path
+
+try:
+    from core import secret_store
+except ImportError:
+    from backend.core import secret_store
+
+# Secrets in the settings files: stored encrypted for this Windows user
+# (core.secret_store), handed to the backend's own code in plain, and never sent
+# to the page in full (the page gets SECRET_MASK and sends it back to keep one).
+SETTINGS_SECRETS = [("sensitive_data", "password"), ("captcha_api_key",)]
+LLM_SECRETS = [(p, "api_key") for p in ("openai", "anthropic", "gemini", "openrouter", "openai_compatible")] + [
+    ("bedrock", "access_key"), ("bedrock", "secret_key")]
+SECRET_MASK = "\u2022" * 8
+
+
+def mask_secrets(data: dict, paths) -> dict:
+    """A copy for the page: each saved secret at `paths` replaced by SECRET_MASK."""
+    return secret_store._map_paths(data, paths, lambda value: SECRET_MASK if value else value)
+
+
+def keep_masked(incoming: dict, stored: dict, paths) -> dict:
+    """A copy of `incoming` where each secret the page sent back as SECRET_MASK is the stored value again."""
+    out = json.loads(json.dumps(incoming or {}))
+    for path in paths:
+        node, saved = out, stored
+        for key in path[:-1]:
+            node = node.get(key) if isinstance(node, dict) else None
+            saved = saved.get(key) if isinstance(saved, dict) else None
+        if isinstance(node, dict) and node.get(path[-1]) == SECRET_MASK:
+            node[path[-1]] = saved.get(path[-1], "") if isinstance(saved, dict) else ""
+    return out
+
+
+def migrate_secrets() -> int:
+    """Encrypt secrets still stored in plain (settings from before encryption). Returns files rewritten.
+
+    Each file is only replaced after every value encrypted and read back (protect
+    checks), with an atomic replace; on any failure it stays as it was.
+    """
+    rewritten = 0
+    for name, paths in (("settings.json", SETTINGS_SECRETS), ("llm_settings.json", LLM_SECRETS)):
+        path = get_data_dir() / name
+        try:
+            raw = _load_json(path, {})
+            if not isinstance(raw, dict):
+                continue
+            sealed = secret_store.protect_paths(raw, paths)
+            if sealed != raw:
+                _save_json(path, sealed)
+                rewritten += 1
+        except Exception as e:
+            logging.getLogger("config").warning(f"Couldn't encrypt the secrets in {name}: {e}")
+    try:
+        from core import chatgpt_auth
+    except ImportError:
+        from backend.core import chatgpt_auth
+    try:
+        rewritten += chatgpt_auth.migrate()
+    except Exception as e:
+        logging.getLogger("config").warning(f"Couldn't encrypt the ChatGPT sign-in: {e}")
+    return rewritten
 
 
 def get_data_dir() -> Path:
@@ -100,6 +162,10 @@ def save_profile(profile: dict):
 # ── LLM Settings ──────────────────────────────────────────────────────────
 
 def load_llm_settings() -> dict:
+    return secret_store.reveal_paths(_load_llm_settings_file(), LLM_SECRETS)
+
+
+def _load_llm_settings_file() -> dict:
     return _load_json(get_data_dir() / "llm_settings.json", {
         "provider": "openrouter",
         "openai": {"api_key": "", "model": "gpt-5.4-mini"},
@@ -113,19 +179,23 @@ def load_llm_settings() -> dict:
 
 
 def save_llm_settings(settings: dict):
-    _save_json(get_data_dir() / "llm_settings.json", settings)
+    _save_json(get_data_dir() / "llm_settings.json", secret_store.protect_paths(settings, LLM_SECRETS))
 
 
 # ── App Settings ──────────────────────────────────────────────────────────
 
 def load_settings() -> dict:
+    return secret_store.reveal_paths(_load_settings_file(), SETTINGS_SECRETS)
+
+
+def _load_settings_file() -> dict:
     return _load_json(get_data_dir() / "settings.json", {
         "resume_path": "",
         "blocked_domains": [],
         "sensitive_data": {"email": "", "password": ""},
         "max_failures": 8,
         "data_dir": str(get_data_dir()),
-        "telemetry_enabled": True,
+        "telemetry_enabled": False,  # usage analytics and crash reports: opt-in
         "theme": "system",
         # Job board collection (LinkedIn, Indeed, ... plugins). Default ON so
         # the app behaves exactly as before.
@@ -179,5 +249,5 @@ def save_settings(settings: dict):
             str(d).strip() for d in settings["blocked_domains"]
             if isinstance(d, str) and d.strip()
         ]
-    _save_json(get_data_dir() / "settings.json", settings)
+    _save_json(get_data_dir() / "settings.json", secret_store.protect_paths(settings, SETTINGS_SECRETS))
 

@@ -146,7 +146,7 @@ def test_load_settings_defaults(data_dir):
     """Default app settings include sane defaults and the data dir."""
     s = config.load_settings()
     assert s["max_failures"] == 8
-    assert s["telemetry_enabled"] is True
+    assert s["telemetry_enabled"] is False   # usage analytics and crash reports are opt-in
     assert s["data_dir"] == str(data_dir)
 
 

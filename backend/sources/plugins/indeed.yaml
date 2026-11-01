@@ -55,12 +55,28 @@ filters:
       - { value: "senior_level", label: "Senior level" }
     url_param: "explvl"
 
+search_params:
+  job_type:
+    param: jt
+    values: { full_time: fulltime, part_time: parttime, contract: contract, temporary: temporary, internship: internship }
+  experience:
+    param: explvl
+    values: { entry: entry_level, mid: mid_level, senior: senior_level }
+  posted_within:
+    param: fromage
+    values: { "1": "1", "3": "3", "7": "7", "14": "14" }
+
+listing:
+  job_link: '/(?:rc/clk|viewjob|pagead/clk)\?(?:[^#]*&)?jk=([0-9a-f]{16})'
+  job_url: 'https://{host}/viewjob?jk={id}'
+  next_page: { param: start, step: 10 }
+  easy_apply: '\bEasily apply\b'
+
 collection_prompt: |
-  SIGN-IN: If a sign-in or login page appears instead of the results, the user
-  must sign in in this browser window. Use the wait action
-  (30 seconds) at most 4 times, checking the page after each wait, then open the
-  search URL below again. If it is still signed out, call done with success=false
-  and the text 'Sign-in required: log in to Indeed in this browser, then collect again.'
+  SIGN-IN: Collection reuses the session from the app's browser login. If a
+  sign-in page appears, call done with success=false and the text 'Sign-in
+  required: sign in using the app browser login, then collect again.' Do not
+  enter credentials or wait for a login inside this read-only collection run.
 
   START: This search page is already open when you begin:
   {search_url}

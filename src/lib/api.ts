@@ -24,6 +24,9 @@ import type {
   QAStats,
   ChatGPTStatus,
   ChatGPTModel,
+  FilteredJob,
+  JobSearchPrefs,
+  SavedSearch,
 } from "./types";
 
 const DEFAULT_PORT = 8743;
@@ -49,26 +52,62 @@ async function getToken(): Promise<string> {
   return tokenPromise;
 }
 
-async function request<T>(
+/** Request options, plus how long to wait before giving up (default DEFAULT_TIMEOUT_MS). */
+type RequestOptions = RequestInit & { timeoutMs?: number };
+
+const DEFAULT_TIMEOUT_MS = 60_000;
+/** For calls that wait on the AI model (tailoring, cover letters, ...). */
+const AI_TIMEOUT_MS = 10 * 60_000;
+
+// GETs already on their way, by path: a poll that fires again before the last answer
+// arrived shares it, so polls never pile up and an older answer can't land after a newer one.
+const inFlight = new Map<string, Promise<unknown>>();
+
+function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const method = (options.method || "GET").toUpperCase();
+  if (method !== "GET" || options.body !== undefined) return send<T>(path, options);
+  const pending = inFlight.get(path);
+  if (pending) return pending as Promise<T>;
+  const promise = send<T>(path, options).finally(() => inFlight.delete(path));
+  inFlight.set(path, promise);
+  return promise;
+}
+
+async function send<T>(
   path: string,
-  options: RequestInit = {},
+  options: RequestOptions = {},
   _retried = false
 ): Promise<T> {
   const url = `${getBaseUrl()}${path}`;
   const token = await getToken();
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-      ...options.headers,
-    },
-  });
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...init } = options;
+  // A backend that stopped answering used to leave the page waiting forever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      signal: init.signal ?? controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        ...init.headers,
+      },
+    });
+  } catch (e) {
+    if (controller.signal.aborted) {
+      throw new Error(`The app's backend didn't answer within ${Math.round(timeoutMs / 1000)} seconds (${path}).`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (res.status === 401 && !_retried) {
     tokenPromise = null;
     await new Promise(r => setTimeout(r, 1000));
-    return request<T>(path, options, true);
+    return send<T>(path, options, true);
   }
 
   if (!res.ok) {
@@ -83,6 +122,19 @@ async function request<T>(
   } catch {
     throw new Error(`Invalid JSON response from ${path}`);
   }
+}
+
+/** The backend's own explanation in a failed request's error ({"error": {"message"}}), or `fallback`. */
+export function apiErrorMessage(e: unknown, fallback: string): string {
+  const text = e instanceof Error ? e.message : "";
+  const body = text.match(/^API Error \d+: ([\s\S]*)$/)?.[1];
+  if (body) {
+    try {
+      const message = JSON.parse(body)?.error?.message;
+      if (typeof message === "string" && message) return message;
+    } catch { /* not JSON */ }
+  }
+  return fallback;
 }
 
 // ── Health ────────────────────────────────────────────────────────────────
@@ -121,7 +173,7 @@ export async function saveLLMSettings(settings: LLMSettings) {
 
 export async function testLLMConnection(settings: LLMSettings) {
   return request<{ success: boolean; message: string }>("/llm/test", {
-    method: "POST",
+    method: "POST", timeoutMs: AI_TIMEOUT_MS,
     body: JSON.stringify(settings),
   });
 }
@@ -134,6 +186,27 @@ export async function fetchOllamaModels(baseUrl: string) {
 }
 
 // ── ChatGPT plan sign-in ──────────────────────────────────────────────────
+/** A provider's model list, fetched by the backend (the app's content policy blocks
+ *  the page from AI providers). A masked key means the saved one. Returns the provider's JSON. */
+export async function fetchProviderModels(provider: string, apiKey = "", baseUrl = "") {
+  return request<{ success: boolean; data: unknown; message?: string }>("/llm/models", {
+    method: "POST",
+    body: JSON.stringify({ provider, api_key: apiKey, base_url: baseUrl }),
+  });
+}
+
+/** Employer sites the app made an account password for. */
+export async function getEmployerPasswordSites() {
+  return request<{ sites: string[] }>("/credentials/sites");
+}
+
+export async function revealEmployerPassword(site: string) {
+  return request<{ site: string; password: string }>("/credentials/reveal", {
+    method: "POST",
+    body: JSON.stringify({ site }),
+  });
+}
+
 export async function startChatGPTLogin() {
   return request<{ url: string; error: string }>("/chatgpt/login", { method: "POST" });
 }
@@ -167,11 +240,12 @@ export async function saveSettings(settings: Partial<AppSettings>) {
 }
 
 // ── Jobs ──────────────────────────────────────────────────────────────────
-export async function getJobs(params?: { status?: string; search?: string; limit?: number }) {
+export async function getJobs(params?: { status?: string; search?: string; limit?: number; fields?: string[] }) {
   const qs = new URLSearchParams();
   if (params?.status) qs.set("status", params.status);
   if (params?.search) qs.set("search", params.search);
   if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.fields?.length) qs.set("fields", params.fields.join(","));
   const query = qs.toString();
   return request<Job[]>(`/jobs${query ? `?${query}` : ""}`);
 }
@@ -185,6 +259,7 @@ export async function exportJobsCsv(): Promise<string> {
   const token = await getToken();
   const res = await fetch(`${getBaseUrl()}/jobs/export`, {
     headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "Unknown error");
@@ -207,6 +282,7 @@ export async function startJobCollection(
   source?: string,
   filters?: Record<string, string>,
   sources?: string[],
+  search?: JobSearchPrefs,
 ) {
   const body: Record<string, unknown> = {};
   if (title) body.title = title;
@@ -214,9 +290,37 @@ export async function startJobCollection(
   if (source) body.source = source;
   if (sources && sources.length > 0) body.sources = sources;
   if (filters && Object.keys(filters).length > 0) body.filters = filters;
+  if (search) body.search = search;
   return request<{ success: boolean; message: string }>("/jobs/collect", {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+/** Listings the collector left out (they didn't fit the search), newest first. */
+export async function getFilteredJobs(limit = 200) {
+  return request<{ success: boolean; total: number; jobs: FilteredJob[] }>(`/jobs/filtered?limit=${limit}`);
+}
+
+export async function keepFilteredJob(url: string) {
+  return request<{ success: boolean; added: number }>("/jobs/filtered/keep", {
+    method: "POST",
+    body: JSON.stringify({ url }),
+  });
+}
+
+export async function clearFilteredJobs() {
+  return request<{ success: boolean; cleared: number }>("/jobs/filtered", { method: "DELETE" });
+}
+
+export async function getSavedSearches() {
+  return request<{ success: boolean; searches: SavedSearch[] }>("/jobs/searches");
+}
+
+export async function saveSavedSearches(searches: Omit<SavedSearch, "id">[] | SavedSearch[]) {
+  return request<{ success: boolean; searches: SavedSearch[] }>("/jobs/searches", {
+    method: "PUT",
+    body: JSON.stringify({ searches }),
   });
 }
 
@@ -303,7 +407,7 @@ export async function exportMemories() {
 }
 
 // ── Apply ─────────────────────────────────────────────────────────────────
-export async function startApplying(params: { workers?: number; mode?: string; limit?: number; job_url?: string; job_urls?: string[]; review?: boolean; run_mode?: "auto" | "trial" | "training" }) {
+export async function startApplying(params: { workers?: number; mode?: string; limit?: number; job_url?: string; job_urls?: string[]; review?: boolean; acknowledge_unknown?: boolean; run_mode?: "auto" | "trial" }) {
   return request<{ success: boolean; message: string }>("/apply/start", {
     method: "POST",
     body: JSON.stringify(params),
@@ -337,6 +441,12 @@ export async function reviewApplication(url: string, approve: boolean) {
   return request<{ success: boolean }>("/apply/review", { method: "POST", body: JSON.stringify({ url, approve }) });
 }
 
+export async function decideBrowserRequests(ids: string[], approve: boolean) {
+  return request<{ success: boolean }>("/apply/requests/decide", {
+    method: "POST", body: JSON.stringify({ ids, approve }),
+  });
+}
+
 // ── Inbox (Gmail check) ───────────────────────────────────────────────────
 export async function getInbox() {
   return request<InboxStatus>("/inbox");
@@ -351,7 +461,7 @@ export async function setInboxSchedule(schedule: InboxStatus["schedule"]) {
 }
 
 export async function makePrepSheet(id: string) {
-  return request<{ success: boolean; prep: string }>("/inbox/prep", { method: "POST", body: JSON.stringify({ id }) });
+  return request<{ success: boolean; prep: string }>("/inbox/prep", { method: "POST", timeoutMs: AI_TIMEOUT_MS, body: JSON.stringify({ id }) });
 }
 
 export async function skipJob(url: string) {
@@ -393,8 +503,9 @@ export async function getAuthStatus() {
   }>("/auth/status");
 }
 
-export async function launchLogin(service: "linkedin" | "gmail") {
-  return request<{ success: boolean; message: string }>(`/auth/login/${service}`, {
+/** A bundled board's identifier or Gmail; the backend chooses the sign-in URL. */
+export async function launchLogin(service: string) {
+  return request<{ success: boolean; message: string }>(`/auth/login/${encodeURIComponent(service)}`, {
     method: "POST",
   });
 }
@@ -427,7 +538,7 @@ export async function parseResumeToProfile() {
     message: string;
     profile?: Record<string, unknown>;
     fields_filled?: number;
-  }>("/profile/parse-resume", { method: "POST" });
+  }>("/profile/parse-resume", { method: "POST", timeoutMs: AI_TIMEOUT_MS });
 }
 
 // ── Q&A Repository ────────────────────────────────────────────────────────
@@ -463,20 +574,20 @@ export async function autoSquashQA() {
 }
 
 export async function smartSquashQA() {
-  return request<{ success: boolean; merged: number }>("/qa/smart-squash", { method: "POST" });
+  return request<{ success: boolean; merged: number }>("/qa/smart-squash", { method: "POST", timeoutMs: AI_TIMEOUT_MS });
 }
 
 // ── Resume Tailoring ─────────────────────────────────────────────────────
 export async function tailorResumes(jobUrls: string[], options: import("./types").TailorOptions) {
   return request<{ success: boolean; results: import("./types").TailorResult[] }>("/resume/tailor", {
-    method: "POST",
+    method: "POST", timeoutMs: AI_TIMEOUT_MS,
     body: JSON.stringify({ job_urls: jobUrls, options }),
   });
 }
 
 export async function refineTailoredResume(jobUrl: string, instruction: string) {
   return request<{ success: boolean; content: string; path: string }>("/resume/tailor/refine", {
-    method: "POST",
+    method: "POST", timeoutMs: AI_TIMEOUT_MS,
     body: JSON.stringify({ job_url: jobUrl, instruction }),
   });
 }
@@ -489,9 +600,17 @@ export async function getTailoredResumeContent(jobUrl: string) {
 }
 
 // ── Cover Letter ─────────────────────────────────────────────────────────
+/** Keep a cover letter on one job (used for that application only). */
+export async function saveJobCoverLetter(url: string, coverLetter: string) {
+  return request<{ success: boolean }>("/jobs/cover-letter", {
+    method: "PUT",
+    body: JSON.stringify({ url, cover_letter: coverLetter }),
+  });
+}
+
 export async function generateCoverLetter(jobDescription: string, jobTitle: string, company: string) {
   return request<{ success: boolean; cover_letter: string }>("/cover-letter/generate", {
-    method: "POST",
+    method: "POST", timeoutMs: AI_TIMEOUT_MS,
     body: JSON.stringify({ job_description: jobDescription, job_title: jobTitle, company: company }),
   });
 }

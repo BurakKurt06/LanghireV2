@@ -112,10 +112,17 @@ describe("App", () => {
     await waitFor(() => expect(mockInitAnalytics).toHaveBeenCalledWith(true));
   });
 
-  it("falls back to initAnalytics(true) when getSettings rejects", async () => {
+  it("analytics stays off when the setting is missing (opt-in)", async () => {
+    mockGetSettings.mockResolvedValue({ resume_path: "" } as never);
+    renderApp(["/"]);
+    await waitFor(() => expect(mockInitAnalytics).toHaveBeenCalledWith(false));
+  });
+
+  it("analytics stays off when settings can't be read (no consent known)", async () => {
     mockGetSettings.mockRejectedValue(new Error("offline"));
     renderApp(["/"]);
-    await waitFor(() => expect(mockInitAnalytics).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(mockInitAnalytics).toHaveBeenCalledWith(false));
+    expect(mockInitAnalytics).not.toHaveBeenCalledWith(true);
   });
 
   it("tracks a page view for the current path", async () => {

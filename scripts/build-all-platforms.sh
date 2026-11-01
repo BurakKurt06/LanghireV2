@@ -1,10 +1,9 @@
 #!/bin/bash
-# Build installers for ALL platforms (macOS ARM + Intel, Linux x64 + ARM64,
-# Windows) in one command.
+# Build the installer on GitHub Actions (.github/workflows/build.yml).
 #
-# Tauri cannot cross-compile installers locally, so this delegates to the
-# repo's GitHub Actions matrix (.github/workflows/build.yml), which builds
-# every target on its native runner and uploads them to a GitHub Release.
+# The matrix builds Windows x64 only: this project targets Windows (see README).
+# Despite its name, it no longer builds macOS or Linux installers. It uploads
+# the result to a GitHub Release.
 #
 # Requires: the `gh` CLI, authenticated (`gh auth status`).
 #

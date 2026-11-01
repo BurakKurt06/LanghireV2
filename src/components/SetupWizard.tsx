@@ -26,6 +26,7 @@ import { trackEvent } from "../lib/analytics";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import LLMSettingsForm from "./forms/LLMSettingsForm";
+import { useDialog } from "../hooks/useDialog";
 import ResumePickerForm from "./forms/ResumePickerForm";
 
 interface SetupWizardProps {
@@ -44,6 +45,7 @@ const STEPS = [
 
 export default function SetupWizard({ onClose, onNavigateAway, initialStep = 0 }: SetupWizardProps) {
   const { t } = useTranslation("wizard");
+  const panel = useDialog<HTMLDivElement>(true, onClose);
   const [step, setStep] = useState(initialStep);
   const [status, setStatus] = useState<SetupStatus | null>(null);
   const [parsing, setParsing] = useState(false);
@@ -100,16 +102,17 @@ export default function SetupWizard({ onClose, onNavigateAway, initialStep = 0 }
 
   return (
     <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-card rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+      <div ref={panel} role="dialog" aria-modal="true" aria-labelledby="setup-wizard-title" tabIndex={-1}
+        className="bg-card rounded-3xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
         <div className="px-6 pt-5 pb-4 border-b border-border flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-primary rounded-xl flex items-center justify-center">
               <Briefcase className="w-4 h-4 text-white" />
             </div>
-            <h2 className="text-lg font-bold text-foreground">{t("title")}</h2>
+            <h2 id="setup-wizard-title" className="text-lg font-bold text-foreground">{t("title")}</h2>
           </div>
-          <button onClick={onClose} className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition-colors">
+          <button onClick={onClose} aria-label="Close" className="p-2 text-muted-foreground hover:text-foreground rounded-xl hover:bg-secondary transition-colors">
             <X className="w-5 h-5" />
           </button>
         </div>

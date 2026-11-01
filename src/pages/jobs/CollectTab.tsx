@@ -1,22 +1,49 @@
-import { useState, useEffect, useRef } from "react";
-import { Play, Square, Terminal, Loader2, Plus, ClipboardList, Upload } from "lucide-react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Play, Square, Terminal, Loader2, Plus, ClipboardList, Upload, ChevronDown, ChevronRight, Bookmark, X, LogIn } from "lucide-react";
 import {
   startJobCollection,
   stopJobCollection,
   getCollectionStatus,
   getPlugins,
   getProfile,
+  saveProfile,
   addJob,
   addJobsBulk,
   getSettings,
+  getSavedSearches,
+  saveSavedSearches,
+  getFilteredJobs,
+  keepFilteredJob,
+  clearFilteredJobs,
+  launchLogin,
   type BulkAddResult,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
-import type { PluginConfig } from "../../lib/types";
+import type { FilteredJob, JobSearchPrefs, PluginConfig, SavedSearch } from "../../lib/types";
 import LogLine from "../../components/LogLine";
 import AutomationDialog from "../../components/AutomationDialog";
+import JobSearchForm, { ModeChoice } from "../../components/JobSearchForm";
 import { ProgressBar } from "../../components/ui";
+import {
+  DEFAULT_JOB_SEARCH, JOB_TYPE_LABELS, PERIOD_LABELS, WORK_MODE_LABELS, money, withDefaults,
+} from "../../lib/jobSearch";
 import { useTranslation } from "react-i18next";
+
+/** "Part-time · Remote · at least $20 an hour · match 5+" for the closed filters panel. */
+function summary(search: JobSearchPrefs, currency: string): string {
+  const parts = [
+    ...search.job_types.map((x) => JOB_TYPE_LABELS[x]),
+    ...search.work_modes.map((x) => WORK_MODE_LABELS[x]),
+  ];
+  if (search.min_pay.amount) {
+    parts.push(`at least ${money(search.min_pay.amount, search.min_pay.currency || currency)} ${PERIOD_LABELS[search.min_pay.period]}`);
+  }
+  if (search.min_match) parts.push(`match ${search.min_match}+`);
+  const excluded = search.exclude_companies.length + search.exclude_title_words.length + search.dealbreakers.length;
+  if (excluded) parts.push(`${excluded} left out`);
+  if (search.notes.trim()) parts.push("notes");
+  return parts.length ? parts.join(" · ") : "Any job type, arrangement and pay";
+}
 
 interface CollectTabProps {
   onJobsChanged: () => void;
@@ -35,6 +62,49 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   const [collected, setCollected] = useState(0);
   const [collectFilters, setCollectFilters] = useState<Record<string, string>>({});
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [loginWindowOpen, setLoginWindowOpen] = useState(false);
+  const [launchingLogin, setLaunchingLogin] = useState<string | null>(null);
+  const [loginMessage, setLoginMessage] = useState<{ text: string; error: boolean } | null>(null);
+
+  const signIn = async (service: string) => {
+    setLaunchingLogin(service);
+    setLoginMessage(null);
+    try {
+      const result = await launchLogin(service);
+      setLoginMessage({ text: result.message, error: !result.success });
+      if (result.success) setLoginWindowOpen(true);
+    } catch (error) {
+      setLoginMessage({ text: error instanceof Error ? error.message : "Couldn't open the sign-in window.", error: true });
+    } finally {
+      setLaunchingLogin(null);
+    }
+  };
+
+  // This search's preferences, starting from Profile → Job search.
+  const [search, setSearch] = useState<JobSearchPrefs>(DEFAULT_JOB_SEARCH);
+  const [profileSearch, setProfileSearch] = useState<JobSearchPrefs>(DEFAULT_JOB_SEARCH);
+  const [currency, setCurrency] = useState("USD");
+  const [showSearch, setShowSearch] = useState(false);
+  const [savedDefault, setSavedDefault] = useState(false);
+  const [savedSearches, setSavedSearches] = useState<SavedSearch[]>([]);
+  const [naming, setNaming] = useState<string | null>(null);
+  const [leftOut, setLeftOut] = useState<FilteredJob[]>([]);
+  const [leftOutTotal, setLeftOutTotal] = useState(0);
+  const [showLeftOut, setShowLeftOut] = useState(false);
+
+  const loadLeftOut = useCallback(() => {
+    getFilteredJobs(100)
+      .then((res) => {
+        setLeftOut(res.jobs || []);
+        setLeftOutTotal(res.total || 0);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    getSavedSearches().then((res) => setSavedSearches(res.searches || [])).catch(() => {});
+    loadLeftOut();
+  }, [loadLeftOut]);
 
   // Add job form state
   const [showAddJobForm, setShowAddJobForm] = useState(false);
@@ -81,6 +151,10 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   useEffect(() => {
     getProfile()
       .then((p) => {
+        const prefs = withDefaults(p.job_search);
+        setSearch(prefs);
+        setProfileSearch(prefs);
+        setCurrency(p.salary_expectation?.currency || "USD");
         const country = p.country || "US";
         getPlugins(country)
           .then((res) => {
@@ -101,6 +175,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   useEffect(() => {
     getCollectionStatus()
       .then((s) => {
+        setLoginWindowOpen(Boolean(s.login_window_open));
         if (s.running) {
           setCollecting(true);
           setCollectLog(s.log || []);
@@ -121,8 +196,10 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           if (wasRunning && !s.running) {
             trackEvent("collection_completed", { jobs_collected: s.collected || 0 });
             onJobsChanged();
+            loadLeftOut();
           }
           wasRunning = s.running;
+          setLoginWindowOpen(Boolean(s.login_window_open));
           setCollecting(s.running);
           setCollectLog(s.log || []);
           setCollected(s.collected || 0);
@@ -133,7 +210,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
       active = false;
       clearInterval(poll);
     };
-  }, [collecting, onJobsChanged]);
+  }, [collecting, onJobsChanged, loadLeftOut]);
 
   // Auto-scroll log
   useEffect(() => {
@@ -145,6 +222,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
   }, [collectLog]);
 
   const handleStartCollect = () => {
+    if (loginWindowOpen || launchingLogin) return;
     setShowConfirmDialog(true);
   };
 
@@ -156,7 +234,8 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
         collectMaxJobs ? Number(collectMaxJobs) : undefined,
         collectSources[0],
         collectFilters,
-        collectSources
+        collectSources,
+        search,
       );
       if (res.success) {
         setCollecting(true);
@@ -165,6 +244,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           has_title: Boolean(collectTitle),
           max_jobs: collectMaxJobs || "unlimited",
           source: collectSources.join(","),
+          mode: search.mode,
         });
       } else {
         alert(res.message);
@@ -178,6 +258,62 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
     await stopJobCollection();
     setCollecting(false);
   };
+
+  const saveAsDefault = async () => {
+    try {
+      const profile = await getProfile();
+      await saveProfile({ ...profile, job_search: search });
+      setProfileSearch(search);
+      setSavedDefault(true);
+      setTimeout(() => setSavedDefault(false), 2500);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't save to Profile");
+    }
+  };
+
+  const storeSearches = async (next: Omit<SavedSearch, "id">[] | SavedSearch[]) => {
+    try {
+      const res = await saveSavedSearches(next);
+      setSavedSearches(res.searches || []);
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't save the search");
+    }
+  };
+
+  const saveThisSearch = async () => {
+    const name = (naming || "").trim();
+    if (!name) return;
+    await storeSearches([
+      ...savedSearches,
+      { name, title: collectTitle, sources: collectSources, filters: collectFilters,
+        max_jobs: collectMaxJobs ? Number(collectMaxJobs) : 0, search },
+    ]);
+    setNaming(null);
+  };
+
+  const loadSearch = (saved: SavedSearch) => {
+    setCollectTitle(saved.title);
+    const known = saved.sources.filter((s) => availableSources.some((p) => p.name === s));
+    setCollectSources(known.length ? known : collectSources);
+    setCollectFilters(saved.filters || {});
+    setCollectMaxJobs(saved.max_jobs || "");
+    setSearch(withDefaults(saved.search));
+  };
+
+  const keepJob = async (url: string) => {
+    try {
+      await keepFilteredJob(url);
+      loadLeftOut();
+      onJobsChanged();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Couldn't add it");
+    }
+  };
+
+  const slowBoards = availableSources
+    .filter((s) => collectSources.includes(s.name) && s.quick === false)
+    .map((s) => s.display_name);
+  const boardFilters = (selectedPlugin?.filters || []).filter((f) => !f.shared);
 
   // Add job manually
   const handleAddJob = async (e: React.FormEvent) => {
@@ -393,6 +529,24 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           className="info-box mb-4"
           dangerouslySetInnerHTML={{ __html: t("collector.loginInfo") }}
         />
+        <div className="mb-4">
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Job board sign-in">
+            {availableSources.filter((source) => source.is_builtin && source.enabled && source.login_url && collectSources.includes(source.name)).map((source) => (
+              <button
+                key={source.name}
+                type="button"
+                className="btn-secondary"
+                disabled={collecting || loginWindowOpen || launchingLogin !== null}
+                onClick={() => void signIn(source.name)}
+              >
+                {launchingLogin === source.name ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogIn className="w-4 h-4" />}
+                Sign in to {source.display_name}
+              </button>
+            ))}
+          </div>
+          {loginMessage && <p role="status" className={`mt-2 text-[13px] ${loginMessage.error ? "text-red-600" : "text-muted-foreground"}`}>{loginMessage.text}</p>}
+          {loginWindowOpen && <p className="mt-2 text-[13px] text-muted-foreground">Close the sign-in browser window when you finish, then start collection.</p>}
+        </div>
         {/* Source selector — multi-select; each title is collected from every
             checked source in turn. */}
         {availableSources.length > 0 && (
@@ -431,10 +585,72 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
             </p>
           </div>
         )}
-        {/* Dynamic filters from selected plugin */}
-        {selectedPlugin?.filters && selectedPlugin.filters.length > 0 && (
-          <div className="grid grid-cols-2 gap-3 mb-4">
-            {selectedPlugin.filters.map((filter) => (
+        {/* Saved searches */}
+        {(savedSearches.length > 0 || naming !== null) && (
+          <div className="mb-4">
+            <p className="text-sm font-semibold text-foreground mb-1.5">{t("collector.savedSearches")}</p>
+            <div className="flex gap-2 flex-wrap">
+              {savedSearches.map((saved) => (
+                <span key={saved.id} className="inline-flex items-center rounded-lg border border-border bg-card text-sm">
+                  <button type="button" onClick={() => loadSearch(saved)} disabled={collecting}
+                    aria-label={t("collector.loadSearch", { name: saved.name })}
+                    className="inline-flex items-center gap-1.5 pl-3 pr-2 py-1.5 hover:text-primary disabled:opacity-50">
+                    <Bookmark className="w-3.5 h-3.5" /> {saved.name}
+                  </button>
+                  <button type="button" disabled={collecting}
+                    onClick={() => storeSearches(savedSearches.filter((s) => s.id !== saved.id))}
+                    aria-label={t("collector.deleteSearch", { name: saved.name })}
+                    className="pr-2 py-1.5 text-muted-foreground hover:text-destructive disabled:opacity-50">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* How to collect, and this search's filters (from Profile → Job search) */}
+        <div className="mb-4">
+          <ModeChoice value={search.mode} onChange={(mode) => setSearch((s) => ({ ...s, mode }))} />
+          {search.mode === "quick" && slowBoards.length > 0 && (
+            <p className="text-[12px] text-muted-foreground mt-1.5">
+              {t("collector.oneAtATimeHint", { boards: slowBoards.join(", ") })}
+            </p>
+          )}
+        </div>
+        <div className="mb-4 rounded-xl border border-border">
+          <button type="button" onClick={() => setShowSearch((v) => !v)} aria-expanded={showSearch}
+            className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left">
+            <span>
+              <span className="block text-sm font-semibold text-foreground">{t("collector.searchSettings")}</span>
+              <span className="block text-[12px] text-muted-foreground">{summary(search, currency)}</span>
+            </span>
+            {showSearch ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+          </button>
+          {showSearch && (
+            <div className="px-4 pb-4">
+              <p className="text-[12px] text-muted-foreground mb-3">{t("collector.searchSettingsHint")}</p>
+              <JobSearchForm value={search} onChange={setSearch} currency={currency} showMode={false} disabled={collecting} />
+              <div className="flex gap-2 mt-4">
+                <button type="button" className="btn-secondary" disabled={collecting} onClick={() => setSearch(profileSearch)}>
+                  {t("collector.resetToProfile")}
+                </button>
+                <button type="button" className="btn-secondary" disabled={collecting} onClick={saveAsDefault}>
+                  {savedDefault ? t("collector.savedAsDefault") : t("collector.saveAsDefault")}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Board-specific filters the shared ones don't cover */}
+        {boardFilters.length > 0 && (
+          <div className="mb-4">
+            <p className="text-xs font-semibold text-muted-foreground mb-1.5">
+              {t("collector.boardFilters", { board: selectedPlugin?.display_name })}
+            </p>
+          <div className="grid grid-cols-2 gap-3">
+            {boardFilters.map((filter) => (
               <div key={filter.key}>
                 <label className="block text-xs font-medium text-muted-foreground mb-1">
                   {filter.label}
@@ -476,6 +692,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
               </div>
             ))}
           </div>
+          </div>
         )}
         <div className="flex gap-3 mb-4">
           <input
@@ -505,12 +722,32 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           ) : (
             <button
               onClick={handleStartCollect}
-              disabled={collectSources.length === 0 || !collectionEnabled}
+              disabled={collectSources.length === 0 || !collectionEnabled || loginWindowOpen || launchingLogin !== null}
               title={!collectionEnabled ? "Job board collection is turned off in Settings" : undefined}
               className="btn-dark disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Play className="w-4 h-4" /> {t("collector.start")}
             </button>
+          )}
+        </div>
+        {/* Save this search (title, boards, filters) to run again later */}
+        <div className="mb-4">
+          {naming === null ? (
+            <button type="button" onClick={() => setNaming(collectTitle || "")} disabled={collecting}
+              className="inline-flex items-center gap-1.5 text-[13px] text-muted-foreground hover:text-foreground disabled:opacity-50">
+              <Bookmark className="w-3.5 h-3.5" /> {t("collector.saveSearch")}
+            </button>
+          ) : (
+            <div className="flex gap-2 items-center">
+              <input value={naming} onChange={(e) => setNaming(e.target.value)} maxLength={60} autoFocus
+                onKeyDown={(e) => e.key === "Enter" && saveThisSearch()}
+                aria-label={t("collector.searchName")} placeholder={t("collector.searchName")}
+                className="input-base !py-1.5 text-sm flex-1" />
+              <button type="button" className="btn-primary" onClick={saveThisSearch} disabled={!naming.trim()}>
+                {t("collector.save")}
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setNaming(null)}>{t("collector.cancel")}</button>
+            </div>
           )}
         </div>
         {/* Progress bar */}
@@ -541,6 +778,40 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
             {collectLog.map((line, i) => (
               <LogLine key={i} line={line} />
             ))}
+          </div>
+        )}
+        {/* What the search left out, and why */}
+        {leftOutTotal > 0 && (
+          <div className="mt-4 rounded-xl border border-border">
+            <button type="button" onClick={() => setShowLeftOut((v) => !v)} aria-expanded={showLeftOut}
+              className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left">
+              <span className="text-sm font-semibold text-foreground">{t("collector.leftOut", { count: leftOutTotal })}</span>
+              {showLeftOut ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+            </button>
+            {showLeftOut && (
+              <div className="px-4 pb-4">
+                <p className="text-[12px] text-muted-foreground mb-2">{t("collector.leftOutHint")}</p>
+                <ul className="divide-y divide-border">
+                  {leftOut.map((job) => (
+                    <li key={job.url} className="flex items-center justify-between gap-3 py-2">
+                      <div className="min-w-0">
+                        <a href={job.url} target="_blank" rel="noopener noreferrer"
+                          className="block text-sm font-medium text-foreground truncate hover:text-primary">
+                          {job.title || "Untitled"} · {job.company || "Unknown"}
+                        </a>
+                        <p className="text-[12px] text-muted-foreground truncate">{job.reason}</p>
+                      </div>
+                      <button type="button" className="btn-secondary !py-1 text-[12px] flex-shrink-0"
+                        onClick={() => keepJob(job.url)}>{t("collector.keep")}</button>
+                    </li>
+                  ))}
+                </ul>
+                <button type="button" className="mt-2 text-[12px] text-muted-foreground hover:text-destructive"
+                  onClick={() => clearFilteredJobs().then(loadLeftOut).catch(() => {})}>
+                  {t("collector.clearLeftOut")}
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

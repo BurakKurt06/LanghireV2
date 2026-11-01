@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpx
 
 from core.config import get_data_dir
+from core import secret_store
 
 ISSUER = "https://auth.openai.com"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # the Codex CLI's public OAuth client
@@ -76,6 +77,21 @@ def _account(tokens: dict) -> dict:
     }
 
 
+# Encrypted at rest for this Windows user (core.secret_store).
+_TOKEN_FIELDS = [("access_token",), ("refresh_token",), ("id_token",)]
+
+
+def _write(data: dict) -> None:
+    path = _auth_file()
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(secret_store.protect_paths(data, _TOKEN_FIELDS)), encoding="utf-8")
+    tmp.replace(path)
+    try:
+        os.chmod(path, 0o600)  # sign-in tokens: this user only (no effect on Windows ACLs)
+    except OSError:
+        pass
+
+
 def _save(tokens: dict, previous: dict | None = None) -> dict:
     """Store a token response, keeping values a refresh response leaves out."""
     data = {**(previous or {}), **{k: v for k, v in tokens.items() if v}}
@@ -84,22 +100,34 @@ def _save(tokens: dict, previous: dict | None = None) -> dict:
         exp = time.time() + float(tokens["expires_in"])
     data["expires_at"] = float(exp or time.time() + 3600)
     data.update({k: v for k, v in _account(data).items() if v})
-    path = _auth_file()
-    path.write_text(json.dumps(data), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)  # sign-in tokens: this user only (no effect on Windows ACLs)
-    except OSError:
-        pass
+    _write(data)
     return data
 
 
-def load() -> dict | None:
-    """The stored sign-in, or None."""
+def _read_file() -> dict | None:
     try:
         data = json.loads(_auth_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) and data.get("refresh_token") else None
+    return data if isinstance(data, dict) else None
+
+
+def load() -> dict | None:
+    """The stored sign-in, or None."""
+    data = _read_file()
+    if data is None:
+        return None
+    data = secret_store.reveal_paths(data, _TOKEN_FIELDS)
+    return data if data.get("refresh_token") else None
+
+
+def migrate() -> int:
+    """Encrypt a sign-in saved in plain by an older version (1 when the file was rewritten)."""
+    raw = _read_file()
+    if not raw or not any(raw.get(k) and not secret_store.is_protected(raw[k]) for (k,) in _TOKEN_FIELDS):
+        return 0
+    _write(raw)
+    return 1
 
 
 # ── Sign-in flow ────────────────────────────────────────────────────────────
@@ -112,6 +140,7 @@ class _Login:
         self.verifier, challenge = _pkce()
         self.error = ""
         self.done = False
+        self.cancelled = False
         self.server = self._bind()
         self.redirect_uri = f"http://127.0.0.1:{self.server.server_address[1]}/auth/callback"
         self.url = f"{ISSUER}/oauth/authorize?" + urllib.parse.urlencode({
@@ -177,7 +206,13 @@ class _Login:
                 "code_verifier": self.verifier,
             }, timeout=30)
             response.raise_for_status()
-            _save(response.json())
+            # Under the same lock as sign-out: a sign-out during the exchange wins (the tokens
+            # used to be saved anyway, signing the user back in).
+            with _refresh_lock:
+                if self.cancelled:
+                    self.done = True
+                    return False, "This sign-in was cancelled in LangHire."
+                _save(response.json())
         except Exception as e:  # network or rejected code: report it on the page and in the app
             self.error = f"Sign-in failed while getting tokens: {e}"
             self.done = True
@@ -195,6 +230,7 @@ class _Login:
         self.server.server_close()
 
     def cancel(self):
+        self.cancelled = True
         self.done = True
 
 
@@ -246,11 +282,14 @@ def logout() -> None:
         if _login:
             _login.cancel()
             _login = None
-    data = load()
-    try:
-        _auth_file().unlink()
-    except FileNotFoundError:
-        pass
+    # After any refresh or sign-in that is saving tokens right now (it holds this lock),
+    # so nothing writes the sign-in back once it's removed.
+    with _refresh_lock:
+        data = load()
+        try:
+            _auth_file().unlink()
+        except FileNotFoundError:
+            pass
     if data:
         try:  # best effort; the local copy is already gone
             httpx.post(f"{ISSUER}/oauth/revoke", json={

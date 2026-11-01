@@ -28,6 +28,11 @@ from fastapi.testclient import TestClient
 import main  # noqa: E402  (import after env var is set)
 
 TOKEN = main._API_TOKEN
+
+
+def main_mask():
+    from core.config import SECRET_MASK
+    return SECRET_MASK
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
@@ -69,6 +74,13 @@ def _isolate_state(data_dir, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _ready_to_run(request, monkeypatch):
+    """Most start tests aren't about readiness: count the app as set up (TestStartReadiness checks it)."""
+    if request.node.get_closest_marker("real_readiness") is None:
+        monkeypatch.setattr(main, "_start_problem", lambda apply: "")
+
+
 @pytest.fixture
 def client(data_dir):
     """A TestClient bound to the FastAPI app with an isolated data dir.
@@ -79,7 +91,7 @@ def client(data_dir):
     kills browser processes, spawns a parent watchdog and triggers a background
     Chromium install — none of which the API tests need.
     """
-    return TestClient(main.app)
+    return TestClient(main.app, base_url="http://127.0.0.1")   # the address the app's window uses
 
 
 @pytest.fixture
@@ -139,6 +151,17 @@ class TestAuth:
         )
         assert resp.status_code == 403
         assert resp.json() == {"error": "forbidden"}
+
+    @pytest.mark.parametrize("path", ["/health", "/chromium/status", "/profile"])
+    def test_a_rebound_website_name_is_refused(self, client, path):
+        """DNS rebinding: a page whose own name now points at 127.0.0.1 reads it same-origin (no Origin
+        header), but its request still carries that name as the Host."""
+        resp = client.get(path, headers={"Host": "evil.example:8000", **AUTH})
+        assert resp.status_code == 400
+
+    def test_the_app_window_address_is_accepted(self, client):
+        assert client.get("/health", headers={"Host": "127.0.0.1:51234"}).status_code == 200
+        assert client.get("/health", headers={"Host": "localhost:51234"}).status_code == 200
 
     def test_allowed_origin_passes(self, auth_client):
         """An allowlisted Origin combined with a valid token succeeds."""
@@ -235,9 +258,12 @@ class TestAppSettings:
         loaded = auth_client.get("/settings").json()
         assert loaded["theme"] == "dark"
         assert loaded["resume_path"] == "/r.pdf"
-        assert loaded["sensitive_data"]["password"] == "pw"
-        assert loaded["captcha_api_key"] == "key-123"
         assert loaded["blocked_domains"] == ["spam.com"]
+        # The secrets are kept (the page only ever gets a mask for them).
+        stored = main.load_settings()
+        assert stored["sensitive_data"]["password"] == "pw"
+        assert stored["captcha_api_key"] == "key-123"
+        assert loaded["sensitive_data"]["password"] == loaded["captcha_api_key"] == main_mask()
 
     def test_partial_update_still_replaces_a_supplied_list(self, auth_client):
         """Merging is per key, so a supplied list replaces rather than appends."""
@@ -278,6 +304,99 @@ class TestLLMSettings:
         loaded = auth_client.get("/settings/llm").json()
         assert loaded["provider"] == "openrouter"
         assert loaded["openrouter"]["model"] == "meta-llama/llama-3.1-8b-instruct"
+
+    def test_saved_keys_never_go_to_the_page(self, auth_client):
+        auth_client.put("/settings/llm", json={"provider": "openai", "openai": {"api_key": "sk-fake-123456", "model": "m"}})
+        body = auth_client.get("/settings/llm")
+        assert "sk-fake-123456" not in body.text
+        assert body.json()["openai"]["api_key"] == main_mask()
+
+    def test_a_masked_key_sent_back_keeps_the_saved_one(self, auth_client):
+        auth_client.put("/settings/llm", json={"provider": "openai", "openai": {"api_key": "sk-fake-123456", "model": "m"}})
+        auth_client.put("/settings/llm", json={"provider": "openai", "openai": {"api_key": main_mask(), "model": "n"}})
+        assert main.load_llm_settings()["openai"] == {"api_key": "sk-fake-123456", "model": "n"}
+        auth_client.put("/settings/llm", json={"provider": "openai", "openai": {"api_key": "sk-fake-new", "model": "n"}})
+        assert main.load_llm_settings()["openai"]["api_key"] == "sk-fake-new"
+        auth_client.put("/settings/llm", json={"provider": "openai", "openai": {"api_key": "", "model": "n"}})
+        assert main.load_llm_settings()["openai"]["api_key"] == ""   # cleared on purpose
+
+    def test_connection_test_uses_the_saved_key_for_a_masked_one(self, auth_client, monkeypatch):
+        from core import llm_factory
+        seen = []
+
+        async def _ok(_llm):
+            return "pong"
+
+        monkeypatch.setattr(llm_factory, "create_llm", lambda s: seen.append(s) or object())
+        monkeypatch.setattr(llm_factory, "test_connection", _ok)
+        auth_client.put("/settings/llm", json={"provider": "gemini", "gemini": {"api_key": "fake-gemini-key", "model": "g"}})
+        auth_client.post("/llm/test", json={"provider": "gemini", "gemini": {"api_key": main_mask(), "model": "g"}})
+        assert seen[-1]["gemini"]["api_key"] == "fake-gemini-key"
+
+
+class TestProviderModelLists:
+    """Model lists come through the backend: the app's content policy blocks the page from AI providers."""
+
+    @pytest.fixture
+    def fake_http(self, monkeypatch):
+        import httpx
+        calls = []
+
+        class Response:
+            def __init__(self, url):
+                self.url = url
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"data": [{"id": "model-a"}]}
+
+        class Client:
+            def __init__(self, **kwargs):
+                calls.append({"client": kwargs})
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, headers=None):
+                calls.append({"url": url, "headers": headers or {}})
+                return Response(url)
+
+        monkeypatch.setattr(httpx, "AsyncClient", Client)
+        return calls
+
+    def test_the_saved_key_is_used_and_never_returned(self, auth_client, fake_http):
+        auth_client.put("/settings/llm", json={"provider": "openai", "openai": {"api_key": "sk-fake-123456", "model": "m"}})
+        resp = auth_client.post("/llm/models", json={"provider": "openai", "api_key": main_mask()})
+        assert resp.json() == {"success": True, "data": {"data": [{"id": "model-a"}]}}
+        request = fake_http[-1]
+        assert request["url"] == "https://api.openai.com/v1/models"
+        assert request["headers"]["Authorization"] == "Bearer sk-fake-123456"
+        assert fake_http[-2]["client"]["follow_redirects"] is False
+
+    def test_a_typed_key_is_used_as_typed(self, auth_client, fake_http):
+        auth_client.post("/llm/models", json={"provider": "gemini", "api_key": "typed-key"})
+        assert fake_http[-1]["headers"] == {"x-goog-api-key": "typed-key"}
+        assert fake_http[-1]["url"].startswith("https://generativelanguage.googleapis.com/")
+
+    def test_openrouter_needs_no_key_and_others_do(self, auth_client, fake_http):
+        assert auth_client.post("/llm/models", json={"provider": "openrouter"}).json()["success"] is True
+        body = auth_client.post("/llm/models", json={"provider": "anthropic"}).json()
+        assert body["success"] is False and len(fake_http) == 2   # no request without a key
+
+    def test_unknown_providers_and_bad_addresses_are_refused(self, auth_client, fake_http):
+        assert auth_client.post("/llm/models", json={"provider": "evil"}).status_code == 400
+        resp = auth_client.post("/llm/models", json={"provider": "openai_compatible", "base_url": "file:///etc/passwd"})
+        assert resp.status_code == 400 and fake_http == []
+
+    def test_a_local_compatible_server_is_allowed(self, auth_client, fake_http):
+        """The user's own LM Studio / vLLM address is intentional configuration."""
+        auth_client.post("/llm/models", json={"provider": "openai_compatible", "base_url": "http://localhost:1234/v1/"})
+        assert fake_http[-1]["url"] == "http://localhost:1234/v1/models"
 
 
 # ── Countries ─────────────────────────────────────────────────────────────────
@@ -448,6 +567,40 @@ class TestJobs:
     def test_bulk_add_reports_invalid_samples_for_the_ui(self, auth_client):
         body = auth_client.post("/jobs/add-bulk", json={"text": "nonsense-line"}).json()
         assert body["invalid_samples"] == ["nonsense-line"]
+
+    def test_bulk_add_counts_every_invalid_link_but_samples_ten(self, auth_client):
+        text = "\n".join(f"http://10.0.0.{i}/job" for i in range(12))
+        body = auth_client.post("/jobs/add-bulk", json={"text": text}).json()
+        assert body["skipped_invalid"] == 12 and len(body["invalid_samples"]) == 10
+
+    @pytest.mark.parametrize("path, payload", [
+        ("/jobs/add", {"url": "https://jobs.example.com/a"}),
+        ("/jobs/add-bulk", {"text": "https://jobs.example.com/a\nhttps://jobs.example.com/b"}),
+    ])
+    def test_link_checks_run_off_the_event_loop(self, auth_client, monkeypatch, path, payload):
+        """Each check can wait on DNS; on the event loop it stalled every other request."""
+        import asyncio
+        import core.shared_config as shared_config
+        on_loop = []
+
+        def check(url, resolve=True):
+            try:
+                asyncio.get_running_loop()
+                on_loop.append(url)
+            except RuntimeError:
+                pass
+            return True
+
+        monkeypatch.setattr(shared_config, "validate_job_url", check)
+        assert auth_client.post(path, json=payload).status_code == 200
+        assert on_loop == []
+
+    def test_delete_ignores_entries_that_are_not_links(self, auth_client):
+        url = "https://www.linkedin.com/jobs/view/556"
+        auth_client.post("/jobs/add", json={"url": url})
+        resp = auth_client.request("DELETE", "/jobs", json={"urls": [1, None, {"x": 1}, url]})
+        assert resp.status_code == 200 and resp.json()["deleted"] == 1
+        assert auth_client.get("/jobs").json() == []
 
     def test_export_jobs_csv_empty(self, auth_client):
         """Export on an empty data dir returns a CSV with only the header row."""
@@ -950,13 +1103,68 @@ def test_kill_browser_processes_matches_windows_profile_paths(monkeypatch):
         def kill(self):
             pass
 
-    ours = P(1, ["chrome.exe", r"--user-data-dir=C:\Users\x\AppData\Roaming\LangHireV2\browser_profile"])
-    unrelated = P(2, ["chrome.exe", r"--user-data-dir=C:\Users\x\AppData\Local\Google\Chrome\User Data"])
-    monkeypatch.setattr(psutil, "process_iter", lambda attrs: [ours, unrelated])
+    profile = str(main.get_data_dir() / "browser_profile")
+    windows_style = profile.replace("/", "\\").upper()
+    ours = P(1, ["chrome.exe", f"--user-data-dir={windows_style}"])
+    worker = P(2, ["brave.exe", f'--user-data-dir="{profile}_brave_w2"'])
+    unrelated = P(3, ["chrome.exe", r"--user-data-dir=C:\Users\x\AppData\Local\Google\Chrome\User Data"])
+    # The real app's profile (another data folder): a test or a second copy must never close it.
+    other_app = P(4, ["chrome.exe", r"--user-data-dir=C:\Users\x\AppData\Roaming\LangHireV2\browser_profile"])
+    mentions_it = P(5, ["notepad.exe", profile + "\\notes.txt"])
+    monkeypatch.setattr(psutil, "process_iter", lambda attrs: [ours, worker, unrelated, other_app, mentions_it])
     monkeypatch.setattr(psutil, "wait_procs", lambda procs, timeout: (procs, []))
     main._kill_browser_processes()
-    assert ours.terminated
-    assert not unrelated.terminated
+    assert ours.terminated and worker.terminated
+    assert not unrelated.terminated and not other_app.terminated and not mentions_it.terminated
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_when_the_app_exits_the_backend_stops_runs_and_closes_browsers_before_ending(monkeypatch, cleanup_fails):
+    """The SIGTERM the parent watchdog sends itself ends the process without lifespan shutdown on
+    Windows (TerminateProcess) and in the packaged app (no signal handlers), so the app's browsers
+    stayed open after the app closed (reproduced by running main.py with sys.frozen set, killing its
+    parent, and watching a process on the app's profile folder outlive the backend)."""
+    import signal
+    import time
+    order = []
+
+    def kill_browsers():
+        order.append("browsers")
+        if cleanup_fails:
+            raise RuntimeError("psutil failed")
+
+    monkeypatch.setattr(main, "_kill_browser_processes", kill_browsers)
+    monkeypatch.setattr(time, "sleep", lambda seconds: order.append(f"sleep {seconds}"))
+    monkeypatch.setattr(main.os, "kill", lambda pid, sig: order.append(("kill", pid, sig)))
+    monkeypatch.setitem(main._apply_status, "running", True)
+    monkeypatch.setitem(main._apply_status, "log", [])
+    monkeypatch.setitem(main._apply_status, "_loop", None)
+    monkeypatch.setitem(main._apply_status, "cancel_requested", False)
+    if cleanup_fails:
+        with pytest.raises(RuntimeError):
+            main._on_parent_exit()
+    else:
+        main._on_parent_exit()
+    assert main._apply_status.get("cancel_requested") is True
+    assert order[0] == "browsers" and order[-1] == ("kill", os.getpid(), signal.SIGTERM)
+    if not cleanup_fails:
+        assert order == ["browsers", "sleep 2", "browsers", ("kill", os.getpid(), signal.SIGTERM)]
+
+
+def test_when_the_app_exits_an_open_sign_in_window_is_left_for_the_user(monkeypatch):
+    """A forced close can lose a sign-in not yet saved to disk; no run goes on while it is open."""
+    import signal
+    killed = []
+
+    class OpenWindow:
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(main, "_login_process", OpenWindow())
+    monkeypatch.setattr(main, "_kill_browser_processes", lambda: killed.append("browsers"))
+    monkeypatch.setattr(main.os, "kill", lambda pid, sig: killed.append(sig))
+    main._on_parent_exit()
+    assert killed == [signal.SIGTERM]
 
 
 class TestApplyPause:
@@ -1090,11 +1298,57 @@ class TestApplyReview:
         assert apply_jobs.is_trial_run()
         main._apply_status["running"] = False
         auth_client.post("/apply/start", json={"mode": "all"})
-        assert not apply_jobs.is_trial_run()
+        assert apply_jobs.is_trial_run()  # default never grants automatic sending
+        main._apply_status["running"] = False
+        auth_client.post("/apply/start", json={"mode": "all", "run_mode": "auto"})
+        assert not apply_jobs.is_trial_run()  # only an explicit mode choice
         main._apply_status["running"] = False
 
 
 class TestHelpAndNotes:
+    @pytest.mark.parametrize("body", [
+        {"ids": ["a" * 32], "approve": "false"},
+        {"ids": [], "approve": True},
+        {"ids": ["a" * 32] * 65, "approve": True},
+        {"ids": "a" * 32, "approve": True},
+    ])
+    def test_browser_request_decisions_reject_ambiguous_types(self, auth_client, body):
+        assert auth_client.post("/apply/requests/decide", json=body).status_code == 400
+
+    def test_no_request_id_can_authorize_a_future_request(self, auth_client):
+        result = auth_client.post("/apply/requests/decide", json={"ids": ["a" * 32], "approve": True})
+        assert result.status_code == 200 and result.json() == {"success": False}
+
+    def test_collection_requests_are_visible_without_an_application_run(self, auth_client, monkeypatch):
+        from core import request_gate
+        monkeypatch.setattr(request_gate, "pending", lambda: [{"id": "a" * 32, "kind": "request"}])
+        main._apply_status["running"] = False
+        assert auth_client.get("/apply/status").json()["requests"] == [{"id": "a" * 32, "kind": "request"}]
+
+    def test_retry_requires_explicit_duplicate_acknowledgement(self, auth_client, monkeypatch):
+        from core import shared_config
+        url = "https://jobs.example/1"
+        shared_config.write_jobs({url: {"url": url, "status": "needs_you", "submit_attempted_at": "test-earlier-request"}})
+        started = []
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
+        monkeypatch.setattr(main, "_run_async_in_thread", lambda *a: started.append(True))
+        result = auth_client.post("/apply/start", json={"job_url": url})
+        assert not result.json()["success"] and not started
+        assert auth_client.post("/apply/start", json={"job_url": url, "acknowledge_unknown": "true"}).status_code == 422
+        try:
+            result = auth_client.post("/apply/start", json={"job_url": url, "acknowledge_unknown": True})
+            assert result.json()["success"] and started
+        finally:
+            main._apply_status["running"] = False
+
+    def test_only_an_explicit_manual_status_change_records_user_receipt_confirmation(self, auth_client):
+        from core import shared_config
+        url = "https://jobs.example/1"
+        shared_config.write_jobs({url: {"url": url, "status": "needs_you", "submit_attempted_at": "test-request"}})
+        assert auth_client.put("/jobs/status", json={"url": url, "status": "applied"}).json()["success"]
+        saved = shared_config.read_jobs()[url]
+        assert saved["submission_evidence"]["kind"] == "user_confirmed" and saved["submit_attempted_at"] == "test-request"
+
     def test_help_reply_reaches_the_waiting_agent(self, auth_client, monkeypatch):
         from cli import apply_jobs
         replies = []
@@ -1128,14 +1382,28 @@ class TestHelpAndNotes:
     def test_note_for_an_unknown_job(self, auth_client):
         assert auth_client.put("/jobs/note", json={"url": "https://nope.example/1", "note": "x"}).status_code == 404
 
+    def test_notes_stay_on_one_job_and_are_never_silently_truncated(self, auth_client):
+        first, second = "https://boards.greenhouse.io/acme/jobs/9", "https://boards.greenhouse.io/acme/jobs/10"
+        for url in (first, second):
+            auth_client.post("/jobs/add", json={"url": url, "title": "Intern", "company": "Acme"})
+        note = "A" * 2500 + "Keep this final instruction"
+        assert auth_client.put("/jobs/note", json={"url": first, "note": note}).status_code == 200
+        assert auth_client.put("/jobs/note", json={"url": second, "note": "Other job"}).status_code == 200
+        assert auth_client.put("/jobs/note", json={"url": first, "note": "x" * 10001}).status_code == 400
+        jobs = {j["url"]: j for j in auth_client.get("/jobs").json()}
+        assert jobs[first]["user_note"] == note and jobs[second]["user_note"] == "Other job"
+        assert auth_client.put("/jobs/note", json={"url": first, "note": ""}).status_code == 200
+        jobs = {j["url"]: j for j in auth_client.get("/jobs").json()}
+        assert jobs[first]["user_note"] == "" and jobs[second]["user_note"] == "Other job"
+
 
 def test_start_passes_the_run_mode(auth_client, monkeypatch):
     from cli import apply_jobs
     monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
     monkeypatch.setattr(main, "_run_async_in_thread", lambda make_coro, status: None)
     try:
-        auth_client.post("/apply/start", json={"mode": "all", "run_mode": "training"})
-        assert apply_jobs.is_training_run()
+        auth_client.post("/apply/start", json={"mode": "all", "run_mode": "training"})   # the old name of a trial
+        assert apply_jobs.is_trial_run() and apply_jobs._run_options["mode"] == "trial"
         main._apply_status["running"] = False
         auth_client.post("/apply/start", json={"mode": "all", "review": True})   # older callers
         assert apply_jobs.is_trial_run()
@@ -1173,7 +1441,7 @@ class TestFailureFixes:
         assert resp.content.startswith("\ufeff".encode("utf-8"))
         text = resp.content.decode("utf-8-sig")
         header = text.splitlines()[0]
-        for column in ("Last Attempt", "Practised (Training Run)", "Reason", "Duration (s)", "Steps"):
+        for column in ("Last Attempt", "Practised (Skipped at Review)", "Reason", "Duration (s)", "Steps"):
             assert column in header
         assert "'=HYPERLINK" in text and "'@Create Account" in text and "Café Ltd" in text
 
@@ -1265,10 +1533,10 @@ class TestBatch1Api:
         monkeypatch.setitem(main._apply_status, "running", True)
         monkeypatch.setattr(apply_jobs, "_current", {1: {"url": "u", "title": "Intern", "company": "Acme", "step": 4,
                                                          "max_steps": 70, "started_at": "2026-10-08T10:00:00+00:00"}})
-        monkeypatch.setitem(apply_jobs._run_options, "mode", "training")
+        monkeypatch.setitem(apply_jobs._run_options, "mode", "trial")
         status = auth_client.get("/apply/status").json()
         assert status["current"][0]["title"] == "Intern" and status["current"][0]["worker"] == 1
-        assert status["run_mode"] == "training"
+        assert status["run_mode"] == "trial"
 
     def test_skip_endpoint(self, auth_client, monkeypatch):
         from cli import apply_jobs
@@ -1369,3 +1637,340 @@ class TestInboxApi:
         assert resp["success"] is False and "checking Gmail" in resp["message"]
         resp = auth_client.post("/auth/login/gmail").json()
         assert resp["success"] is False and "checking Gmail" in resp["message"]
+
+
+class TestQaMergeValidation:
+    def _add(self, question, answer=""):
+        store = main._get_memory_store()
+        store.qa_add(question=question, answer=answer)
+        return next(q["id"] for q in store.qa_list() if q["question"] == question)
+
+    def test_bad_manual_merges_are_refused_with_a_reason(self, auth_client):
+        a = self._add("Are you willing to relocate?", "Yes")
+        b = self._add("Do you need sponsorship?", "No")
+        assert auth_client.post(f"/qa/{a}/merge/{a}").status_code == 409
+        assert auth_client.post(f"/qa/{a}/merge/999999").status_code == 409
+        resp = auth_client.post(f"/qa/{b}/merge/{a}")
+        assert resp.status_code == 409 and "different answers" in resp.json()["error"]["message"]
+        assert auth_client.post(f"/qa/{b}/merge/{a}?force=true").json()["success"] is True
+
+    def test_ai_merge_suggestions_are_checked_before_anything_changes(self, auth_client, monkeypatch):
+        a = self._add("Are you legally authorized to work in Canada?", "Yes")
+        b = self._add("Are you legally authorized to work in Australia?", "No")
+        c = self._add("Do you have the right to work in Canada?", "Yes")
+        reply = f'[{{"keep": {a}, "merge": [{a}, {b}, {c}, 424242]}}, {{"keep": 999, "merge": [{c}]}}]'
+
+        async def fake_invoke(llm, settings, messages, **kw):
+            from types import SimpleNamespace
+            return SimpleNamespace(completion=reply)
+
+        import core.llm_factory as factory
+        monkeypatch.setattr(main, "load_llm_settings", lambda: {"provider": "openai"})
+        monkeypatch.setattr(factory, "create_llm", lambda settings: object())
+        monkeypatch.setattr(factory, "ainvoke_with_fallback", fake_invoke)
+        result = auth_client.post("/qa/smart-squash").json()
+        # Only c (same answer) merged; the self-merge, the conflicting answer and unknown ids were skipped.
+        assert result == {"success": True, "merged": 1, "skipped": 4}
+        remaining = {q["id"] for q in main._get_memory_store().qa_list()}
+        assert {a, b} <= remaining and c not in remaining
+
+
+class TestBrowserOwnership:
+    """Applying, collecting, a sign-in window and the Gmail check take turns with the browser profiles.
+
+    Starting or stopping one closes every browser on those profiles, so one may
+    never start, or stop, while another is using them.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _idle(self, monkeypatch):
+        from core import inbox
+        self.killed = []
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: self.killed.append(1))
+        monkeypatch.setattr(main, "_run_async_in_thread", lambda make_coro, status: None)
+        monkeypatch.setattr(main, "_login_process", None)
+        monkeypatch.setitem(inbox._state, "checking", False)
+        monkeypatch.setattr(main, "_apply_status", {"running": False, "mode": None, "workers": 1, "log": []})
+        monkeypatch.setattr(main, "_collection_status", {"running": False, "title": None, "log": []})
+
+    def test_collection_cannot_start_during_applications(self, auth_client):
+        main._apply_status["running"] = True
+        resp = auth_client.post("/jobs/collect", json={"title": "Intern"}).json()
+        assert resp["success"] is False and "Applications are running" in resp["message"]
+        assert self.killed == [] and main._collection_status["running"] is False
+
+    def test_applications_cannot_start_during_collection(self, auth_client):
+        main._collection_status["running"] = True
+        resp = auth_client.post("/apply/start", json={"mode": "all"}).json()
+        assert resp["success"] is False and "collection is running" in resp["message"]
+        assert self.killed == [] and main._apply_status["running"] is False
+
+    def test_no_sign_in_window_during_collection(self, auth_client, monkeypatch):
+        opened = []
+        monkeypatch.setattr(main.subprocess, "Popen", lambda *a, **k: opened.append(a))
+        monkeypatch.setattr(main, "_find_playwright_chromium", lambda: "C:/chromium/chrome.exe")
+        main._collection_status["running"] = True
+        resp = auth_client.post("/auth/login/linkedin").json()
+        assert resp["success"] is False and "collection is running" in resp["message"]
+        assert opened == []
+
+    def test_collection_cannot_start_while_signing_in(self, auth_client, monkeypatch):
+        class Open:
+            def poll(self):
+                return None
+
+        monkeypatch.setattr(main, "_login_process", Open())
+        resp = auth_client.post("/jobs/collect", json={"title": "Intern"}).json()
+        assert resp["success"] is False and "sign-in window" in resp["message"] and self.killed == []
+
+    def test_stop_on_an_idle_operation_closes_nothing(self, auth_client, monkeypatch):
+        """Stop Collection during an application run used to close the applications' browsers."""
+        main._apply_status["running"] = True
+        assert auth_client.post("/jobs/collect/stop").json() == {"success": True}
+        assert self.killed == [] and not main._apply_status.get("cancel_requested")
+
+        class Open:
+            def poll(self):
+                return None
+
+        main._apply_status["running"] = False
+        monkeypatch.setattr(main, "_login_process", Open())
+        auth_client.post("/apply/stop")
+        assert self.killed == []  # the sign-in window stays open
+
+    def test_stop_closes_the_running_operations_browsers(self, auth_client):
+        main._apply_status["running"] = True
+        auth_client.post("/apply/stop")
+        assert self.killed == [1] and main._apply_status["cancel_requested"] is True
+
+    def test_the_gmail_check_waits_for_any_user(self, monkeypatch):
+        assert main._inbox_busy() is False
+        main._collection_status["running"] = True
+        assert main._inbox_busy() is True
+
+    def test_a_start_and_the_gmail_check_never_both_go_ahead(self, auth_client, monkeypatch):
+        """The Inbox marks itself checking, then asks; a start claims under the same lock."""
+        from core import inbox
+        checks = []
+        inbox._state["requested"] = True
+        inbox._check_now(lambda: checks.append(1) or {"new": 0}, is_busy=main._inbox_busy)
+        assert checks == [1]  # idle: the check ran
+        main._apply_status["running"] = True
+        inbox._state["requested"] = True
+        inbox._check_now(lambda: checks.append(2) or {"new": 0}, is_busy=main._inbox_busy)
+        assert checks == [1] and inbox._state["checking"] is False  # backed off
+
+
+class TestRunLogs:
+    """Each run's log holds only its own lines, under its own run id."""
+
+    def test_two_runs_at_once_keep_their_own_lines(self, monkeypatch, tmp_path):
+        import asyncio
+        import logging
+        import threading
+        import memory.metrics as mem_metrics
+        db = tmp_path / "m.db"
+        monkeypatch.setattr(main, "_get_metrics_store", lambda: mem_metrics.MetricsStore(db))
+        monkeypatch.setattr(logging.getLogger("langhire.run_test"), "level", logging.INFO)
+        both_started = threading.Barrier(2, timeout=5)
+        statuses = [{"log": []}, {"log": []}]
+
+        def factory(name):
+            async def run():
+                await asyncio.to_thread(both_started.wait)
+                for i in range(20):
+                    print(f"{name} line {i}")
+                    logging.getLogger("langhire.run_test").info(f"{name} record {i}")
+                    await asyncio.sleep(0)
+            return run
+
+        threads = [main._run_async_in_thread(factory(n), s) for n, s in zip(("alpha", "beta"), statuses)]
+        print("from an API request")  # not part of either run
+        logging.getLogger("main").info("an API request's log record")
+        for t in threads:
+            t.join(10)
+        for name, other, status in (("alpha", "beta", statuses[0]), ("beta", "alpha", statuses[1])):
+            lines = status["log"]
+            assert sum(1 for line in lines if line.startswith(f"{name} line")) == 20
+            assert sum(1 for line in lines if line.startswith(f"{name} record")) == 20
+            assert not any(other in line or "API request" in line for line in lines)
+            stored = [r["message"] for r in mem_metrics.MetricsStore(db).get_run_logs(status["run_id"])]
+            assert f"{name} line 0" in stored and not any(other in m for m in stored)
+        assert statuses[0]["run_id"] != statuses[1]["run_id"]
+
+    def test_a_runs_log_records_are_redacted(self, monkeypatch, tmp_path):
+        import logging
+        import core.shared_config as shared_config
+        import memory.metrics as mem_metrics
+        monkeypatch.setattr(main, "_get_metrics_store", lambda: mem_metrics.MetricsStore(tmp_path / "m.db"))
+        monkeypatch.setattr(shared_config, "_secret_cache", {"key": None, "values": ()})
+        monkeypatch.setattr(logging.getLogger("langhire.run_test"), "level", logging.INFO)
+        main.save_settings({"sensitive_data": {"email": "", "password": "fake-run-secret-99"}})
+        status = {"log": []}
+
+        async def run():
+            logging.getLogger("langhire.run_test").info("typing fake-run-secret-99 now")
+            print("printed fake-run-secret-99")
+
+        main._run_async_in_thread(run, status).join(10)
+        joined = "\n".join(status["log"])
+        assert "fake-run-secret-99" not in joined and joined.count("***") == 2
+
+
+class TestEmployerPasswords:
+    def test_list_and_reveal(self, auth_client):
+        from core import secret_store
+        password = secret_store.site_password("acme.wd5.myworkdayjobs.com")
+        body = auth_client.get("/credentials/sites").json()
+        assert body == {"sites": ["acme.wd5.myworkdayjobs.com"]} and password not in str(body)
+        shown = auth_client.post("/credentials/reveal", json={"site": "ACME.wd5.myworkdayjobs.com"}).json()
+        assert shown == {"site": "acme.wd5.myworkdayjobs.com", "password": password}
+
+    def test_unknown_sites_get_nothing(self, auth_client):
+        assert auth_client.post("/credentials/reveal", json={"site": "other.example"}).status_code == 404
+        from core import secret_store
+        assert secret_store.site_password_sites() == []   # asking never creates one
+
+
+class TestJobCoverLetter:
+    def test_a_letter_is_kept_on_its_job_not_the_profile(self, auth_client):
+        url = "https://boards.greenhouse.io/acme/jobs/77"
+        auth_client.post("/jobs/add", json={"url": url, "title": "Intern", "company": "Acme"})
+        before = main.load_profile().get("cover_letter", "")
+        assert auth_client.put("/jobs/cover-letter", json={"url": url, "cover_letter": " Dear Acme "}).json() == {"success": True}
+        job = next(j for j in auth_client.get("/jobs").json() if j["url"] == url)
+        assert job["cover_letter"] == "Dear Acme"
+        assert main.load_profile().get("cover_letter", "") == before
+
+    def test_unknown_job(self, auth_client):
+        assert auth_client.put("/jobs/cover-letter", json={"url": "https://nope.example/1", "cover_letter": "x"}).status_code == 404
+
+
+class TestRequestValidation:
+    """Wrong types are a 400 with a reason (TestClient raises on any 500), and nothing is saved."""
+
+    @pytest.mark.parametrize("method, path, body", [
+        ("PUT", "/jobs/status", {"url": 5, "status": []}),
+        ("PUT", "/jobs/note", {"url": {"a": 1}, "note": "x"}),
+        ("PUT", "/jobs/cover-letter", {"url": None}),
+        ("POST", "/jobs/add", {"url": ["https://x.example/1"]}),
+        ("POST", "/cover-letter/generate", {"job_description": 5}),
+        ("POST", "/resume/tailor", {"job_urls": "https://x.example/1"}),
+        ("POST", "/resume/tailor", {"job_urls": ["u"], "options": "all"}),
+        ("POST", "/resume/tailor/get-by-url", {"job_url": 7}),
+    ])
+    def test_bad_fields_are_a_400(self, auth_client, method, path, body):
+        resp = auth_client.request(method, path, json=body)
+        assert resp.status_code == 400, resp.text
+
+    @pytest.mark.parametrize("body", [
+        {"max_failures": "abc"}, {"parallel_jobs": True}, {"stealth_enabled": "yes"},
+        {"blocked_domains": "spam.com"}, {"sensitive_data": "me"}, {"sensitive_data": {"email": 5}},
+    ])
+    def test_bad_settings_are_refused_and_nothing_changes(self, auth_client, body):
+        before = main.load_settings()
+        resp = auth_client.put("/settings", json=body)
+        assert resp.status_code == 400 and resp.json()["error"]["code"] == "invalid_settings"
+        assert main.load_settings() == before
+
+    def test_numbers_from_number_inputs_are_fine(self, auth_client):
+        assert auth_client.put("/settings", json={"human_delay_min": 5.0, "max_failures": 9}).status_code == 200
+        assert main.load_settings()["max_failures"] == 9
+
+    @pytest.mark.parametrize("body", [{"address": "1 Main St"}, {"skills": ["Python", 3]}, {"education": []}])
+    def test_bad_profile_shapes_are_refused(self, auth_client, body):
+        before = main.load_profile()
+        resp = auth_client.put("/profile", json={**before, **body})
+        assert resp.status_code == 400 and resp.json()["error"]["code"] == "invalid_profile"
+        assert main.load_profile() == before
+
+    def test_a_qa_answer_must_be_text(self, auth_client):
+        store = main._get_memory_store()
+        store.qa_add(question="Years of Python?", answer="")
+        qa_id = store.qa_list()[0]["id"]
+        assert auth_client.put(f"/qa/{qa_id}", json={"answer": 3}).status_code == 400
+        assert auth_client.put(f"/qa/{qa_id}", json={"answer": " 3 "}).status_code == 200
+        assert store.qa_list()[0]["answer"] == "3"
+
+
+class TestResumePathContainment:
+    def test_only_paths_inside_home_by_folder(self, monkeypatch, tmp_path):
+        home = tmp_path / "ada"
+        (home / "docs").mkdir(parents=True)
+        (tmp_path / "ada2").mkdir()
+        monkeypatch.setattr(main.Path, "home", classmethod(lambda cls: home))
+        assert main._inside_home((home / "docs" / "cv.pdf").resolve())
+        assert not main._inside_home((tmp_path / "ada2" / "cv.pdf").resolve())   # a text prefix of home
+        assert not main._inside_home((home / ".." / "ada2" / "cv.pdf").resolve())
+
+    def test_parse_refuses_a_resume_outside_home(self, auth_client, monkeypatch, tmp_path):
+        home = tmp_path / "ada"
+        home.mkdir()
+        outside = tmp_path / "ada2" / "cv.pdf"
+        outside.parent.mkdir()
+        outside.write_bytes(b"%PDF-1.4")
+        monkeypatch.setattr(main.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(main, "load_settings", lambda: {"resume_path": str(outside)})
+        body = auth_client.post("/profile/parse-resume").json()
+        assert body["success"] is False and "home directory" in body["message"]
+
+
+class TestJobsSummary:
+    def test_fields_keeps_only_what_was_asked_and_the_url(self, auth_client):
+        import core.shared_config as shared_config
+        shared_config.write_jobs({f"https://x.example/{i}": {"status": "applied", "company": "Acme", "description": "long " * 50,
+                                                           "collected_at": f"2026-01-{i + 1:02d}"} for i in range(3)})
+        body = auth_client.get("/jobs", params={"fields": "status,company", "limit": 1000000}).json()
+        assert len(body) == 3
+        assert all(set(j) == {"url", "status", "company"} for j in body)
+
+    def test_limit_must_be_positive(self, auth_client):
+        assert auth_client.get("/jobs", params={"limit": 0}).status_code == 422
+
+
+@pytest.mark.real_readiness
+class TestStartReadiness:
+    """Without an AI model, a resume or a name, a run would only fail every job: it doesn't start."""
+
+    @pytest.fixture(autouse=True)
+    def _no_run(self, monkeypatch):
+        monkeypatch.setattr(main, "_kill_browser_processes", lambda: None)
+        monkeypatch.setattr(main, "_run_async_in_thread", lambda make_coro, status: None)
+        monkeypatch.setattr(main, "_apply_status", {"running": False, "mode": None, "workers": 1, "log": []})
+        monkeypatch.setattr(main, "_collection_status", {"running": False, "title": None, "log": []})
+
+    def _ready(self, tmp_path):
+        resume = tmp_path / "cv.pdf"
+        resume.write_bytes(b"%PDF-1.4")
+        main.save_llm_settings({"provider": "gemini", "gemini": {"api_key": "fake-key", "model": "g"}})
+        main.save_settings({**main.load_settings(), "resume_path": str(resume)})
+        main.save_profile({**main.load_profile(), "name": "Ada Lovelace"})
+        return resume
+
+    def test_no_ai_model(self, auth_client):
+        main.save_llm_settings({"provider": "openrouter", "openrouter": {"api_key": ""}})
+        for path, body in (("/apply/start", {"mode": "all"}), ("/jobs/collect", {"title": "Intern"})):
+            resp = auth_client.post(path, json=body).json()
+            assert resp["success"] is False and "AI model" in resp["message"]
+        assert main._apply_status["running"] is False and main._collection_status["running"] is False
+
+    def test_no_resume_or_name(self, auth_client, tmp_path):
+        resume = self._ready(tmp_path)
+        resume.unlink()
+        assert "resume" in auth_client.post("/apply/start", json={"mode": "all"}).json()["message"]
+        self._ready(tmp_path)
+        main.save_profile({**main.load_profile(), "name": " "})
+        assert "name" in auth_client.post("/apply/start", json={"mode": "all"}).json()["message"]
+
+    def test_ready_starts(self, auth_client, tmp_path):
+        self._ready(tmp_path)
+        assert auth_client.post("/apply/start", json={"mode": "all"}).json()["success"] is True
+        main._apply_status["running"] = False
+        assert auth_client.post("/jobs/collect", json={"title": "Intern"}).json()["success"] is True
+
+
+def test_deleting_the_same_job_twice_in_one_request(auth_client):
+    url = "https://www.linkedin.com/jobs/view/5551"
+    auth_client.post("/jobs/add", json={"url": url})
+    resp = auth_client.request("DELETE", "/jobs", json={"urls": [url, url]})
+    assert resp.status_code == 200 and resp.json()["deleted"] == 1

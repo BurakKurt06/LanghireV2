@@ -92,8 +92,8 @@ describe("Dashboard page", () => {
 
   it("renders stat cards computed from dashboard data after load", async () => {
     renderDashboard();
-    // successRate = round(6/10*100) = 60%
-    expect(await screen.findByText("60%")).toBeInTheDocument();
+    // successRate = applied / (applied + failed) = round(6/7*100) = 86% (same definition as Analytics)
+    expect(await screen.findByText("86%")).toBeInTheDocument();
     expect(screen.getByText("10")).toBeInTheDocument(); // total jobs
     expect(screen.getByText("42")).toBeInTheDocument(); // memories
     expect(screen.getByText("cards.applied")).toBeInTheDocument();

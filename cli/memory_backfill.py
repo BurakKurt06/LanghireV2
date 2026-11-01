@@ -404,7 +404,7 @@ def main():
     total_new = 0
     total_reinforced = 0
 
-    from config import refresh_credentials
+    from backend.core.shared_config import refresh_credentials  # there is no top-level "config" module
     refresh_credentials()
 
     for domain, runs in domain_groups.items():

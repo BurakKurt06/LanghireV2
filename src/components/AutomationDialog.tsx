@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { AlertTriangle, Clock, Globe, X } from "lucide-react";
+import { useDialog } from "../hooks/useDialog";
 
 interface AutomationDialogProps {
   open: boolean;
@@ -11,14 +12,16 @@ interface AutomationDialogProps {
 }
 
 export default function AutomationDialog({ open, title, onConfirm, onCancel, children }: AutomationDialogProps) {
+  const panel = useDialog<HTMLDivElement>(open, onCancel);
   if (!open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onCancel}>
-      <div className="bg-card rounded-2xl shadow-xl w-full max-w-lg mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
+      <div ref={panel} role="dialog" aria-modal="true" aria-labelledby="automation-dialog-title" tabIndex={-1}
+        className="bg-card rounded-2xl shadow-xl w-full max-w-lg mx-4 overflow-hidden" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between px-6 pt-6 pb-0">
-          <h2 className="text-lg font-bold text-foreground">{title}</h2>
-          <button onClick={onCancel} className="p-1.5 rounded-lg hover:bg-secondary transition-colors cursor-pointer">
+          <h2 id="automation-dialog-title" className="text-lg font-bold text-foreground">{title}</h2>
+          <button onClick={onCancel} aria-label="Close" className="p-1.5 rounded-lg hover:bg-secondary transition-colors cursor-pointer">
             <X className="w-5 h-5 text-muted-foreground" />
           </button>
         </div>
@@ -37,8 +40,8 @@ export default function AutomationDialog({ open, title, onConfirm, onCancel, chi
             <Globe className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-blue-900">
               <strong className="block mb-1">Log in first</strong>
-              Log in to LinkedIn and Gmail from the app before you start. If a site asks you to sign in
-              during a run, the agent waits up to 2 minutes for you.
+              Sign in to the boards you use from the app before you start. Collection reuses those
+              sessions. If a session expires, sign in again from the app and retry that board.
             </div>
           </div>
 

@@ -10,6 +10,9 @@ interface ResumePickerFormProps {
 const isPdf = (name: string, type?: string) =>
   type === "application/pdf" || name.toLowerCase().endsWith(".pdf");
 
+// A full path (C:\Users\...\cv.pdf, \\server\share\cv.pdf, /home/.../cv.pdf), never a bare file name.
+const isAbsolutePath = (path: string) => /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("/") || path.startsWith("\\\\");
+
 export default function ResumePickerForm({ onSaved }: ResumePickerFormProps) {
   const [resumePath, setResumePath] = useState("");
   const [saving, setSaving] = useState(false);
@@ -19,6 +22,7 @@ export default function ResumePickerForm({ onSaved }: ResumePickerFormProps) {
   const [dropError, setDropError] = useState("");
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSaved = useRef("");
+  const zone = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     getSettings()
@@ -33,6 +37,31 @@ export default function ResumePickerForm({ onSaved }: ResumePickerFormProps) {
 
   useEffect(() => {
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, []);
+
+  // In the desktop app a dropped file reaches the page without its location (the
+  // browser hides it): the app's own drag-and-drop event has the real path.
+  const acceptDropped = useRef<(path: string) => void>(() => {});
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    const inZone = (x: number, y: number) => {
+      const box = zone.current?.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      return !!box && x / ratio >= box.left && x / ratio <= box.right && y / ratio >= box.top && y / ratio <= box.bottom;
+    };
+    import("@tauri-apps/api/webview")
+      .then(({ getCurrentWebview }) => getCurrentWebview().onDragDropEvent((event) => {
+        const p = event.payload;
+        if (p.type === "leave") { setDragging(false); return; }
+        const over = inZone(p.position.x, p.position.y);
+        if (p.type === "enter" || p.type === "over") { setDragging(over); return; }
+        setDragging(false);
+        if (over) acceptDropped.current(p.paths[0] || "");
+      }))
+      .then((stop) => { if (cancelled) stop(); else unlisten = stop; })
+      .catch(() => { /* not in the desktop app */ });
+    return () => { cancelled = true; unlisten?.(); };
   }, []);
 
   const doSave = async (path: string) => {
@@ -85,6 +114,26 @@ export default function ResumePickerForm({ onSaved }: ResumePickerFormProps) {
     setDragging(false);
   };
 
+  const acceptPath = (path: string, type?: string) => {
+    if (!path) {
+      setDropError("No file detected. Please drop a PDF resume.");
+      return;
+    }
+    if (!isPdf(path, type)) {
+      setDropError("Only PDF files are supported. Please drop a .pdf resume.");
+      return;
+    }
+    if (!isAbsolutePath(path)) {
+      // Only the file's name came through: saving it would point the agent at nothing.
+      setDropError("Couldn't read where that file is. Use Browse to pick it instead.");
+      return;
+    }
+    setDropError("");
+    setResumePath(path);
+    doSave(path);
+  };
+  acceptDropped.current = (path: string) => acceptPath(path);
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -95,17 +144,8 @@ export default function ResumePickerForm({ onSaved }: ResumePickerFormProps) {
       setDropError("No file detected. Please drop a PDF resume.");
       return;
     }
-    if (!isPdf(file.name, file.type)) {
-      setDropError("Only PDF files are supported. Please drop a .pdf resume.");
-      return;
-    }
-    setDropError("");
-    // In the Tauri desktop webview the dropped File exposes a real filesystem
-    // path; in the browser only the file name is available. The backend stores
-    // a path string (resume_path), so use the best identifier we have.
-    const path = (file as File & { path?: string }).path || file.name;
-    setResumePath(path);
-    doSave(path);
+    // A page only gets the name; a full path, when some webview passes one along.
+    acceptPath((file as File & { path?: string }).path || file.name, file.type);
   };
 
   if (loading) return <div className="flex justify-center py-4"><Loader2 className="w-5 h-5 animate-spin text-primary" /></div>;
@@ -125,6 +165,7 @@ export default function ResumePickerForm({ onSaved }: ResumePickerFormProps) {
         </button>
       </div>
       <div
+        ref={zone}
         role="button"
         tabIndex={0}
         aria-label="Drop a PDF resume here to upload"

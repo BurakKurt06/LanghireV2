@@ -76,10 +76,11 @@ class TestSettingsPersistence:
 class TestStealthLaunchArgs:
     def test_no_extra_args_when_stealth_off(self, data_dir, monkeypatch):
         monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {"stealth_enabled": False})
-        # Only the always-on removal of the flag Chrome warns about.
+        # Only the always-on removal of the flag Chrome warns about, and the network guard.
+        from core import net_guard
         kwargs = shared_config.build_browser_kwargs()
         assert kwargs["ignore_default_args"] == ["--extensions-on-chrome-urls"]
-        assert "args" not in kwargs
+        assert kwargs["args"] == net_guard.browser_args(block_mail=True, owner="agent:1")
 
     def test_launch_args_have_no_chrome_warning_flag(self, data_dir, monkeypatch):
         """Chrome shows an 'unsupported command-line flag' bar for --extensions-on-chrome-urls."""
@@ -252,3 +253,38 @@ class TestMaybeApplyStealth:
                 raise RuntimeError("launch failed")
 
         assert await shared_config.maybe_apply_stealth(Boom()) is False
+
+
+def test_stealth_keeps_site_isolation():
+    """Turning off IsolateOrigins/site-per-process would let one site's page read another's data in memory."""
+    from core import stealth
+    joined = " ".join(stealth.STEALTH_ARGS)
+    assert "IsolateOrigins" not in joined and "site-per-process" not in joined
+    assert "--disable-site-isolation-trials" not in joined and "--disable-web-security" not in joined
+    assert "--disable-blink-features=AutomationControlled" in stealth.STEALTH_ARGS
+
+
+def test_the_gmail_rule_ignores_a_trailing_dot():
+    """'mail.google.com.' is the same host; the proxy script used to send it DIRECT."""
+    import json
+    import shutil
+    import subprocess
+    from core import net_guard
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not installed")
+    helpers = r"""
+    const vm = require('vm');
+    const ipv4 = x => x.split('.').reduce((v, p) => (v * 256 + Number(p)) >>> 0, 0);
+    const ctx = { dnsDomainIs: (h, s) => h.endsWith(s), isPlainHostName: h => !h.includes('.'),
+      shExpMatch: (h, p) => new RegExp('^' + p.replace(/\./g, '\.').replace(/\*/g, '.*') + '$').test(h),
+      dnsResolveEx: h => '142.250.190.5', isInNet: (a, b, m) => ((ipv4(a) & ipv4(m)) >>> 0) === ((ipv4(b) & ipv4(m)) >>> 0) };
+    vm.createContext(ctx);
+    """
+    hosts = ["mail.google.com", "mail.google.com.", "MAIL.GOOGLE.COM..", "localhost.", "jobs.example.com."]
+    program = (helpers + "vm.runInContext(" + json.dumps(net_guard.pac_script(True)) + ", ctx);"
+               + "console.log(JSON.stringify(" + json.dumps(hosts) + ".map(h => ctx.FindProxyForURL('https://' + h + '/', h))));")
+    results = json.loads(subprocess.run([node, "-e", program], capture_output=True, text=True, check=True).stdout)
+    assert results[:4] == [net_guard.DEAD_PROXY] * 4
+    assert results[4] == "DIRECT"

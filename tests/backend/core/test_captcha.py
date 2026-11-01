@@ -160,8 +160,8 @@ class TestImageCaptchaSource:
 
         class FakeSolver:
             def __init__(self, key): pass
-            def normal(self, src):
-                captured["src"] = src
+            def solve(self, **kwargs):
+                captured.update(kwargs)
                 return {"code": "AB12"}
 
         import sys, types
@@ -169,9 +169,9 @@ class TestImageCaptchaSource:
         mod.TwoCaptcha = FakeSolver
         monkeypatch.setitem(sys.modules, "twocaptcha", mod)
 
-        ch = Challenge(type=IMAGE_CAPTCHA, image_b64="data:image/png;base64,IMGDATA")
+        ch = Challenge(type=IMAGE_CAPTCHA, image_b64="data:image/png;base64,SU1HREFUQQ==")
         assert captcha._solve_sync(API_KEY, ch) == "AB12"
-        assert captured["src"] == "IMGDATA"
+        assert captured == {"method": "base64", "body": "SU1HREFUQQ=="}
 
     def test_a_plain_url_is_refused(self, monkeypatch):
         captured = {}
@@ -278,7 +278,7 @@ class TestHandle:
         for _ in range(captcha.HUMAN_CHECK_ATTEMPTS + 1):
             with pytest.raises(captcha.HumanCheckNeeded) as e:
                 await captcha.handle(session, {"captcha_solver_enabled": True, "captcha_api_key": API_KEY})
-        assert "Trial mode" in e.value.reason
+        assert "This run stopped" in e.value.reason
         # Only HUMAN_CHECK_ATTEMPTS tries per application, then it stops clicking.
         assert len(clicks) == 2 * captcha.HUMAN_CHECK_ATTEMPTS
 
@@ -376,6 +376,47 @@ class TestPolicyConstants:
 
     def test_invisible_v3_is_not_blocking(self):
         assert RECAPTCHA_V3 not in BLOCKING_TYPES
+
+
+async def test_paid_attempt_budget_survives_repeated_step_callbacks(monkeypatch):
+    calls = stub_evaluate(monkeypatch, {"type": HCAPTCHA, "sitekey": "k"})
+    monkeypatch.setattr(captcha, "_solve_sync", lambda *args: "TOK")
+    browser = FakeSession()
+    assert await captcha.handle(browser, {"captcha_solver_enabled": True, "captcha_api_key": API_KEY})
+    assert await captcha.handle(browser, {"captcha_solver_enabled": True, "captcha_api_key": API_KEY})
+    with pytest.raises(CaptchaUnsolved, match="two solver attempts"):
+        await captcha.handle(browser, {"captcha_solver_enabled": True, "captcha_api_key": API_KEY})
+    assert len(calls["inject"]) == 2
+
+
+async def test_nonblocking_token_is_not_bought_again_each_step(monkeypatch):
+    stub_evaluate(monkeypatch, {"type": RECAPTCHA_V3, "sitekey": "k"})
+    calls = []
+    monkeypatch.setattr(captcha, "_solve_sync", lambda *args: calls.append(1) or "TOK")
+    browser = FakeSession()
+    settings = {"captcha_solver_enabled": True, "captcha_api_key": API_KEY}
+    assert await captcha.handle(browser, settings)
+    assert not await captcha.handle(browser, settings)
+    assert calls == [1]
+
+
+def test_solver_provider_connections_are_fixed_pinned_and_bounded(monkeypatch):
+    import httpx
+    import core.job_page as job_page
+    requests = []
+    def receive(request):
+        requests.append(request)
+        return httpx.Response(200, text="OK|local-test-token")
+    monkeypatch.setattr(job_page, "_PinnedTransport", lambda: httpx.MockTransport(receive))
+    api = captcha._SolverAPI()
+    assert api.in_(key="dummy", pageurl="http://127.0.0.1/never-fetched") == "OK|local-test-token"
+    assert api.res(key="dummy", id="1") == "OK|local-test-token"
+    assert [r.url.host for r in requests] == ["2captcha.com", "2captcha.com"]
+    assert all(0 < r.extensions["timeout"]["read"] <= 20 for r in requests)
+    api.deadline = 0
+    with pytest.raises(TimeoutError):
+        api.res(key="dummy")
+    assert len(requests) == 2
 
 
 def test_human_check_js_has_no_stray_control_characters():

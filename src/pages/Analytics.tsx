@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { Briefcase, CheckCircle, XCircle, TrendingUp, Building2, Globe } from "lucide-react";
 import { getJobs, getMetricRuns } from "../lib/api";
+import { dailyTrend } from "../lib/trend";
 import { PageHeader, LoadingSpinner, EmptyState } from "../components/ui";
 import type { Job, RunMetric } from "../lib/types";
 import { useTranslation } from "react-i18next";
@@ -16,20 +17,8 @@ function topCounts(items: string[], n: number): Array<[string, number]> {
   return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, n);
 }
 
-/** Group applied jobs by day (last `days` days) for a simple trend. */
-function dailyTrend(jobs: Job[], days: number): Array<{ day: string; count: number }> {
-  const buckets = new Map<string, number>();
-  for (const j of jobs) {
-    const ts = j.applied_at || j.collected_at;
-    if (!ts) continue;
-    const day = ts.slice(0, 10); // YYYY-MM-DD
-    buckets.set(day, (buckets.get(day) || 0) + 1);
-  }
-  return [...buckets.entries()]
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .slice(-days)
-    .map(([day, count]) => ({ day, count }));
-}
+// Every job (not the newest 1000), with only the fields counted here.
+const ANALYTICS_FIELDS = ["status", "source", "company", "applied_at", "collected_at"];
 
 interface StatCardProps {
   icon: React.ComponentType<{ className?: string }>;
@@ -70,14 +59,15 @@ export default function Analytics() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [runs, setRuns] = useState<RunMetric[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
-    Promise.all([getJobs({ limit: 1000 }), getMetricRuns(500)])
+    Promise.all([getJobs({ limit: 1_000_000, fields: ANALYTICS_FIELDS }), getMetricRuns(500)])
       .then(([j, r]) => {
         setJobs(Array.isArray(j) ? j : []);
         setRuns(Array.isArray(r) ? r : []);
       })
-      .catch(() => {})
+      .catch(() => setLoadFailed(true))
       .finally(() => setLoading(false));
   }, []);
 
@@ -118,6 +108,14 @@ export default function Analytics() {
   }, [jobs, runs]);
 
   if (loading) return <LoadingSpinner />;
+  if (loadFailed) {
+    return (
+      <div className="max-w-4xl">
+        <PageHeader title={t("analytics.title", "Analytics")} subtitle={t("analytics.subtitle", "Insights into your job applications")} />
+        <div role="alert" className="error-banner">{t("analytics.loadFailed", "Couldn't load your jobs, so there's nothing to count right now.")}</div>
+      </div>
+    );
+  }
 
   return (
     <div className="max-w-4xl">
@@ -176,7 +174,7 @@ export default function Analytics() {
 
           {/* Daily trend */}
           <div className="card">
-            <h3 className="section-title mb-4">{t("analytics.trend", "Recent activity")}</h3>
+            <h3 className="section-title mb-4">{t("analytics.trend", "Applications, last 14 days")}</h3>
             <div className="flex items-end gap-1.5 h-32">
               {metrics.trend.map(({ day, count }) => {
                 const maxCount = Math.max(...metrics.trend.map((d) => d.count), 1);

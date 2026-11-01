@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useDialog } from "../../hooks/useDialog";
 import {
   Briefcase,
   Search,
@@ -30,8 +31,7 @@ import {
   startApplying,
   getApplyStatus,
   generateCoverLetter,
-  saveProfile,
-  getProfile,
+  saveJobCoverLetter,
   updateJobStatus,
   deleteJobs,
   tailorResumes,
@@ -45,7 +45,29 @@ import AutomationDialog from "../../components/AutomationDialog";
 import ApplyModeToggle from "../../components/ApplyModeToggle";
 import InboxBadge from "../../components/InboxBadge";
 import { loadApplyMode, saveApplyMode, type ApplyMode } from "../../lib/applyMode";
+import { JOB_TYPE_LABELS, SORT_KEYS, WORK_MODE_LABELS, formatPay, sortJobs, type SortKey } from "../../lib/jobSearch";
 import { useTranslation } from "react-i18next";
+
+const SORT_STORAGE = "langhire_jobs_sort";
+
+function loadSort(): SortKey {
+  try {
+    const saved = localStorage.getItem(SORT_STORAGE) as SortKey | null;
+    return saved && SORT_KEYS.includes(saved) ? saved : "newest";
+  } catch {
+    return "newest";
+  }
+}
+
+/** Open a tailored resume PDF in the default app; says why when the app refuses or can't. */
+async function openTailoredPdf(path: string) {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_file", { path });
+  } catch (e) {
+    alert(`Couldn't open the PDF: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 const STATUS_ICONS: Record<JobStatus, typeof CheckCircle> = {
   pending: Clock,
@@ -59,14 +81,14 @@ const STATUS_ICONS: Record<JobStatus, typeof CheckCircle> = {
 };
 
 const STATUS_STYLES: Record<JobStatus, { color: string; bg: string }> = {
-  pending: { color: "text-amber-700", bg: "bg-amber-50" },
-  applied: { color: "text-success", bg: "bg-[#F0FFF0]" },
-  failed: { color: "text-destructive", bg: "bg-[#FFF0F0]" },
-  blocked: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
-  in_progress: { color: "text-primary", bg: "bg-[#FFF0F3]" },
-  closed: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
-  needs_you: { color: "text-amber-700", bg: "bg-amber-50" },
-  skipped: { color: "text-muted-foreground", bg: "bg-[#F7F7F7]" },
+  pending: { color: "text-amber-700", bg: "bg-amber-50 dark:bg-amber-500/15 dark:text-amber-300" },
+  applied: { color: "text-success", bg: "bg-[#F0FFF0] dark:bg-green-500/15 dark:text-green-400" },
+  failed: { color: "text-destructive", bg: "bg-[#FFF0F0] dark:bg-red-500/15 dark:text-red-400" },
+  blocked: { color: "text-muted-foreground", bg: "bg-muted" },
+  in_progress: { color: "text-primary", bg: "bg-[#FFF0F3] dark:bg-primary/15" },
+  closed: { color: "text-muted-foreground", bg: "bg-muted" },
+  needs_you: { color: "text-amber-700", bg: "bg-amber-50 dark:bg-amber-500/15 dark:text-amber-300" },
+  skipped: { color: "text-muted-foreground", bg: "bg-muted" },
 };
 
 // Jobs that Apply / Retry can start.
@@ -111,6 +133,15 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("");
+  const [sortBy, setSortBy] = useState<SortKey>(loadSort);
+  const changeSort = (key: SortKey) => {
+    setSortBy(key);
+    try {
+      localStorage.setItem(SORT_STORAGE, key);
+    } catch {
+      /* the order just isn't remembered */
+    }
+  };
 
   // Apply state
   const [applyingUrl, setApplyingUrl] = useState<string | null>(null);
@@ -118,6 +149,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   const [applyMode, setApplyMode] = useState<ApplyMode>(loadApplyMode);
   // A note for the agent on the job being started (e.g. how to get past its last error).
   const [applyNote, setApplyNote] = useState("");
+  const [noteJobUrl, setNoteJobUrl] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [noteSaving, setNoteSaving] = useState(false);
+  const [noteError, setNoteError] = useState<string | null>(null);
   const changeApplyMode = (mode: ApplyMode) => {
     setApplyMode(mode);
     saveApplyMode(mode);
@@ -126,6 +161,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   // Cover letter state
   const [coverLetterJob, setCoverLetterJob] = useState<Job | null>(null);
+  const coverLetterPanel = useDialog<HTMLDivElement>(coverLetterJob !== null, () => setCoverLetterJob(null));
   const [generatedLetter, setGeneratedLetter] = useState("");
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
@@ -292,13 +328,33 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     setShowConfirmDialog(true);
   };
 
+  const saveRetryNote = async () => {
+    if (!noteJobUrl || noteSaving) return;
+    const url = noteJobUrl;
+    setNoteSaving(true);
+    setNoteError(null);
+    try {
+      const result = await saveJobNote(url, noteDraft);
+      if (!result.success) throw new Error("The note could not be saved. Please retry.");
+      setJobs((previous) => previous.map((job) => job.url === url ? { ...job, user_note: noteDraft } : job));
+      setNoteJobUrl(null);
+    } catch (error) {
+      setNoteError(error instanceof Error ? error.message : "The note could not be saved. Please retry.");
+    } finally {
+      setNoteSaving(false);
+    }
+  };
+
   const confirmApplySingle = async () => {
-    setShowConfirmDialog(false);
     if (!pendingApplyUrl) return;
     try {
       const job = jobs.find((j) => j.url === pendingApplyUrl);
+      const acknowledgeUnknown = Boolean(job?.submit_attempted_at);
+      if (acknowledgeUnknown && !confirm("An earlier request may already have submitted this application. Have you checked the employer's site or email and confirmed you want to retry despite the duplicate risk?")) return;
       if (applyNote.trim() !== (job?.user_note ?? "").trim()) {
-        await saveJobNote(pendingApplyUrl, applyNote);
+        const result = await saveJobNote(pendingApplyUrl, applyNote);
+        if (!result.success) throw new Error("The note could not be saved. Please retry.");
+        setJobs((previous) => previous.map((item) => item.url === pendingApplyUrl ? { ...item, user_note: applyNote } : item));
       }
       await tailorBeforeApplying([pendingApplyUrl]);
       const res = await startApplying({
@@ -306,16 +362,17 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         workers: 1,
         mode: "all",
         run_mode: applyMode,
+        acknowledge_unknown: acknowledgeUnknown,
       });
       if (!res.success) {
         alert(res.message);
         return;
       }
       setApplyingUrl(pendingApplyUrl);
+      setShowConfirmDialog(false);
+      setPendingApplyUrl(null);
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to start");
-    } finally {
-      setPendingApplyUrl(null);
     }
   };
 
@@ -367,9 +424,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   };
 
   const handleSaveCoverLetter = async () => {
+    if (!coverLetterJob) return;
     try {
-      const profile = await getProfile();
-      await saveProfile({ ...profile, cover_letter: generatedLetter });
+      // On this job only: the profile's letter is used for every application.
+      await saveJobCoverLetter(coverLetterJob.url, generatedLetter);
       setLetterSaved(true);
       setTimeout(() => setLetterSaved(false), 3000);
     } catch {
@@ -407,6 +465,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   // Batch apply selected jobs
   const handleBatchApply = async () => {
     if (selectedJobs.size === 0) return;
+    const acknowledgeUnknown = jobs.some(j => selectedJobs.has(j.url) && j.submit_attempted_at);
+    if (acknowledgeUnknown && !confirm("Some selected jobs may already have been submitted. Have you checked their employer sites or emails and confirmed you want to retry despite the duplicate risk?")) return;
     setBatchApplying(true);
     try {
       await tailorBeforeApplying([...selectedJobs]);
@@ -415,6 +475,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         job_urls: [...selectedJobs],
         mode: "all",
         run_mode: applyMode,
+        acknowledge_unknown: acknowledgeUnknown,
       });
       if (!res.success) {
         alert(res.message);
@@ -639,6 +700,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           <button type="submit" className="btn-primary">
             {t("search")}
           </button>
+          <select aria-label={t("sort.label")} value={sortBy} onChange={(e) => changeSort(e.target.value as SortKey)}
+            className="input-base !w-40 !flex-initial">
+            {SORT_KEYS.map((key) => <option key={key} value={key}>{t(`sort.${key}`)}</option>)}
+          </select>
         </div>
       </form>
 
@@ -679,7 +744,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         </div>
       ) : (
         <div className="bg-card rounded-2xl border border-border shadow-sm divide-y divide-border">
-          {jobs.map((job) => {
+          {sortJobs(jobs, sortBy).map((job) => {
             const icon = STATUS_ICONS[job.status] || STATUS_ICONS.pending;
             const styles = STATUS_STYLES[job.status] || STATUS_STYLES.pending;
             const StatusIcon = icon;
@@ -706,7 +771,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                             {job.title || t("jobItem.untitled")}
                           </h4>
                           {job.easy_apply && (
-                            <span className="px-2 py-0.5 bg-[#FFF0F3] text-primary rounded-full text-[10px] font-semibold flex-shrink-0">
+                            <span className="px-2 py-0.5 bg-[#FFF0F3] dark:bg-primary/15 text-primary rounded-full text-[10px] font-semibold flex-shrink-0">
                               {t("jobItem.easyApply")}
                             </span>
                           )}
@@ -721,6 +786,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                           {job.company || t("jobItem.unknown")} ·{" "}
                           {job.location || "—"}
                         </p>
+                        <JobFacts job={job} />
+
                         {job.error && (
                           <JobReason
                             text={job.error}
@@ -743,7 +810,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                         <InboxBadge status={job.inbox_status} subject={job.inbox_subject} />
                         {job.practised_at && job.status === "pending" && (
                           <p className="text-[11px] text-muted-foreground mt-1">
-                            Practised {new Date(job.practised_at).toLocaleDateString()} (training run, not submitted)
+                            Practised {new Date(job.practised_at).toLocaleDateString()} (trial, not submitted)
                           </p>
                         )}
                         {/* Clickable expand button for tailored jobs */}
@@ -771,6 +838,18 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                       </span>
                       {STARTABLE(job.status) && (
                         <>
+                          <button
+                            onClick={() => {
+                              setNoteJobUrl(job.url);
+                              setNoteDraft(job.user_note ?? "");
+                              setNoteError(null);
+                            }}
+                            disabled={noteSaving}
+                            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border border-border hover:bg-secondary"
+                            aria-label={`Edit retry note for ${job.title}`}
+                          >
+                            <FileText className="w-3 h-3" /> {job.user_note ? "Edit note" : "Add note"}
+                          </button>
                           <button
                             onClick={() => handleGenerateCoverLetter(job)}
                             title={t("jobItem.coverLetterTitle")}
@@ -849,6 +928,20 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                     </div>
                   </div>
                 </div>
+                {noteJobUrl === job.url && (
+                  <div className="px-5 pb-4 space-y-2">
+                    <label htmlFor="job-retry-note" className="block text-sm font-medium">Retry note for {job.title}</label>
+                    <textarea id="job-retry-note" rows={3} maxLength={10000} value={noteDraft}
+                      onChange={(event) => setNoteDraft(event.target.value)} disabled={noteSaving}
+                      className="input-base w-full text-sm" placeholder="Tell the agent how to handle this job's last problem" />
+                    <p className="text-xs text-muted-foreground">Used only for this job on its next attempt. Saving a note does not start an application.</p>
+                    {noteError && <p role="alert" className="text-sm text-destructive">{noteError}</p>}
+                    <div className="flex gap-2">
+                      <button onClick={saveRetryNote} disabled={noteSaving} className="btn-primary text-sm">{noteSaving ? "Saving…" : "Save note"}</button>
+                      <button onClick={() => setNoteJobUrl(null)} disabled={noteSaving} className="btn-secondary text-sm">Cancel</button>
+                    </div>
+                  </div>
+                )}
                 {/* Expanded Detail: Resume Preview + Refine */}
                 {isExpanded && hasTailoredResume && (
                   <div className="px-5 pb-5 border-t border-border/50 bg-secondary/20">
@@ -868,11 +961,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                             </h5>
                             {job.tailored_resume_path && (
                               <button
-                                onClick={() => {
-                                  import("@tauri-apps/api/core").then(({ invoke }) => {
-                                    invoke("open_file", { path: job.tailored_resume_path! });
-                                  });
-                                }}
+                                onClick={() => openTailoredPdf(job.tailored_resume_path!)}
                                 className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold border border-border hover:bg-secondary transition-colors"
                               >
                                 <FileText className="w-3 h-3" />
@@ -891,11 +980,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                           </p>
                           {job.tailored_resume_path && (
                             <button
-                              onClick={() => {
-                                import("@tauri-apps/api/core").then(({ invoke }) => {
-                                  invoke("open_file", { path: job.tailored_resume_path! });
-                                });
-                              }}
+                              onClick={() => openTailoredPdf(job.tailored_resume_path!)}
                               className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold border border-primary text-primary hover:bg-primary/10 transition-colors"
                             >
                               <FileText className="w-3 h-3" />
@@ -958,7 +1043,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
       {/* Floating Action Bar for Multi-Select */}
       {selectedJobs.size > 0 && (
-        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-white/90 backdrop-blur border border-border rounded-xl shadow-lg px-5 py-3 flex items-center gap-4">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-40 bg-card/90 backdrop-blur border border-border rounded-xl shadow-lg px-5 py-3 flex items-center gap-4">
           <span className="text-sm font-medium text-foreground">
             {selectedJobs.size} selected
           </span>
@@ -1016,6 +1101,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             </label>
             <textarea
               id="apply-note"
+              maxLength={10000}
               value={applyNote}
               onChange={(e) => setApplyNote(e.target.value)}
               rows={3}
@@ -1036,12 +1122,17 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
           onClick={() => setCoverLetterJob(null)}
         >
           <div
+            ref={coverLetterPanel}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cover-letter-title"
+            tabIndex={-1}
             className="bg-card rounded-2xl shadow-xl max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between p-5 border-b border-border">
               <div>
-                <h3 className="text-base font-semibold text-foreground">
+                <h3 id="cover-letter-title" className="text-base font-semibold text-foreground">
                   {t("coverLetterModal.title")}
                 </h3>
                 <p className="text-[13px] text-muted-foreground mt-0.5">
@@ -1053,6 +1144,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
               </div>
               <button
                 onClick={() => setCoverLetterJob(null)}
+                aria-label="Close"
                 className="p-1.5 text-muted-foreground hover:text-foreground"
               >
                 <X className="w-5 h-5" />
@@ -1148,6 +1240,41 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
 
 /** A job's failure (or skip) reason: a short first line becomes a bold title above the paragraph. */
+/** What the collector read about a job: pay (with the yearly estimate), job type, arrangement, match. */
+function JobFacts({ job }: { job: Job }) {
+  const { t } = useTranslation("jobs");
+  const pay = formatPay(job.pay);
+  const collected = job.match !== undefined || (job.job_types?.length ?? 0) > 0 || !!job.work_mode;
+  if (!pay && !collected) return null;
+  const chip = "px-2 py-0.5 rounded-full text-[11px] font-medium bg-secondary text-foreground";
+  return (
+    <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+      {pay ? (
+        <span className={`${chip} bg-green-50 text-green-800 dark:bg-green-500/15 dark:text-green-300`} title={job.pay?.text}>
+          {pay.main}
+          {pay.yearly && <span className="opacity-75"> · {pay.yearly}</span>}
+        </span>
+      ) : (
+        <span className={`${chip} text-muted-foreground`}>{t("jobItem.payNotListed")}</span>
+      )}
+      {(job.job_types || []).slice(0, 2).map((type) => (
+        <span key={type} className={chip}>{JOB_TYPE_LABELS[type] ?? type}</span>
+      ))}
+      {job.work_mode && <span className={chip}>{WORK_MODE_LABELS[job.work_mode] ?? job.work_mode}</span>}
+      {job.match !== undefined && (
+        <span className={`${chip} bg-primary/10 text-primary`} title={job.match_reason || undefined}>
+          {t(job.match_source === "source_rules" ? "jobItem.sourceFit" : "jobItem.aiSuggestion", { score: job.match })}
+        </span>
+      )}
+      {job.match_source === "source_rules" && job.model_match !== undefined && (
+        <span className={`${chip} text-muted-foreground`} title={job.model_reason || undefined}>
+          {t("jobItem.aiSuggestion", { score: job.model_match })}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function JobReason({ text, neutral, prefix }: { text: string; neutral: boolean; prefix: string }) {
   const newline = text.indexOf("\n");
   const first = newline > 0 ? text.slice(0, newline).trim() : "";

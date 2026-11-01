@@ -18,9 +18,49 @@ into ``sensitive_data``, never interpolated into a prompt, and never printed.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import re
+import time
 from dataclasses import dataclass
 
 MAX_SOLVE_ATTEMPTS = 2
+SOLVE_SECONDS = 120
+
+
+class _SolverAPI:
+    """Bound every provider connection and the whole polling lifetime.
+
+    The installed SDK's requests have no network timeout. Its poll timeout
+    alone cannot stop a hung connection. Only these two fixed API addresses
+    are contacted; browser/page destinations never become provider endpoints.
+    """
+    def __init__(self):
+        self.deadline = time.monotonic() + SOLVE_SECONDS
+
+    def _request(self, method, path, params, files=None):
+        import httpx
+        from .job_page import _PinnedTransport
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("CAPTCHA provider time limit")
+        with httpx.Client(transport=_PinnedTransport(), trust_env=False,
+                          follow_redirects=False, timeout=min(20, remaining)) as client:
+            kwargs = {"params": params} if method == "GET" else {"data": params, "files": files or None}
+            response = client.request(method, "https://2captcha.com/" + path, **kwargs)
+            response.raise_for_status()
+            answer = response.text
+            if "ERROR" in answer:
+                raise ValueError("CAPTCHA provider rejected the request")
+            return answer
+
+    def in_(self, files=None, **kwargs):
+        if files or "file" in kwargs:
+            raise ValueError("CAPTCHA provider file paths are not accepted")
+        return self._request("POST", "in.php", kwargs, files)
+
+    def res(self, **kwargs):
+        return self._request("GET", "res.php", kwargs)
 
 # Supported challenge types.
 RECAPTCHA_V2 = "recaptcha_v2"
@@ -63,7 +103,7 @@ class HumanCheckNeeded(Exception):
     def __init__(self, page_url: str = ""):
         self.page_url = page_url
         self.reason = ("This site asks you to confirm you're a real person, and ticking its box automatically "
-                       "didn't get past it. Run this job in Trial mode and tick the box when the agent asks for help.")
+                       "didn't get past it. This run stopped; complete this check on the employer site before retrying.")
         super().__init__(self.reason)
 
 
@@ -431,6 +471,9 @@ def _solve_sync(api_key: str, challenge: Challenge) -> str:
     from twocaptcha import TwoCaptcha
 
     solver = TwoCaptcha(api_key)
+    solver.default_timeout = SOLVE_SECONDS
+    solver.recaptcha_timeout = SOLVE_SECONDS
+    solver.api_client = _SolverAPI()
     if challenge.type == RECAPTCHA_V2:
         res = solver.recaptcha(sitekey=challenge.sitekey, url=challenge.page_url)
     elif challenge.type == RECAPTCHA_V3:
@@ -450,9 +493,20 @@ def _solve_sync(api_key: str, challenge: Challenge) -> str:
         # Only an image already in the page: the solver library would download
         # a URL itself (any address) or upload a local file named by the page.
         src = challenge.image_b64
-        if not src.startswith("data:image/"):
+        match = re.fullmatch(r"data:image/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/=\r\n]+)", src)
+        if not match or len(src) > 1_500_000:
             raise ValueError("the CAPTCHA image isn't embedded in the page")
-        res = solver.normal(src.split(",", 1)[-1])
+        body = match[1].replace("\r", "").replace("\n", "")
+        try:
+            decoded = base64.b64decode(body, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("the CAPTCHA image is not valid base64") from error
+        if not decoded:
+            raise ValueError("the CAPTCHA image is empty")
+        # normal(string) guesses URL/file/base64 from the string, including
+        # opening a local path or fetching a URL hidden after 'data:image/...'.
+        # This explicit SDK operation cannot select either of those branches.
+        res = solver.solve(method="base64", body=body)
     else:
         raise ValueError(f"unsupported challenge type: {challenge.type}")
     return (res or {}).get("code", "")
@@ -465,13 +519,13 @@ async def solve(challenge: Challenge, api_key: str) -> str:
     if challenge.type != IMAGE_CAPTCHA and not challenge.sitekey:
         raise CaptchaUnsolved(challenge.type, "could not read the site key")
     try:
-        token = await asyncio.to_thread(_solve_sync, api_key, challenge)
+        token = await asyncio.wait_for(asyncio.to_thread(_solve_sync, api_key, challenge), SOLVE_SECONDS + 25)
     except ImportError as e:
         raise CaptchaUnsolved(challenge.type, f"2captcha-python not installed: {e}") from e
     except Exception as e:
         # Deliberately does not include the key or the exception repr, which
         # some SDK errors embed the request URL (and key) into.
-        if type(e).__name__ == "TimeoutException":
+        if isinstance(e, TimeoutError) or type(e).__name__ in {"TimeoutException", "ReadTimeout", "ConnectTimeout"}:
             raise CaptchaUnsolved(challenge.type, "2Captcha gave no answer within its time limit") from e
         raise CaptchaUnsolved(challenge.type, f"2Captcha error ({type(e).__name__})") from e
     if not token:
@@ -482,8 +536,8 @@ async def solve(challenge: Challenge, api_key: str) -> str:
 async def handle(browser_session, settings: dict) -> bool:
     """Detect and, if enabled, solve a CAPTCHA on the current page.
 
-    Returns False when no CAPTCHA is present. Returns True when one was solved
-    and its token injected. Raises CaptchaUnsolved when a CAPTCHA is present
+    Returns False when no CAPTCHA is present. Returns True when 2Captcha's answer
+    was written into the page (whether the site accepts it shows on the page). Raises CaptchaUnsolved when a CAPTCHA is present
     but cannot be solved — including when the solver switch is off.
     """
     challenge = await detect(browser_session)
@@ -496,6 +550,16 @@ async def handle(browser_session, settings: dict) -> bool:
             return True
         raise HumanCheckNeeded(challenge.page_url)
 
+    # A step callback runs repeatedly. Successful token injection is not proof
+    # the site accepted it, and must not reset the per-application paid budget.
+    state = getattr(browser_session, "_langhire_captcha_state", None)
+    if not isinstance(state, dict):
+        state = {"attempts": 0, "nonblocking": set()}
+        browser_session._langhire_captcha_state = state
+    key = (challenge.type, challenge.sitekey, challenge.page_url)
+    if challenge.type not in BLOCKING_TYPES and key in state["nonblocking"]:
+        return False
+
     if not settings.get("captcha_solver_enabled"):
         # Only a challenge that actually blocks submission ends the application.
         if challenge.type not in BLOCKING_TYPES:
@@ -504,18 +568,24 @@ async def handle(browser_session, settings: dict) -> bool:
 
     api_key = (settings.get("captcha_api_key") or "").strip()
     last_reason = "unknown error"
-    for attempt in range(1, MAX_SOLVE_ATTEMPTS + 1):
+    while state["attempts"] < MAX_SOLVE_ATTEMPTS:
+        state["attempts"] += 1
+        attempt = state["attempts"]
         print(f"    🧩 CAPTCHA detected ({challenge.type}) — solve attempt {attempt}/{MAX_SOLVE_ATTEMPTS}")
         try:
             token = await solve(challenge, api_key)
         except CaptchaUnsolved as e:
             last_reason = e.reason
             # A missing key or an unsupported type will not improve on retry.
-            if "API key" in e.reason or "site key" in e.reason or "not installed" in e.reason:
+            if any(reason in e.reason for reason in ("API key", "site key", "not installed", "time limit")):
                 break
             continue
         if await inject_token(browser_session, challenge, token):
-            print("    ✅ CAPTCHA solved")
+            # Written into the page, not yet known to be accepted: the agent sees whether the
+            # site lets it through (and a blocking one that stays is reported as unsolved).
+            print("    🧩 CAPTCHA answer from 2Captcha entered into the page")
+            if challenge.type not in BLOCKING_TYPES:
+                state["nonblocking"].add(key)
             return True
         last_reason = "token could not be injected into the page"
 
@@ -523,4 +593,5 @@ async def handle(browser_session, settings: dict) -> bool:
     if challenge.type not in BLOCKING_TYPES:
         print(f"    ⚠️  Could not solve {challenge.type} ({last_reason}) — not blocking, continuing")
         return False
-    raise CaptchaUnsolved(challenge.type, last_reason)
+    raise CaptchaUnsolved(challenge.type, last_reason if last_reason != "unknown error" else
+                         "the site still blocks progress after the application's two solver attempts")

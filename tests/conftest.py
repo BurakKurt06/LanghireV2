@@ -49,6 +49,89 @@ for p in (str(ROOT), str(BACKEND)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+# Run from source, the memory/metrics database sits in the repo root: that is
+# the developer's own data. Point it at the session folder before any test
+# module imports it; the autouse fixture below then gives each test its own.
+import memory.metrics as _mem_metrics  # noqa: E402
+import memory.store as _mem_store  # noqa: E402
+
+_mem_store.DB_PATH = SESSION_HOME / "memory_store.db"
+_mem_metrics.DB_PATH = SESSION_HOME / "memory_store.db"
+
+_LOOPBACK = {"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"}
+_BROWSER_EXES = ("chrome", "chromium", "brave", "msedge", "firefox", "vivaldi", "opera")
+
+
+def live_browser():
+    """The executable for opt-in real-browser tests: the bundled Chromium (the app's default) first.
+
+    With USERPROFILE pointing at SESSION_HOME, an installed Google Chrome on Windows never
+    answers on its debugging port (CI 2026-10-29: no answer in 90 s; under a real USERPROFILE
+    it answers in seconds), so every test using it timed out. The bundled Chromium is unaffected.
+    """
+    from core.browsers import find_browser, find_playwright_chromium
+    return find_playwright_chromium() or find_browser("brave") or find_browser("chrome")
+
+
+@pytest.fixture(autouse=True)
+def _safety_net(request, tmp_path, monkeypatch):
+    """Every test: its own memory database, no outside network, no real browsers.
+
+    - memory/metrics databases in the test's tmp folder (never the repo-root DB);
+    - sockets may only connect to this machine (tests use fake LLMs and pages);
+    - browsers can't be launched (no sign-in windows, no Chromium) unless a test
+      opts in with @pytest.mark.real_browser.
+    Browser clean-up is already safe: it only matches this app's profiles under
+    the (throwaway) data folder.
+    """
+    import core.shared_config as shared_config
+
+    db = tmp_path / "memory_store.db"
+    monkeypatch.setattr(_mem_store, "DB_PATH", db)
+    monkeypatch.setattr(_mem_metrics, "DB_PATH", db)
+    monkeypatch.setattr(shared_config, "_memory_store", None)
+
+    import socket
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def _check(address):
+        host = address[0] if isinstance(address, tuple) else None
+        if host is not None and str(host).lower() not in _LOOPBACK:
+            raise OSError(f"tests may not reach the network ({host})")
+
+    def connect(self, address):
+        _check(address)
+        return real_connect(self, address)
+
+    def connect_ex(self, address):
+        _check(address)
+        return real_connect_ex(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+
+    if not request.node.get_closest_marker("real_browser"):
+        import subprocess
+        real_popen = subprocess.Popen
+
+        class GuardedPopen(real_popen):
+            def __init__(self, args, *a, **k):
+                first = args[0] if isinstance(args, (list, tuple)) and args else str(args)
+                if any(name in Path(str(first)).name.lower() for name in _BROWSER_EXES):
+                    raise RuntimeError(f"tests may not launch a browser ({first})")
+                super().__init__(args, *a, **k)
+
+        monkeypatch.setattr(subprocess, "Popen", GuardedPopen)
+        try:
+            from browser_use import BrowserSession
+
+            async def no_start(self, *a, **k):
+                raise RuntimeError("tests may not start a real browser session (mark real_browser)")
+
+            monkeypatch.setattr(BrowserSession, "start", no_start)
+        except ImportError:
+            pass
+
 
 @pytest.fixture
 def data_dir(tmp_path, monkeypatch):
@@ -79,13 +162,15 @@ def _no_posting_fetch(request, monkeypatch):
     if request.node.get_closest_marker("real_posting_fetch"):
         return
     import core.job_page as job_page
-    monkeypatch.setattr(job_page, "fetch", lambda url: None)
+    monkeypatch.setattr(job_page, "fetch", lambda url, *args, **kwargs: None)
     try:
         import backend.core.job_page as backend_job_page
-        monkeypatch.setattr(backend_job_page, "fetch", lambda url: None)
+        monkeypatch.setattr(backend_job_page, "fetch", lambda url, *args, **kwargs: None)
     except ImportError:
         pass
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_posting_fetch: let job_page.fetch run (with a fake transport)")
+    config.addinivalue_line("markers", "real_browser: allow launching a real browser (never in the default run)")
+    config.addinivalue_line("markers", "real_readiness: keep main._start_problem (the start-run readiness check) real")

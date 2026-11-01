@@ -13,6 +13,11 @@ class CollectRequest(BaseModel):
         description="Plugin names to collect from, in order. Falls back to `source` when omitted.",
     )
     filters: dict = Field(default_factory=dict, description="Plugin-specific filter key-value pairs")
+    search: Optional[dict] = Field(
+        default=None,
+        description="This search's changes to Profile -> Job search (core.job_search: mode, job types, "
+                    "minimum pay, exclusions, notes, ...); anything malformed falls back to the profile's value",
+    )
 
 
 class ApplyRequest(BaseModel):
@@ -22,9 +27,13 @@ class ApplyRequest(BaseModel):
     workers: Optional[int] = Field(default=None, ge=1, le=4)  # 4 = core.config.MAX_PARALLEL_JOBS
     job_url: Optional[str] = None
     job_urls: Optional[list[str]] = Field(default=None, description="Specific job URLs to apply to (batch apply)")
-    review: bool = Field(default=False, description="Trial run: wait for the user's approval before each submit")
+    acknowledge_unknown: bool = Field(default=False, strict=True,
+        description="The user checked the earlier uncertain submission and explicitly chose to retry")
+    review: bool = Field(default=False, description="Accepted from older callers and ignored: Trial is the default "
+                         "(choose with run_mode)")
     run_mode: Optional[Literal["auto", "trial", "training"]] = Field(
-        default=None, description="auto, trial (approve each submit) or training (fill in, never submit); wins over review")
+        default=None, description="auto (submits), or trial, the default (goes through every page like auto but never "
+                    "activates the agent's final Submit; no approval prompts; 'training' is trial's old name)")
 
 
 class AddJobsBulkRequest(BaseModel):

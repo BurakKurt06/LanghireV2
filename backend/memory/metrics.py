@@ -6,7 +6,6 @@ the impact of the memory system on agent performance over time.
 """
 
 import sqlite3
-import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,9 +19,12 @@ except ImportError:
 
 
 def _get_db_path() -> Path:
-    if getattr(sys, 'frozen', False):
-        return get_data_dir() / "memory_store.db"
-    return Path(__file__).parent.parent.parent / "memory_store.db"
+    """The app data folder's database, from source as in the installed app.
+
+    Running from source used to use <repo>/memory_store.db whatever HOME said, so
+    the integration script's throwaway home still wrote to that file.
+    """
+    return get_data_dir() / "memory_store.db"
 
 DB_PATH = _get_db_path()
 
@@ -30,8 +32,8 @@ DB_PATH = _get_db_path()
 class MetricsStore:
     """SQLite-backed metrics store — shares the same DB as MemoryStore."""
 
-    def __init__(self, db_path: Path = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: Path | None = None):
+        self.db_path = db_path or DB_PATH
         self._local = threading.local()
         self._init_db()
 

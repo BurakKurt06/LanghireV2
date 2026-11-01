@@ -5,7 +5,7 @@ Chromium-based browsers work (Chrome, Edge, Brave, Vivaldi, Chromium). Firefox
 and Safari don't speak CDP.
 
 Settings (settings.json):
-    browser       ""        -> automatic: browser-use picks (installed Chrome first)
+    browser       ""        -> automatic: bundled Chromium when available, matching normal login
                   "<id>"    -> one of KNOWN_BROWSERS below
                   "custom"  -> the exe in browser_path
     browser_path  full path to a Chromium-based browser, used when browser == "custom"
@@ -114,6 +114,47 @@ def find_browser(browser_id: str) -> str | None:
     reg = _registry_app_path(_APP_PATHS[browser_id]) if browser_id in _APP_PATHS else None
     if reg and Path(reg).is_file():
         return reg
+    return None
+
+
+def find_playwright_chromium() -> str | None:
+    """The same bundled Chromium for normal login and automation.
+
+    browser-use 0.13's Windows finder misses the newer chrome-win64 layout;
+    allowing it to pick another executable can reopen a saved-login profile in
+    a different browser/version. Never silently change the profile directory.
+    """
+    home = Path.home()
+    caches = []
+    configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if configured and configured != "0":
+        caches.append(Path(configured))
+    try:
+        import playwright
+        bundled = Path(playwright.__file__).parent / "driver" / "package" / ".local-browsers"
+        if bundled.exists():
+            caches.append(bundled)
+    except (ImportError, TypeError, AttributeError):
+        pass
+    if sys.platform == "win32":
+        caches.append(Path(os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local"))) / "ms-playwright")
+        patterns = ("chrome-win64/chrome.exe", "chrome-win/chrome.exe")
+    elif sys.platform == "darwin":
+        caches.append(home / "Library" / "Caches" / "ms-playwright")
+        patterns = ("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            "chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium", "chrome-mac/Chromium.app/Contents/MacOS/Chromium")
+    else:
+        patterns = ("chrome-linux64/chrome", "chrome-linux/chrome")
+    caches.append(home / ".cache" / "ms-playwright")
+    for cache in dict.fromkeys(caches):
+        versions = sorted(cache.glob("chromium-*"),
+            key=lambda p: int(p.name.rsplit("-", 1)[-1]) if p.name.rsplit("-", 1)[-1].isdigit() else -1, reverse=True)
+        for version in versions:
+            for pattern in patterns:
+                executable = version / pattern
+                if executable.is_file():
+                    return str(executable)
     return None
 
 

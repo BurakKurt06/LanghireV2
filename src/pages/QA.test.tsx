@@ -24,7 +24,8 @@ vi.mock("react-i18next", () => ({
 
 vi.mock("../lib/analytics", () => ({ trackEvent: vi.fn() }));
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async (importOriginal) => ({
+  apiErrorMessage: (await importOriginal<typeof import("../lib/api")>()).apiErrorMessage,
   getQAList: vi.fn(),
   getQAStats: vi.fn(),
   updateQA: vi.fn(),
@@ -81,6 +82,7 @@ describe("QA page", () => {
       makeEntry({ id: 2, question: "Q ai?", source: "agent" }),
       makeEntry({ id: 3, question: "Q open?", answer: "" }),
       makeEntry({ id: 4, question: "Q guess?", source: "guess" }),
+      makeEntry({ id: 5, question: "Q paused?", source: "observed" }),
     ] as never);
     mockGetQAStats.mockResolvedValue({ total: 4, answered: 3, unanswered: 1, guessed: 1 } as never);
     render(<QA />);
@@ -88,6 +90,7 @@ describe("QA page", () => {
     expect(screen.getByText("card.origin.fromAI")).toBeInTheDocument();
     expect(screen.getByText("card.origin.needsAnswer")).toBeInTheDocument();
     expect(screen.getByText("card.origin.guess")).toBeInTheDocument();
+    expect(screen.getByText("card.origin.observed")).toBeInTheDocument();
     expect(await screen.findByRole("status")).toHaveTextContent('toCheckBanner:{"count":2}');
   });
 
@@ -159,6 +162,26 @@ describe("QA page", () => {
     expect(mockTrackEvent).toHaveBeenCalledWith("qa_answer_updated");
   });
 
+  it("correcting a guess makes it your answer and refreshes the counts", async () => {
+    mockGetQAList.mockResolvedValue([makeEntry({ id: 4, question: "Q guess?", source: "guess", answer: "Yes" })] as never);
+    const user = userEvent.setup();
+    render(<QA />);
+    expect(await screen.findByText("card.origin.guess")).toBeInTheDocument();
+    const statsCalls = mockGetQAStats.mock.calls.length;
+    await user.type(screen.getByPlaceholderText("card.answerPlaceholder"), "!");
+    expect(await screen.findByText("card.origin.yours", {}, { timeout: 2000 })).toBeInTheDocument();
+    expect(mockGetQAStats.mock.calls.length).toBeGreaterThan(statsCalls);
+  });
+
+  it("a failed save is shown instead of silently dropped", async () => {
+    mockUpdateQA.mockRejectedValueOnce(new Error("API Error 500: down"));
+    const user = userEvent.setup();
+    render(<QA />);
+    await screen.findByText("Why do you want this job?");
+    await user.type(screen.getAllByPlaceholderText("card.answerPlaceholder")[0], "!");
+    expect(await screen.findByText("toast.saveFailed", {}, { timeout: 2000 })).toBeInTheDocument();
+  });
+
   it("deleting a question calls deleteQA and refetches", async () => {
     const user = userEvent.setup();
     render(<QA />);
@@ -210,6 +233,19 @@ describe("QA page", () => {
     await user.click(secondCard);
 
     await waitFor(() => expect(mockMergeQA).toHaveBeenCalledWith(1, 2));
+  });
+
+  it("a refused merge shows the backend's reason, not a success", async () => {
+    mockMergeQA.mockRejectedValueOnce(new Error(
+      'API Error 409: {"error":{"code":"invalid_merge","message":"The two questions have different answers; make them the same first."}}'));
+    const user = userEvent.setup();
+    render(<QA />);
+    await screen.findByText("Why do you want this job?");
+    const firstCard = screen.getByText("Why do you want this job?").closest(".card") as HTMLElement;
+    await user.click(within(firstCard).getByTitle("card.mergeTitle"));
+    await user.click(screen.getByText("What is your expected salary?").closest(".card") as HTMLElement);
+    expect(await screen.findByText(/different answers; make them the same first/)).toBeInTheDocument();
+    expect(screen.queryByText("toast.merged")).not.toBeInTheDocument();
   });
 
   it("renders an empty state when there are no questions", async () => {

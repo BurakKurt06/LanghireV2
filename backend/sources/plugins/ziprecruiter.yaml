@@ -12,7 +12,8 @@ auth_cookies:
   - name: ziprecruiter_session
     domain: .ziprecruiter.com
 
-search_url: "https://www.ziprecruiter.com/jobs/search?search={title}&location={location}"
+# /jobs/search now redirects to a generic "jobs near me" page; /jobs-search is the search itself.
+search_url: "https://www.ziprecruiter.com/jobs-search?search={title}&location={location}"
 
 filters:
   - key: date_posted
@@ -26,12 +27,18 @@ filters:
     url_param: "days"
     default: "7"
 
+# No listing section: ZipRecruiter's results have no job links (each opens in a side
+# panel), so it is always collected one job at a time.
+search_params:
+  posted_within:
+    param: days
+    values: { "1": "1", "3": "3", "7": "7", "14": "14" }
+
 collection_prompt: |
-  SIGN-IN: If a sign-in or login page appears instead of the results, the user
-  must sign in in this browser window. Use the wait action
-  (30 seconds) at most 4 times, checking the page after each wait, then open the
-  search URL below again. If it is still signed out, call done with success=false
-  and the text 'Sign-in required: log in to ZipRecruiter in this browser, then collect again.'
+  SIGN-IN: Collection reuses the session from the app's browser login. If a
+  sign-in page appears, call done with success=false and the text 'Sign-in
+  required: sign in using the app browser login, then collect again.' Do not
+  enter credentials or wait for a login inside this read-only collection run.
 
   START: This search page is already open when you begin:
   {search_url}

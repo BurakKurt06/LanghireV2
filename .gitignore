@@ -44,9 +44,8 @@ resumes/
 # Fonts (redistributable but large)
 fonts/
 
-# Lock files
+# Lock files (runtime file locks; uv.lock is the dependency lock that CI installs from, so it's kept)
 jobs.json.lock
-uv.lock
 
 # ── OS Files ──────────────────────────────────────────────────────────────
 .DS_Store
@@ -89,3 +88,10 @@ cover_letters/
 
 # Local working notes (may mention real applications)
 TODO.md
+
+# Personal resume drafts and scratch output (personal data)
+tmp/
+output/
+
+# Claude Code local settings
+.claude/settings.local.json

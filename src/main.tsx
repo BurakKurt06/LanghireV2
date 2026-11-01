@@ -16,10 +16,14 @@ if (SENTRY_DSN) {
     dsn: SENTRY_DSN,
     environment: import.meta.env.MODE,
     release: "langhirev2@1.0.0",
-    tracesSampleRate: 1.0,
+    tracesSampleRate: 0,
+    // Breadcrumbs carry recent console lines and request addresses (job links, names): not sent.
+    beforeBreadcrumb: () => null,
     beforeSend(event) {
-      const settings = localStorage.getItem("langhire_telemetry");
-      if (settings === "false") return null;
+      // Opt-in: only after the user turned on Usage Analytics (Settings → Privacy & Telemetry).
+      let consent: string | null = null;
+      try { consent = localStorage.getItem("langhire_telemetry"); } catch { /* no storage: no consent */ }
+      if (consent !== "true") return null;
       // Filter transient network errors during startup (backend not ready yet)
       const msg = event.exception?.values?.[0]?.value || "";
       if (msg.includes("Load failed") && msg.includes("127.0.0.1")) return null;

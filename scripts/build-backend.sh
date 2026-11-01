@@ -49,7 +49,6 @@ uv run python -m PyInstaller \
   --hidden-import uvicorn.protocols.websockets.auto \
   --hidden-import fastapi \
   --hidden-import langchain_openai \
-  --hidden-import langchain_anthropic \
   --hidden-import langchain_aws \
   --hidden-import browser_use \
   --hidden-import browser_use.agent \

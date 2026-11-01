@@ -1,9 +1,12 @@
+// Usage analytics and crash reports are opt-in (Settings → Privacy & Telemetry), and
+// only in builds made with a measurement id. No Measurement Protocol API secret is
+// shipped: anything in a desktop app can be read out of it, so a secret here would let
+// anyone send events to the property. (Events to be counted need a server-side relay.)
 const GA_ID = import.meta.env.VITE_GA_MEASUREMENT_ID || "";
 const GA_ENDPOINT = "https://www.google-analytics.com/mp/collect";
-const GA_API_SECRET = import.meta.env.VITE_GA_API_SECRET || "";
 
 let initialized = false;
-let telemetryEnabled = true;
+let telemetryEnabled = false;
 let sessionStart = 0;
 let clientId = "";
 
@@ -29,9 +32,7 @@ function sendToGA(events: Array<{ name: string; params?: Record<string, unknown>
     })),
   };
 
-  const url = GA_API_SECRET
-    ? `${GA_ENDPOINT}?measurement_id=${GA_ID}&api_secret=${GA_API_SECRET}`
-    : `${GA_ENDPOINT}?measurement_id=${GA_ID}`;
+  const url = `${GA_ENDPOINT}?measurement_id=${GA_ID}`;
 
   fetch(url, {
     method: "POST",
@@ -42,6 +43,7 @@ function sendToGA(events: Array<{ name: string; params?: Record<string, unknown>
 
 export async function initAnalytics(enabled: boolean): Promise<void> {
   telemetryEnabled = enabled;
+  rememberConsent(enabled);  // crash reports (main.tsx) read the same choice
   if (!GA_ID || !enabled || initialized) return;
 
   initialized = true;
@@ -60,9 +62,15 @@ export async function initAnalytics(enabled: boolean): Promise<void> {
   });
 }
 
+function rememberConsent(enabled: boolean): void {
+  try {
+    localStorage.setItem("langhire_telemetry", String(enabled));
+  } catch { /* storage unavailable: nothing is sent without it (see main.tsx) */ }
+}
+
 export function setTelemetryEnabled(enabled: boolean): void {
   telemetryEnabled = enabled;
-  localStorage.setItem("langhire_telemetry", String(enabled));
+  rememberConsent(enabled);
   if (enabled && !initialized && GA_ID) initAnalytics(true);
 }
 

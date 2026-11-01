@@ -1,6 +1,7 @@
 """Shared config, utilities, and credential management."""
 import asyncio
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -9,7 +10,40 @@ from pathlib import Path
 
 import boto3
 from filelock import FileLock
+from browser_use import BrowserProfile
 from browser_use.llm import ChatAWSBedrock
+
+# Retain, drain and close browser subprocess pipes before their event loop ends.
+from . import browser_lifecycle  # noqa: F401
+
+# browser-use runs a temporary copy of user_data_dir whenever the executable path contains
+# "chrome" (the bundled Chromium's does). For the app's own automation profiles that threw away
+# what the agent's browser stored and hid the running browser from net_guard's in-use check.
+# Folders prepared by build_browser_kwargs are used in place; any other folder keeps
+# browser-use's behaviour.
+_OWN_PROFILES: set[str] = set()
+
+
+def _profile_key(path) -> str:
+    import os
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _keep_own_profiles():
+    copy = BrowserProfile._copy_profile
+    if getattr(copy, "_langhire_keeps_own", False):
+        return
+
+    def copy_unless_own(self):
+        if self.user_data_dir is not None and _profile_key(self.user_data_dir) in _OWN_PROFILES:
+            return None
+        return copy(self)
+
+    copy_unless_own._langhire_keeps_own = True
+    BrowserProfile._copy_profile = copy_unless_own
+
+
+_keep_own_profiles()
 
 try:
     from core.config import MAX_PARALLEL_JOBS, clamp_parallel_jobs, get_data_dir, split_name
@@ -45,7 +79,23 @@ ADA_CMD: tuple[str, ...] = ()  # Only needed for Amazon internal credential refr
 
 # Load settings from OS data dir (written by desktop app UI) if available
 _settings_file = DATA_DIR / "settings.json"
-_ui_settings = json.loads(_settings_file.read_text()) if _settings_file.exists() else {}
+
+
+def _read_ui_settings() -> dict:
+    """settings.json with its secrets decrypted ({} when missing or unreadable)."""
+    if not _settings_file.exists():
+        return {}
+    try:
+        from core.config import load_settings
+    except ImportError:
+        from backend.core.config import load_settings
+    try:
+        return load_settings()
+    except Exception:
+        return {}
+
+
+_ui_settings = _read_ui_settings()
 SENSITIVE_DATA = _ui_settings.get("sensitive_data", {"email": "", "password": ""})
 
 # Fall back to profile email if sensitive_data email is blank
@@ -94,33 +144,68 @@ def selected_browser(settings: dict | None = None) -> tuple[str | None, Path]:
     return resolve_browser(settings, BROWSER_PROFILE_DIR)
 
 
-def build_browser_kwargs(worker: int = 1) -> dict:
-    """Extra BrowserSession kwargs implied by the current settings.
+BROWSER_PURPOSES = ("agent", "application", "collection", "inbox", "mail")
 
-    Always drops browser-use's --extensions-on-chrome-urls default: it only
-    lets its extensions run on chrome:// pages, and Chrome shows an
-    "unsupported command-line flag" warning bar for it. Adds the stealth
-    launch flags when stealth is enabled.
+
+def build_browser_kwargs(worker: int = 1, purpose: str = "agent") -> dict:
+    """BrowserSession kwargs for an automation browser.
+
+    purpose:
+      "agent" - an AI agent (applications, collection): no local network, no Gmail;
+      "inbox" - the app's own Gmail check on the main profile: no local network;
+      "mail"  - the app's verification-email reader, on its own copy of the sign-in
+                cookies (so it never shares a browser with an agent): no local network.
+    No site gets standing permissions (clipboard, notifications); location is
+    granted per employer application site by the apply agent. Also drops
+    browser-use's --extensions-on-chrome-urls default (Chrome warns about it)
+    and adds the stealth flags when stealth is on.
     """
+    try:
+        from core import net_guard
+    except ImportError:
+        from backend.core import net_guard
+    if purpose not in BROWSER_PURPOSES:
+        purpose = "agent"
     settings = load_runtime_settings()
     executable, profile_dir = selected_browser(settings)
-    profile_dir = worker_profile_dir(profile_dir, worker)
+    if not executable:
+        # Login uses this discovery too. Do not hand a signed-in profile to a
+        # different browser just because browser-use misses a newer cache layout.
+        try:
+            from core.browsers import find_playwright_chromium
+        except ImportError:
+            from backend.core.browsers import find_playwright_chromium
+        executable = find_playwright_chromium()
+    profile_dir = mail_profile_dir(profile_dir) if purpose == "mail" else worker_profile_dir(profile_dir, worker)
+    if not net_guard.limit_webrtc(profile_dir):
+        raise RuntimeError("Could not enforce WebRTC network protection. The automation profile may already be "
+                           "open, or its preferences cannot be read or written. Close that profile's browser "
+                           "and check its permissions before retrying.")
     forget_open_tabs(profile_dir)
+    _OWN_PROFILES.add(_profile_key(profile_dir))
+    allowed_local = settings.get("browser_allowed_local_hosts") or []
     kwargs: dict = {
         "ignore_default_args": list(IGNORED_CHROME_DEFAULT_ARGS),
         "user_data_dir": str(profile_dir),
         "permissions": list(GRANTED_PERMISSIONS),
-        "block_ip_addresses": True,  # job links are never bare IPs; this keeps the agent off the LAN
+        # Never opens a bare IP address (job links never are one). It is a profile
+        # setting: BrowserSession itself rejects block_ip_addresses as a keyword.
+        "browser_profile": BrowserProfile(block_ip_addresses=True),
+        "args": net_guard.browser_args(block_mail=purpose in ("agent", "application", "collection"), allowed_hosts=allowed_local,
+                                       owner=f"{purpose}:{worker}"),
     }
     if executable:
         kwargs["executable_path"] = executable
-    if not settings.get("stealth_enabled"):
-        return kwargs
-    try:
-        from core.stealth import STEALTH_ARGS
-    except ImportError:
-        from backend.core.stealth import STEALTH_ARGS
-    kwargs["args"] = list(STEALTH_ARGS)
+    if purpose in ("application", "collection"):
+        kwargs["enable_default_extensions"] = False
+        kwargs["args"] = [a for a in kwargs["args"] if not a.startswith("--host-resolver-rules=")]
+        kwargs["args"] += ["--disable-extensions", "--host-resolver-rules=MAP * ~NOTFOUND", "--dns-prefetch-disable"]
+    if settings.get("stealth_enabled"):
+        try:
+            from core.stealth import STEALTH_ARGS
+        except ImportError:
+            from backend.core.stealth import STEALTH_ARGS
+        kwargs["args"] += list(STEALTH_ARGS)
     return kwargs
 
 
@@ -131,6 +216,41 @@ def parallel_jobs(settings: dict | None = None) -> int:
     if settings is None:
         settings = load_runtime_settings()
     return clamp_parallel_jobs(settings.get("parallel_jobs"))
+
+
+def mail_profile_dir(profile_dir) -> Path:
+    """The verification-email reader's profile: a copy of the main profile's sign-in cookies only."""
+    profile_dir = Path(profile_dir)
+    return profile_dir.parent / f"{profile_dir.name}_mail"
+
+
+# What the mail reader's profile needs: the cookie store and the key that decrypts it.
+_MAIL_PROFILE_FILES = ("Local State", "Default/Preferences", "Default/Secure Preferences",
+                       "Default/Network", "Default/Cookies", "Default/Cookies-journal")
+
+
+def prepare_mail_profile(settings: dict | None = None) -> Path:
+    """Copy just the sign-in cookies into the mail reader's own profile (call when no browser runs).
+
+    The application agent's browser never opens Gmail; verification emails are
+    read in this separate browser by app code that returns only a checked code
+    or link.
+    """
+    import shutil
+    _, base = selected_browser(settings)
+    dest = mail_profile_dir(base)
+    shutil.rmtree(dest, ignore_errors=True)
+    for rel in _MAIL_PROFILE_FILES:
+        src = base / rel
+        try:
+            if src.is_dir():
+                shutil.copytree(src, dest / rel, dirs_exist_ok=True)
+            elif src.is_file():
+                (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest / rel)
+        except (OSError, shutil.Error):
+            pass
+    return dest
 
 
 def worker_profile_dir(profile_dir, worker: int) -> Path:
@@ -200,10 +320,11 @@ def forget_open_tabs(profile_dir) -> int:
     return removed
 
 
-# Granted to every site up front (browser-use's default). Location is not: the
-# agent grants it to the job's own site and known application sites only
+# Granted to every site up front: nothing. (browser-use's default grants every
+# page clipboard read/write and notifications; the clipboard can hold passwords
+# and private text.) Location is granted per employer application site only
 # (apply_jobs.allow_location).
-GRANTED_PERMISSIONS = ("clipboardReadWrite", "notifications")
+GRANTED_PERMISSIONS: tuple[str, ...] = ()
 
 # browser-use default Chrome flags we don't launch with (see build_browser_kwargs).
 IGNORED_CHROME_DEFAULT_ARGS = ["--extensions-on-chrome-urls"]
@@ -271,7 +392,7 @@ def is_private_host(host: str, resolve: bool = True) -> bool:
     """
     import ipaddress
     import socket
-    host = (host or "").strip("[]").lower()
+    host = (host or "").strip("[]").lower().rstrip(".")  # "localhost." is localhost
     if not host or host == "localhost" or host.endswith(".localhost"):
         return True
 
@@ -318,21 +439,40 @@ def validate_job_url(url: str, resolve: bool = True) -> bool:
 _secret_cache: dict = {"key": None, "values": ()}
 
 
+def _secret_sources() -> list:
+    """The decrypted settings, AI settings, ChatGPT sign-in and app-made employer passwords."""
+    try:
+        from core import config as _cfg, chatgpt_auth, secret_store
+    except ImportError:
+        from backend.core import config as _cfg, chatgpt_auth, secret_store
+    sources = []
+    for read in (_cfg.load_settings, _cfg.load_llm_settings, chatgpt_auth.load):
+        try:
+            sources.append(read() or {})
+        except Exception:
+            pass
+    try:
+        sources.append({site: {"password": secret_store.site_password(site, create=False)}
+                        for site in secret_store.site_password_sites()})
+    except Exception:
+        pass
+    return sources
+
+
 def _secret_values() -> tuple[str, ...]:
-    """The account password, the 2Captcha key and LLM API keys (re-read when the settings files change)."""
+    """The account password, the 2Captcha key, LLM API keys, sign-in tokens and employer passwords.
+
+    Read decrypted (the files hold them encrypted), and again whenever a file changes.
+    """
     try:
         from core.config import get_data_dir as _dd
     except ImportError:
         from backend.core.config import get_data_dir as _dd
-    files = [_dd() / "settings.json", _dd() / "llm_settings.json"]
+    files = [_dd() / name for name in ("settings.json", "llm_settings.json", "chatgpt_auth.json", "site_credentials.json")]
     key = tuple((f.stat().st_mtime_ns if f.exists() else 0) for f in files)
     if _secret_cache["key"] != key:
         values = set()
-        for f in files:
-            try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
+        for data in _secret_sources():
             stack = [data]
             while stack:
                 item = stack.pop()
@@ -346,6 +486,17 @@ def _secret_values() -> tuple[str, ...]:
                     stack.extend(item)
         _secret_cache.update(key=key, values=tuple(sorted(values, key=len, reverse=True)))
     return _secret_cache["values"]
+
+
+class RedactingFormatter(logging.Formatter):
+    """A log formatter whose whole output (message and traceback) has the secrets replaced by ***.
+
+    A filter on the message alone let tracebacks through: an exception's text
+    (an HTTP error with a key in the URL, say) went to the log file as it was.
+    """
+
+    def format(self, record):
+        return redact_secrets(super().format(record))
 
 
 def redact_secrets(text):
@@ -364,7 +515,13 @@ def redact_secrets(text):
 def safe_folder_name(name: str) -> str:
     """A folder name Windows accepts and that stays inside its parent: no separators, no '..'."""
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).replace(" ", "_").strip(". ")
-    return cleaned[:80] or "apply"
+    if re.match(r"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", cleaned, re.I):
+        cleaned = "_" + cleaned
+    # Strip after truncating too: a period at the boundary otherwise becomes a
+    # trailing dot, which Windows rejects/aliases. Bound UTF-16 units, not Python
+    # characters, since non-BMP titles consume two units in Windows paths.
+    cleaned = cleaned.encode("utf-16-le", errors="ignore")[:160].decode("utf-16-le", errors="ignore").rstrip(". ")
+    return cleaned or "apply"
 
 # ── Singleton memory store ────────────────────────────────────────────────────
 _memory_store: MemoryStore | None = None
@@ -398,18 +555,39 @@ def read_jobs() -> dict:
 
 
 def write_jobs(jobs: dict):
-    """Write jobs.json with cross-process lock."""
+    """Write jobs.json with cross-process lock.
+
+    Only for writing a list as a whole. To change jobs, use mutate_jobs (or
+    update_job): a read_jobs() ... write_jobs() pair drops any change another
+    process or thread made in between (a collector saving its old copy over a
+    worker's "applied").
+    """
     with FileLock(JOBS_LOCK):
         save_json(JOBS_FILE, jobs)
 
 
-def update_job(url: str, **fields):
-    """Atomically update a single job entry."""
+def mutate_jobs(change):
+    """Read, change and write jobs.json under one lock: no lost updates.
+
+    `change(jobs)` edits the dict in place and returns anything (passed back).
+    It must not call read_jobs/update_job itself (the lock isn't re-entrant).
+    """
+    with FileLock(JOBS_LOCK):
+        jobs = load_json(JOBS_FILE, {})
+        result = change(jobs)
+        save_json(JOBS_FILE, jobs)
+        return result
+
+
+def update_job(url: str, **fields) -> bool:
+    """Atomically update a single job entry. True when it was saved (False: no such job)."""
     with FileLock(JOBS_LOCK):
         jobs = load_json(JOBS_FILE, {})
         if url in jobs:
             jobs[url].update(fields)
             save_json(JOBS_FILE, jobs)
+            return True
+        return False
 
 
 def _first_place(location_texts: list[str]) -> str:
@@ -807,7 +985,7 @@ def build_memory_context(
             domain = store.extract_domain(job_url)
             mem_count = len(memories)
             print(f"    🧠 Injecting {mem_count} memories for {domain}")
-            parts.append(store.format_for_prompt(memories))
+            parts.append(store.format_for_prompt(memories, job_url or ""))
 
     tracking = (
         "TRACKING INSTRUCTIONS:\n"

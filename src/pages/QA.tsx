@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, Trash2, Merge, Sparkles, Zap, HelpCircle, X } from "lucide-react";
-import { getQAList, getQAStats, updateQA, deleteQA, mergeQA, autoSquashQA, smartSquashQA } from "../lib/api";
+import { getQAList, getQAStats, updateQA, deleteQA, mergeQA, autoSquashQA, smartSquashQA, apiErrorMessage } from "../lib/api";
 import { trackEvent } from "../lib/analytics";
 import type { QAEntry, QAStats } from "../lib/types";
 import { useTranslation } from "react-i18next";
@@ -43,10 +43,18 @@ export default function QA() {
     setTimeout(() => setToast(null), 3000);
   };
 
-  const handleUpdate = async (id: number, answer: string) => {
-    await updateQA(id, answer);
-    setQuestions(prev => prev.map(q => q.id === id ? { ...q, answer } : q));
+  const handleUpdate = async (id: number, answer: string): Promise<boolean> => {
+    try {
+      await updateQA(id, answer);
+    } catch (e) {
+      showToast(apiErrorMessage(e, t("toast.saveFailed")));
+      return false;
+    }
+    // Saved answers are the user's own: the label and the "to check" count follow at once.
+    setQuestions(prev => prev.map(q => q.id === id ? { ...q, answer, source: "user" } : q));
+    getQAStats().then(setStats).catch(() => {});
     trackEvent("qa_answer_updated");
+    return true;
   };
 
   const handleDelete = async (id: number) => {
@@ -57,10 +65,15 @@ export default function QA() {
 
   const handleMerge = async (targetId: number) => {
     if (!mergeSource) return;
-    await mergeQA(mergeSource.id, targetId);
+    try {
+      await mergeQA(mergeSource.id, targetId);
+      showToast(t("toast.merged"));
+    } catch (e) {
+      // Refused by the backend: a self-merge, a loop, or two different answers.
+      showToast(apiErrorMessage(e, t("toast.mergeFailed")));
+    }
     setMergeSource(null);
     fetchData();
-    showToast(t("toast.merged"));
   };
 
   const handleAutoSquash = async () => {
@@ -160,7 +173,7 @@ export default function QA() {
           <p className="text-sm text-foreground">
             <strong>{t("mergeMode.label")}</strong> {t("mergeMode.banner", { question: mergeSource.question.substring(0, 60) })}
           </p>
-          <button onClick={() => setMergeSource(null)} className="text-muted-foreground hover:text-foreground">
+          <button onClick={() => setMergeSource(null)} aria-label="Cancel merge" className="text-muted-foreground hover:text-foreground">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -213,7 +226,7 @@ function QACard({
   isMergeSource,
 }: {
   entry: QAEntry;
-  onUpdate: (id: number, answer: string) => void;
+  onUpdate: (id: number, answer: string) => Promise<boolean>;
   onDelete: (id: number) => void;
   onMergeStart: () => void;
   onMergeTarget: () => void;
@@ -228,6 +241,7 @@ function QACard({
   const origin = !entry.answer ? "needsAnswer"
     : entry.source === "user" ? "yours"
     : entry.source === "guess" ? "guess"
+    : entry.source === "observed" ? "observed"
     : "fromAI";
 
   const handleChange = (val: string) => {
@@ -235,8 +249,11 @@ function QACard({
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       setSaving(true);
-      await onUpdate(entry.id, val);
-      setSaving(false);
+      try {
+        await onUpdate(entry.id, val);
+      } finally {
+        setSaving(false);
+      }
     }, 800);
   };
 
@@ -285,7 +302,7 @@ function QACard({
 
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-          <span className={origin === "needsAnswer" || origin === "guess" ? "font-semibold text-primary" : ""}>{t(`card.origin.${origin}`)}</span>
+          <span className={origin === "needsAnswer" || origin === "guess" || origin === "observed" ? "font-semibold text-primary" : ""}>{t(`card.origin.${origin}`)}</span>
           {entry.source_domain && <span>{entry.source_domain}</span>}
           {saving && <span className="text-primary">{t("card.saving")}</span>}
           {!saving && answer !== entry.answer && <span className="text-primary">{t("card.unsaved")}</span>}

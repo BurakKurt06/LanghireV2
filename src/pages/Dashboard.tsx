@@ -64,7 +64,8 @@ export default function Dashboard() {
             applied,
             failed: jobs.failed || 0,
             pending: jobs.pending || 0,
-            successRate: total > 0 ? Math.round((applied / total) * 100) : 0,
+            // Applied out of finished attempts (as on Analytics), not out of every job collected.
+            successRate: applied + (jobs.failed || 0) > 0 ? Math.round((applied / (applied + (jobs.failed || 0))) * 100) : 0,
             totalMemories: mem.total_memories || 0,
           });
           if (setup) setSetupStatus(setup);
