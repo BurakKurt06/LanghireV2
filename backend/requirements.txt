@@ -1054,7 +1054,7 @@ pyparsing==3.3.2
     # via httplib2
 pypdf==6.21.4
     # via browser-use
-python-dateutil==2.9.0.post0
+python-dateutil==3.0.0
     # via
     #   botocore
     #   posthog
