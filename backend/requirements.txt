@@ -135,7 +135,7 @@ google-auth-httplib2==0.4.2
     # via google-api-python-client
 google-auth-oauthlib==1.2.4
     # via browser-use
-google-genai==1.65.0
+google-genai==2.33.0
     # via
     #   browser-use
     #   langchain-google-genai
