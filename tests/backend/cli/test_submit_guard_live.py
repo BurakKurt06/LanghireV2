@@ -240,6 +240,31 @@ async def policy_browser(url, mode, tmp_path, monkeypatch):
         await browser.kill()
 
 
+EMBED = ("(src) => new Promise(done => { const f = document.createElement('iframe'); f.id = 'frame';"
+         " f.onload = () => done(1); f.src = src; document.body.replaceChildren(f); })")
+SWAP = "(src) => new Promise(done => { const f = document.getElementById('frame'); f.onload = () => done(1); f.src = src; })"
+
+
+async def _load_frame(page, script, src):
+    """EMBED or SWAP the frame, then wait for its load event."""
+    assert await asyncio.wait_for(page.evaluate(script, src), 30) == "1"
+
+
+async def _frame_form(browser, timeout=20.0):
+    """browser-use's element map once the framed form is in it. A frame from another site runs in its
+    own process and joins the page state some time after it loads: a fixed 1.5 s wait left the form
+    out on Windows CI (11-01), and a swapped frame could still show its previous page."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        nodes = (await browser.get_browser_state_summary()).dom_state.selector_map
+        names = {n.attributes.get("id") or n.attributes.get("name") for n in nodes.values()}
+        if {"send", "email"} <= names:
+            return nodes
+        assert loop.time() < deadline, f"the framed form never reached the page state: {sorted(filter(None, names))}"
+        await asyncio.sleep(0.5)
+
+
 @pytest.mark.parametrize("mode", ["training", "trial"])
 def test_enter_in_an_iframe_is_checked(policy_site, tmp_path, monkeypatch, mode):
     base, posts = policy_site
@@ -291,15 +316,11 @@ def test_a_trial_fills_a_cross_origin_frame_but_cant_approve_its_submit(policy_s
 
     async def go():
         async with policy_browser(base + "/", "trial", tmp_path, monkeypatch) as (browser, tools, ref):
-            await (await browser.get_current_page()).evaluate(
-                "(src) => { document.body.innerHTML = '<iframe id=\"frame\" src=\"' + src + '\"></iframe>'; return 1; }",
-                frame)
-            await asyncio.sleep(1.5)
+            await _load_frame(await browser.get_current_page(), EMBED, frame)
             state = await form_check.scan(browser)
             ref["submit_guard"].approve(await browser.get_current_page_url(),
                                         submit_guard.fingerprint(state["fields"], state["approval_state"]))
-            summary = await browser.get_browser_state_summary()
-            nodes = summary.dom_state.selector_map.items()
+            nodes = (await _frame_form(browser)).items()
             email = next(i for i, node in nodes if node.attributes.get("name") == "email")
             send = next(i for i, node in nodes if node.attributes.get("id") == "send")
             typed = await tools.registry.execute_action("input", {"index": email, "text": "grace@example.com"},
@@ -334,14 +355,12 @@ def test_coordinates_cannot_bypass_an_unreadable_frame(policy_site, tmp_path, mo
     async def go():
         async with policy_browser(base + "/", mode, tmp_path, monkeypatch) as (browser, tools, ref):
             page = await browser.get_current_page()
-            await page.evaluate("(src) => { document.body.innerHTML = '<iframe id=\"frame\" src=\"' + src + '\"></iframe>'; return 1; }", frame)
-            await asyncio.sleep(1.5)
+            await _load_frame(page, EMBED, frame)
             state = await form_check.scan(browser)
             # Even an approval of the readable parent must not authorize the embedded submit.
             ref["submit_guard"].approve(await browser.get_current_page_url(),
                                         submit_guard.fingerprint(state["fields"], state["approval_state"]))
-            summary = await browser.get_browser_state_summary()
-            node = next(node for node in summary.dom_state.selector_map.values() if node.attributes.get("id") == "send")
+            node = next(node for node in (await _frame_form(browser)).values() if node.attributes.get("id") == "send")
             offset = json.loads(await page.evaluate("() => { const f = document.getElementById('frame'); const r = f.getBoundingClientRect(); return JSON.stringify({x:r.left+f.clientLeft,y:r.top+f.clientTop}); }"))
             point = await browser_policy.call_on_node(browser, node,
                 "function() { const r = this.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; }")
@@ -369,17 +388,14 @@ def test_no_input_method_sends_an_embedded_form_on_a_parent_approval(policy_site
     async def go():
         async with policy_browser(base + "/", mode, tmp_path, monkeypatch) as (browser, tools, ref):
             page = await browser.get_current_page()
-            embed = "(src) => { document.body.innerHTML = '<iframe id=\"frame\" src=\"' + src + '\"></iframe>'; return 1; }"
-            await page.evaluate(embed, first)
-            await asyncio.sleep(1.5)
+            await _load_frame(page, EMBED, first)
             state = await form_check.scan(browser)
             ref["submit_guard"].approve(await browser.get_current_page_url(),
                                         submit_guard.fingerprint(state["fields"], state["approval_state"]))
             if method == "frame_swapped_after_approval":
                 # Approved while the frame was readable; then the same form comes from another site.
-                await page.evaluate("(src) => { document.getElementById('frame').src = src; return 1; }", other_site)
-                await asyncio.sleep(1.5)
-            nodes = (await browser.get_browser_state_summary()).dom_state.selector_map
+                await _load_frame(page, SWAP, other_site)
+            nodes = await _frame_form(browser)
             send = next(i for i, n in nodes.items() if n.attributes.get("id") == "send")
             email = next(i for i, n in nodes.items() if n.attributes.get("name") == "email")
             run = tools.registry.execute_action

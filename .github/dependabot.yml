@@ -7,6 +7,22 @@ updates:
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
+    # Lint tooling held back on purpose (dev-only; the app doesn't ship it):
+    # - eslint-plugin-react-hooks 7.1 adds React Compiler rules that flag 11 working patterns,
+    #   and ESLint 10 needs it.
+    # - eslint-plugin-react-refresh after 0.5.2 flags the entry file src/main.tsx.
+    # - typescript-eslint supports TypeScript below 6.1 only.
+    ignore:
+      - dependency-name: "eslint-plugin-react-hooks"
+        versions: [">=7.1.0"]
+      - dependency-name: "eslint-plugin-react-refresh"
+        versions: [">0.5.2"]
+      - dependency-name: "eslint"
+        versions: [">=10.0.0"]
+      - dependency-name: "@eslint/js"
+        versions: [">=10.0.0"]
+      - dependency-name: "typescript"
+        versions: [">=7.0.0"]
 
   - package-ecosystem: "pip"
     directory: "/"

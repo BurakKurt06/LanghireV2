@@ -43,11 +43,17 @@ def test_read_only_preferences_are_preserved_on_windows(tmp_path):
         prefs.chmod(stat.S_IWRITE)
 
 
+def _client():
+    """Not entered as a context manager: that runs the app's startup, which leaves an Inbox scheduler
+    thread running for the rest of the test session (a later test then found "a Gmail check is
+    running" and couldn't start a run: Windows CI 11-01). The Host checks apply to every request."""
+    import main
+    return TestClient(main.app, base_url="http://127.0.0.1")
+
+
 @pytest.mark.parametrize("host", ["localhost:80@evil.example", "127.0.0.1:80.evil.example", "localhost:not-a-port"])
 def test_the_backend_rejects_malformed_host_authorities(host):
-    import main
-    with TestClient(main.app, base_url="http://127.0.0.1") as client:
-        assert client.get("/health", headers={"Host": host}).status_code == 400
+    assert _client().get("/health", headers={"Host": host}).status_code == 400
 
 
 @pytest.mark.parametrize("args", [["--user-data-dir={profile}"], ["--user-data-dir", "{profile}"]])
@@ -70,10 +76,9 @@ def test_a_different_profile_does_not_block_setup(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("method", ["GET", "OPTIONS"])
 def test_duplicate_or_untrusted_hosts_do_not_pass_cors(method):
-    import main
-    with TestClient(main.app, base_url="http://127.0.0.1") as client:
-        headers = [("Host", "127.0.0.1"), ("Host", "evil.example")]
-        assert client.request(method, "/health", headers=headers).status_code == 400
-        headers = {"Host": "evil.example", "Origin": "http://localhost:1420",
-                   "Access-Control-Request-Method": "GET"}
-        assert client.request(method, "/health", headers=headers).status_code == 400
+    client = _client()
+    headers = [("Host", "127.0.0.1"), ("Host", "evil.example")]
+    assert client.request(method, "/health", headers=headers).status_code == 400
+    headers = {"Host": "evil.example", "Origin": "http://localhost:1420",
+               "Access-Control-Request-Method": "GET"}
+    assert client.request(method, "/health", headers=headers).status_code == 400
