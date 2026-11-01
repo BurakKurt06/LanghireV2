@@ -80,7 +80,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
     }
   };
 
-  // This search's preferences, starting from Profile → Job search.
+  // This search's preferences, starting from Settings → Job search.
   const [search, setSearch] = useState<JobSearchPrefs>(DEFAULT_JOB_SEARCH);
   const [profileSearch, setProfileSearch] = useState<JobSearchPrefs>(DEFAULT_JOB_SEARCH);
   const [currency, setCurrency] = useState("USD");
@@ -609,7 +609,7 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
           </div>
         )}
 
-        {/* How to collect, and this search's filters (from Profile → Job search) */}
+        {/* How to collect, and this search's filters (from Settings → Job search) */}
         <div className="mb-4">
           <ModeChoice value={search.mode} onChange={(mode) => setSearch((s) => ({ ...s, mode }))} />
           {search.mode === "quick" && slowBoards.length > 0 && (

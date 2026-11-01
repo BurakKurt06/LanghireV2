@@ -15,7 +15,7 @@ class CollectRequest(BaseModel):
     filters: dict = Field(default_factory=dict, description="Plugin-specific filter key-value pairs")
     search: Optional[dict] = Field(
         default=None,
-        description="This search's changes to Profile -> Job search (core.job_search: mode, job types, "
+        description="This search's changes to Settings -> Job search (core.job_search: mode, job types, "
                     "minimum pay, exclusions, notes, ...); anything malformed falls back to the profile's value",
     )
 

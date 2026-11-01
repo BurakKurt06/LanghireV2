@@ -4,8 +4,9 @@ import { getProfile, saveProfile, getCountries } from "../lib/api";
 import type { CandidateProfile, CountryConfig } from "../lib/types";
 import { PageHeader, LoadingSpinner, Section } from "../components/ui";
 import TagInputShared from "../components/ui/TagInput";
-import JobSearchForm from "../components/JobSearchForm";
 import { DEFAULT_JOB_SEARCH, withDefaults } from "../lib/jobSearch";
+import { PROFILE_SETTINGS_FIELDS } from "../lib/profileFields";
+import { settingsHref } from "../lib/settingsSections";
 import { useTranslation } from "react-i18next";
 
 const defaultProfile: CandidateProfile = {
@@ -47,9 +48,7 @@ export default function Profile() {
   const [profile, setProfile] = useState<CandidateProfile>(defaultProfile);
   const [countries, setCountries] = useState<Record<string, CountryConfig>>({});
   const [noticePeriodOptions, setNoticePeriodOptions] = useState<string[]>([]);
-  const [newTitle, setNewTitle] = useState("");
   const [newSkill, setNewSkill] = useState("");
-  const [newLocation, setNewLocation] = useState("");
   const [newLanguage, setNewLanguage] = useState("");
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -138,7 +137,13 @@ export default function Profile() {
   const handleSave = async () => {
     try {
       setSaveError(null);
-      await saveProfile(profile);
+      // Only this page's fields: job-search preferences and the AI instructions are edited in
+      // Settings, so re-read the profile and keep what is saved there.
+      const current = await getProfile();
+      const own = Object.fromEntries(
+        Object.entries(profile).filter(([key]) => !(PROFILE_SETTINGS_FIELDS as readonly string[]).includes(key)),
+      );
+      await saveProfile({ ...current, ...own } as CandidateProfile);
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (e) {
@@ -175,6 +180,12 @@ export default function Profile() {
       {saveError && (
         <div className="error-banner mb-5">{saveError}</div>
       )}
+      <p className="text-[13px] text-muted-foreground mb-5">
+        {t("movedToSettings")}{" "}
+        <a href={settingsHref("job-search")} className="text-primary font-medium hover:underline">{t("movedJobSearch")}</a>
+        {" · "}
+        <a href={settingsHref("applications")} className="text-primary font-medium hover:underline">{t("movedInstructions")}</a>
+      </p>
 
       {/* Country Selection */}
       <Section title={t("country.title")}>
@@ -309,33 +320,6 @@ export default function Profile() {
         </div>
       </Section>
 
-      {/* Search area */}
-      <Section title={t("searchArea.title")}>
-        <p className="text-[13px] text-muted-foreground mb-3">{t("searchArea.hint")}</p>
-        <div className="grid grid-cols-2 gap-4">
-          <Input
-            label={t("searchArea.centerZip")}
-            value={profile.search_area?.center_zip ?? ""}
-            placeholder={profile.address.zip || "e.g. 10001"}
-            onChange={(v) => updateNested("search_area", "center_zip", v)}
-          />
-          <div>
-            <label htmlFor="search-radius" className="block text-sm font-semibold text-foreground mb-1.5">{t("searchArea.radius")}</label>
-            <select
-              id="search-radius"
-              value={profile.search_area?.radius ?? "any"}
-              onChange={(e) => updateNested("search_area", "radius", e.target.value)}
-              className="input-base"
-            >
-              <option value="25">{t("searchArea.under", { miles: 25 })}</option>
-              <option value="50">{t("searchArea.under", { miles: 50 })}</option>
-              <option value="100">{t("searchArea.under", { miles: 100 })}</option>
-              <option value="any">{t("searchArea.any")}</option>
-            </select>
-          </div>
-        </div>
-      </Section>
-
       {/* Education */}
       <Section title={t("education.title")}>
         <div className="grid grid-cols-2 gap-4">
@@ -396,25 +380,6 @@ export default function Profile() {
         </Section>
       )}
 
-      {/* Tag Lists */}
-      <Section title={t("targetJobTitles.title")}>
-        <TagInputShared tags={profile.target_job_titles} value={newTitle} onChange={setNewTitle}
-          onAdd={() => addToList("target_job_titles", newTitle, setNewTitle)}
-          onRemove={(v) => removeFromList("target_job_titles", v)} placeholder={t("targetJobTitles.placeholder")} />
-      </Section>
-
-      <Section title={t("targetLocations.title")}>
-        <TagInputShared tags={profile.target_locations} value={newLocation} onChange={setNewLocation}
-          onAdd={() => addToList("target_locations", newLocation, setNewLocation)}
-          onRemove={(v) => removeFromList("target_locations", v)} placeholder={t("targetLocations.placeholder")} />
-      </Section>
-
-      <Section title={t("jobSearch.title")}>
-        <p className="text-[13px] text-muted-foreground mb-3">{t("jobSearch.hint")}</p>
-        <JobSearchForm value={withDefaults(profile.job_search)} onChange={(v) => update("job_search", v)}
-          currency={profile.salary_expectation.currency || "USD"} />
-      </Section>
-
       <Section title={t("skills.title")}>
         <TagInputShared tags={Array.isArray(profile.skills) ? profile.skills : []} value={newSkill} onChange={setNewSkill}
           onAdd={() => addToList("skills", newSkill, setNewSkill)}
@@ -427,13 +392,6 @@ export default function Profile() {
           onRemove={(v) => removeFromList("languages", v)} placeholder={t("languages.placeholder")} />
       </Section>
 
-      {/* Notes */}
-      <Section title={t("notes.title")}>
-        <p className="text-[13px] text-muted-foreground mb-2">{t("notes.hint")}</p>
-        <textarea value={profile.notes} onChange={(e) => update("notes", e.target.value)}
-          rows={8} className="input-base"
-          placeholder={t("notes.placeholder")} />
-      </Section>
     </div>
   );
 }

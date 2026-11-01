@@ -32,7 +32,7 @@
     "collectedProgress": "Collected {{collected}} of {{max}} jobs",
     "collectionLog": "Collection Log",
     "searchSettings": "Filters for this search",
-    "searchSettingsHint": "Start from Profile → Job search. Changes here apply to this search only.",
+    "searchSettingsHint": "Start from Settings → Job search. Changes here apply to this search only.",
     "resetToProfile": "Use my Profile settings",
     "saveAsDefault": "Save as my Profile settings",
     "savedAsDefault": "Saved to Profile",

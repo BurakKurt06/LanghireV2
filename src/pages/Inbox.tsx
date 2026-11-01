@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { Mail, RefreshCw, ExternalLink, FileText, Loader2, ChevronDown, ChevronUp } from "lucide-react";
-import { getInbox, checkInbox, setInboxSchedule, makePrepSheet } from "../lib/api";
+import { getInbox, checkInbox, makePrepSheet } from "../lib/api";
 import { PageHeader, Section } from "../components/ui";
 import type { InboxCategory, InboxEmail, InboxStatus } from "../lib/types";
-import { INBOX_CATEGORIES, INBOX_STYLES } from "../lib/inbox";
+import { INBOX_CATEGORIES, INBOX_SCHEDULE_LABELS, INBOX_STYLES } from "../lib/inbox";
+import { settingsHref } from "../lib/settingsSections";
 
 // Quick while a check runs; slow otherwise (a scheduled check can start any time).
 const POLL_MS = 3000;
@@ -53,16 +54,6 @@ export default function Inbox() {
     }
   };
 
-  const onSchedule = async (schedule: InboxStatus["schedule"]) => {
-    setError(null);
-    try {
-      await setInboxSchedule(schedule);
-      refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
   const onPrep = async (email: InboxEmail) => {
     setError(null);
     setPreparing(email.id);
@@ -89,7 +80,7 @@ export default function Inbox() {
 
       <Section title="Check Gmail">
         <p className="text-[13px] text-muted-foreground mb-3">
-          Reads job emails from Gmail through the sign-in in Settings → Accounts (a browser window opens briefly).
+          Reads job emails from Gmail through the sign-in in Settings → Accounts &amp; email (a browser window opens briefly).
           Nothing is sent from your Gmail, deleted or marked as read. The emails' text goes to your AI model so it can
           sort them; it never runs during an application run. After a year, only an email's sender, subject and
           category stay here (the email itself stays in Gmail).
@@ -99,19 +90,13 @@ export default function Inbox() {
             {working ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
             {working ? "Checking…" : "Check now"}
           </button>
-          <label className="flex items-center gap-2 text-sm">
-            <span className="text-muted-foreground">Check automatically</span>
-            <select
-              aria-label="Check automatically"
-              value={inbox.schedule}
-              onChange={(e) => void onSchedule(e.target.value as InboxStatus["schedule"])}
-              className="input-base !w-32"
-            >
-              <option value="off">Off</option>
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-            </select>
-          </label>
+          <span className="text-sm">
+            <span className="text-muted-foreground">Check automatically: </span>
+            {INBOX_SCHEDULE_LABELS[inbox.schedule] ?? inbox.schedule}{" "}
+            <a href={settingsHref("accounts")} className="text-[13px] text-primary font-medium hover:underline">
+              Change in Settings
+            </a>
+          </span>
           <span className="text-[13px] text-muted-foreground">
             {inbox.last_checked ? `Last checked ${new Date(inbox.last_checked).toLocaleString()}` : "Not checked yet"}
           </span>

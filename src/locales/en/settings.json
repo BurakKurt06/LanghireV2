@@ -28,7 +28,7 @@
   },
   "plugins": {
     "title": "Job Source Plugins",
-    "description": "Manage job source plugins. Built-in plugins provide LinkedIn, Indeed, SEEK, Naukri, Reed, and StepStone. Import community plugins (.yaml files) for additional job sites.",
+    "description": "Manage job source plugins. Built-in plugins provide LinkedIn, Indeed, Glassdoor, Handshake, ZipRecruiter, Intern Insider, Reed, StepStone, SEEK and Naukri. Import community plugins (.yaml files) for additional job sites.",
     "builtin": "Built-in",
     "importPlugin": "Import Plugin"
   },
@@ -39,5 +39,17 @@
     "dark": "Dark",
     "system": "System",
     "description": "Choose light, dark, or follow your system setting."
-  }
+  },
+  "sections": {
+    "aiModel": "AI model",
+    "jobSearch": "Job search",
+    "applications": "Applications",
+    "accounts": "Accounts & email",
+    "jobSources": "Job sources",
+    "browser": "Browser & automation",
+    "appearance": "Appearance & privacy"
+  },
+  "aiModelHint": "The AI model has its own Save button.",
+  "tailoringHint": "Saved as you change them. Review & Apply uses them when it tailors a resume.",
+  "inboxHint": "How often the Inbox reads job emails from Gmail by itself. Saved as you change it."
 }

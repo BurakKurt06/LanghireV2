@@ -10,3 +10,10 @@ export const INBOX_STYLES: Record<InboxCategory, string> = {
   offer: "bg-green-500/10 text-green-600",
   rejected: "bg-destructive/10 text-destructive",
 };
+
+/** Automatic Gmail checks (Settings → Accounts & email; the Inbox shows the current one). */
+export const INBOX_SCHEDULE_LABELS: Record<"off" | "daily" | "weekly", string> = {
+  off: "Off",
+  daily: "Daily",
+  weekly: "Weekly",
+};

@@ -8,7 +8,7 @@
   },
   "controls": {
     "title": "Application Controls",
-    "loginInfo": "<strong>Sign-ins:</strong> Sign in to Gmail (for verification codes) and LinkedIn once in Settings → Accounts; every run uses those sign-ins.",
+    "loginInfo": "<strong>Sign-ins:</strong> Sign in to Gmail (for verification codes) and LinkedIn once in Settings → Accounts &amp; email; every run uses those sign-ins.",
     "exportCsv": "Export CSV",
     "exportSaved": "Saved to {{path}}",
     "exportDownloaded": "Saved to your Downloads folder as langhirev2-jobs.csv",

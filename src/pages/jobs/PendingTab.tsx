@@ -45,6 +45,8 @@ import AutomationDialog from "../../components/AutomationDialog";
 import ApplyModeToggle from "../../components/ApplyModeToggle";
 import InboxBadge from "../../components/InboxBadge";
 import { loadApplyMode, saveApplyMode, type ApplyMode } from "../../lib/applyMode";
+import { TAILOR_OPTION_LABELS, loadAutoTailor, loadTailorOptions } from "../../lib/tailoring";
+import { settingsHref } from "../../lib/settingsSections";
 import { JOB_TYPE_LABELS, SORT_KEYS, WORK_MODE_LABELS, formatPay, sortJobs, type SortKey } from "../../lib/jobSearch";
 import { useTranslation } from "react-i18next";
 
@@ -100,32 +102,6 @@ interface PendingTabProps {
   stats: JobStats;
 }
 
-function loadTailorOptions(): TailorOptions {
-  try {
-    const stored = localStorage.getItem("langhire_tailor_options");
-    if (stored) return JSON.parse(stored);
-  } catch {
-    /* ignore */
-  }
-  return { skills: true, title: false, overview: false, experience: false };
-}
-
-function saveTailorOptions(options: TailorOptions) {
-  localStorage.setItem("langhire_tailor_options", JSON.stringify(options));
-}
-
-function loadAutoTailor(): boolean {
-  try {
-    return localStorage.getItem("langhire_auto_tailor") === "true";
-  } catch {
-    return false;
-  }
-}
-
-function saveAutoTailor(value: boolean) {
-  localStorage.setItem("langhire_auto_tailor", value ? "true" : "false");
-}
-
 export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   const { t } = useTranslation("jobs");
 
@@ -177,10 +153,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   // Batch apply state
   const [batchApplying, setBatchApplying] = useState(false);
 
-  // Tailoring options panel state
-  const [showTailorOptions, setShowTailorOptions] = useState(false);
-  const [autoTailor, setAutoTailor] = useState(loadAutoTailor);
-  const [tailorOptions, setTailorOptions] = useState<TailorOptions>(loadTailorOptions);
+  // Tailoring options (changed in Settings → Applications; same browser storage)
+  const [autoTailor] = useState(loadAutoTailor);
+  const [tailorOptions] = useState<TailorOptions>(loadTailorOptions);
 
   // Expanded job detail (resume preview + refine)
   const [expandedJob, setExpandedJob] = useState<string | null>(null);
@@ -545,19 +520,6 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     }
   };
 
-  // Tailoring options handlers
-  const handleAutoTailorToggle = () => {
-    const newVal = !autoTailor;
-    setAutoTailor(newVal);
-    saveAutoTailor(newVal);
-  };
-
-  const handleTailorOptionChange = (key: keyof TailorOptions) => {
-    const updated = { ...tailorOptions, [key]: !tailorOptions[key] };
-    setTailorOptions(updated);
-    saveTailorOptions(updated);
-  };
-
   // Expand/collapse job detail for resume preview
   const handleToggleExpand = async (jobUrl: string) => {
     if (expandedJob === jobUrl) {
@@ -604,62 +566,19 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   return (
     <div>
-      {/* Tailoring Options Panel */}
-      <div className="card mb-4">
-        <button
-          onClick={() => setShowTailorOptions(!showTailorOptions)}
-          className="flex items-center gap-2 w-full text-left text-sm font-semibold text-foreground"
-        >
-          {showTailorOptions ? (
-            <ChevronDown className="w-4 h-4" />
-          ) : (
-            <ChevronRight className="w-4 h-4" />
-          )}
+      {/* Tailoring options: a summary; they are changed in Settings → Applications */}
+      <div className="card mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+        <span className="flex items-center gap-2 font-semibold text-foreground">
           <Wand2 className="w-4 h-4 text-primary" />
           Tailoring Options
-        </button>
-        {showTailorOptions && (
-          <div className="mt-3 pt-3 border-t border-border">
-            {/* Auto-tailor toggle */}
-            <label className="flex items-center gap-2 mb-3 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoTailor}
-                onChange={handleAutoTailorToggle}
-                className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
-              />
-              <span className="text-sm text-foreground">
-                Auto-tailor before applying
-              </span>
-            </label>
-            {/* Tailor options checkboxes */}
-            <div className="flex flex-wrap gap-4">
-              {(
-                [
-                  { key: "skills" as const, label: "Skills" },
-                  { key: "title" as const, label: "Job Title" },
-                  { key: "overview" as const, label: "Overview/Summary" },
-                  { key: "experience" as const, label: "Job Experience" },
-                ] as const
-              ).map(({ key, label }) => (
-                <label
-                  key={key}
-                  className="flex items-center gap-1.5 cursor-pointer"
-                >
-                  <input
-                    type="checkbox"
-                    checked={tailorOptions[key]}
-                    onChange={() => handleTailorOptionChange(key)}
-                    className="w-3.5 h-3.5 rounded border-border text-primary focus:ring-primary"
-                  />
-                  <span className="text-[13px] text-muted-foreground">
-                    {label}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
-        )}
+        </span>
+        <span className="text-[13px] text-muted-foreground">
+          Auto-tailor before applying: {autoTailor ? "on" : "off"} · Tailors:{" "}
+          {TAILOR_OPTION_LABELS.filter(({ key }) => tailorOptions[key]).map(({ label }) => label).join(", ") || "nothing"}
+        </span>
+        <a href={settingsHref("applications")} className="text-[13px] text-primary font-medium hover:underline">
+          Change in Settings
+        </a>
       </div>
 
       {/* Status Filter Sub-tabs */}

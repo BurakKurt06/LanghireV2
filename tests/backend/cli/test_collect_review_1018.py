@@ -278,7 +278,12 @@ def test_explicit_zero_and_small_hourly_rates_are_known_below_the_minimum(text):
     assert pay.compare(value, {"amount": 20, "period": "hour", "currency": "USD"}) == "below"
 
 
-def test_explicit_zero_base_salary_is_known_instead_of_missing():
-    value = pay.from_json_ld({"baseSalary": {"currency": "USD", "value": 0, "unitText": "YEAR"}})
-    assert value is not None
-    assert pay.compare(value, {"amount": 40000, "period": "year", "currency": "USD"}) == "below"
+def test_a_zero_base_salary_in_posting_data_counts_as_pay_not_listed():
+    """User's decision 11-01 (replaces "explicit zero is known-below"): boards such as Reed write a 0
+    placeholder for pay given only in the text, so a 0 in the posting data is no pay information.
+    The text is read next; with no pay anywhere the job takes the no-pay rule (a higher match).
+    A 0 or tiny rate written in the text itself stays known-below (test above)."""
+    assert pay.from_json_ld({"baseSalary": {"currency": "USD", "value": 0, "unitText": "YEAR"}}) is None
+    assert pay.from_json_ld({"baseSalary": {"currency": "GBP", "value": {"minValue": 0, "maxValue": 0, "unitText": "YEAR"}}}) is None
+    found = pay.from_json_ld({"baseSalary": {"currency": "USD", "value": {"minValue": 0, "maxValue": 40000, "unitText": "YEAR"}}})
+    assert found is not None and found.high == 40000

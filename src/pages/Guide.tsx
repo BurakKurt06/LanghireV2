@@ -88,14 +88,14 @@ export default function Guide() {
     {
       label: t("checklist.configureAi"),
       done: status?.llm,
-      path: "/llm",
+      path: "/settings?section=ai-model",
       icon: Cpu,
       required: true,
     },
     {
       label: t("checklist.setResume"),
       done: status?.resume,
-      path: "/settings",
+      path: "/settings?section=applications",
       icon: FileText,
       required: true,
     },
@@ -261,7 +261,7 @@ export default function Guide() {
             <p>
               {t("sections.aiProvider.intro")}{" "}
               <button
-                onClick={() => navigate("/llm")}
+                onClick={() => navigate("/settings?section=ai-model")}
                 className="text-primary font-medium hover:underline"
               >
                 {t("sections.aiProvider.linkText")}
@@ -354,7 +354,7 @@ export default function Guide() {
             <p>
               <strong>{t("sections.applying.blockedDomains")}</strong> {t("sections.applying.blockedDomainsDesc")}{" "}
               <button
-                onClick={() => navigate("/settings")}
+                onClick={() => navigate("/settings?section=job-search")}
                 className="text-primary font-medium hover:underline"
               >
                 {t("sections.applying.blockedDomainsLink")}

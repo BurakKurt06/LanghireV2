@@ -61,8 +61,8 @@ describe("Guide", () => {
     await waitFor(() => expect(mockGetSetupStatus).toHaveBeenCalled());
 
     const setUpButtons = screen.getAllByRole("button", { name: "checklist.setUp" });
-    await user.click(setUpButtons[0]); // configureAi → /llm
-    expect(mockNavigate).toHaveBeenCalledWith("/llm");
+    await user.click(setUpButtons[0]); // configureAi → Settings → AI model
+    expect(mockNavigate).toHaveBeenCalledWith("/settings?section=ai-model");
   });
 
   it("shows the all-done banner and no Set Up buttons when all required are complete", async () => {

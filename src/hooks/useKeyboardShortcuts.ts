@@ -16,7 +16,7 @@ export const SHORTCUT_ROUTES: string[] = [
   "/", // 1 Dashboard
   "/guide", // 2 Guide
   "/profile", // 3 Profile
-  "/llm", // 4 LLM Settings
+  "/llm", // 4 AI model (opens Settings → AI model)
   "/jobs", // 5 Jobs
   "/memory", // 6 Memory
   "/qa", // 7 Q&A

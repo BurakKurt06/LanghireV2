@@ -262,7 +262,7 @@ def source_match(search_title: str, listing: dict, prefs: dict, profile: dict) -
 @dataclass
 class Context:
     """What the screen compares against: jobs already in the list, and recent applications."""
-    duplicates: dict = field(default_factory=dict)     # (title, company) -> set of cities
+    duplicates: dict = field(default_factory=dict)     # (title, company) -> [(city, pay range or None)]
     cooldown: set = field(default_factory=set)          # company keys applied to recently
 
     @classmethod
@@ -289,17 +289,57 @@ class Context:
     def add(self, job: dict) -> None:
         key = (title_key(job.get("title", "")), company_key(job.get("company", "")))
         if all(key):
-            self.duplicates.setdefault(key, set()).add(city_key(job.get("location", "")))
+            self.duplicates.setdefault(key, []).append((city_key(job.get("location", "")), _pay_range(job.get("pay"))))
 
-    def duplicate(self, job: dict) -> bool:
+    def duplicate(self, job: dict, final: bool = True) -> bool:
+        """Same title and employer in the same city (or a city left blank), unless both state pay and it
+        clearly differs (user's decision 11-01: an agency's contract and permanent roles are two jobs).
+        With `final=False` (a listing card without pay) a saved job with pay waits for the posting's pay."""
         key = (title_key(job.get("title", "")), company_key(job.get("company", "")))
         if not all(key) or key not in self.duplicates:
             return False
         city = city_key(job.get("location", ""))
-        cities = self.duplicates[key]
-        return not city or "" in cities or any(
-            city == other or ("|" not in city or "|" not in other) and city.split("|")[0] == other.split("|")[0]
-            for other in cities)
+        pay = _pay_range(job.get("pay"))
+        for other_city, other_pay in self.duplicates[key]:
+            if city and other_city and not _same_city(city, other_city):
+                continue
+            if _different_pay(pay, other_pay) or (pay is None and other_pay is not None and not final):
+                continue
+            return True
+        return False
+
+
+def _same_city(city: str, other: str) -> bool:
+    return city == other or ("|" not in city or "|" not in other) and city.split("|")[0] == other.split("|")[0]
+
+
+def _pay_range(found) -> tuple | None:
+    """(currency, period, low, high) from a Pay or a saved job's pay; None when no usable pay."""
+    if found is None:
+        return None
+    get = found.get if isinstance(found, dict) else (lambda name: getattr(found, name, None))
+    try:
+        low, high = float(get("low")), float(get("high"))
+    except (TypeError, ValueError):
+        return None
+    period = str(get("period") or "")
+    if not period or max(low, high) <= 0:
+        return None
+    return (str(get("currency") or "").upper(), period, min(low, high), max(low, high))
+
+
+PAY_GAP = 0.10   # ranges this close count as the same pay (a repost at $26 instead of $25)
+
+
+def _different_pay(a: tuple | None, b: tuple | None) -> bool:
+    """Both state pay and it clearly differs: another period, another currency, or ranges more than
+    10% apart (a repost a little higher or lower is the same job)."""
+    if a is None or b is None:
+        return False
+    if a[1] != b[1] or (a[0] and b[0] and a[0] != b[0]):
+        return True
+    lower, upper = (a, b) if a[3] <= b[3] else (b, a)
+    return lower[3] * (1 + PAY_GAP) < upper[2]
 
 
 def screen(listing: dict, prefs: dict, ctx: Context, final: bool = True) -> tuple[str, str] | None:
@@ -319,7 +359,7 @@ def screen(listing: dict, prefs: dict, ctx: Context, final: bool = True) -> tupl
             return "title", f'Title has "{word}"'
     if prefs.get("skip_staffing_agencies") and company and is_agency(company):
         return "agency", f"Staffing or recruiting agency ({company[:60]})"
-    if ctx.duplicate(listing):
+    if ctx.duplicate(listing, final):
         return "duplicate", "Already in your list (same title and employer)"
     if company_key(company) in ctx.cooldown:
         return "cooldown", f"You applied to {company[:60]} in the last {prefs.get('company_cooldown_days')} days"

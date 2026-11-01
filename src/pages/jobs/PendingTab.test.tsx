@@ -500,19 +500,16 @@ describe("PendingTab", () => {
     await waitFor(() => expect(window.alert).toHaveBeenCalledWith("apply boom"));
   });
 
-  it("persists tailoring options to localStorage when toggled", async () => {
-    const user = userEvent.setup();
+  it("shows the tailoring options saved in Settings, with a link to change them there", async () => {
+    // Changed in Settings → Applications (tested in Settings.test.tsx); same browser storage.
+    localStorage.setItem("langhire_auto_tailor", "true");
+    localStorage.setItem("langhire_tailor_options", JSON.stringify({ skills: true, title: true, overview: false, experience: false }));
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
     await screen.findByText("Backend Engineer");
 
-    await user.click(screen.getByRole("button", { name: /Tailoring Options/ }));
-    const titleCheckbox = await screen.findByRole("checkbox", { name: /Job Title/ });
-    await user.click(titleCheckbox);
-
-    await waitFor(() => {
-      const stored = JSON.parse(localStorage.getItem("langhire_tailor_options") || "{}");
-      expect(stored.title).toBe(true);
-    });
+    expect(screen.getByText(/Auto-tailor before applying: on · Tailors: Skills, Job Title/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Change in Settings" })).toHaveAttribute("href", "#/settings?section=applications");
+    expect(screen.queryByRole("checkbox", { name: /Job Title/ })).not.toBeInTheDocument();
   });
 
   it("renders the easy-apply and tailored badges", async () => {

@@ -131,11 +131,11 @@ describe("Dashboard page", () => {
     renderDashboard();
     await screen.findByText("setup.gettingStarted");
 
-    // LLM not done → its set-up button navigates to /llm.
+    // LLM not done → its set-up button opens Settings → AI model.
     const setUpButtons = await screen.findAllByRole("button", { name: "setup.setUp" });
     expect(setUpButtons.length).toBeGreaterThan(0);
     await user.click(setUpButtons[0]);
-    expect(navigateMock).toHaveBeenCalledWith("/llm");
+    expect(navigateMock).toHaveBeenCalledWith("/settings?section=ai-model");
   });
 
   it("shows the all-done state when all required steps are complete", async () => {

@@ -13,7 +13,6 @@ import { Wand2, Loader2 } from "lucide-react";
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const Analytics = lazy(() => import("./pages/Analytics"));
 const Profile = lazy(() => import("./pages/Profile"));
-const LLMSettings = lazy(() => import("./pages/LLMSettings"));
 const Jobs = lazy(() => import("./pages/Jobs"));
 const Memory = lazy(() => import("./pages/Memory"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
@@ -117,7 +116,8 @@ export default function App() {
               <Route path="/" element={<Dashboard />} />
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/profile" element={<Profile />} />
-              <Route path="/llm" element={<LLMSettings />} />
+              {/* The AI model is a Settings category; old links and Ctrl+4 still open it. */}
+              <Route path="/llm" element={<Navigate to="/settings?section=ai-model" replace />} />
               <Route path="/jobs" element={<Jobs />} />
               <Route path="/apply" element={<Navigate to="/jobs" replace />} />
               <Route path="/memory" element={<Memory />} />

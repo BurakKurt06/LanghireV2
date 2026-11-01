@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import {
   LayoutDashboard,
   User,
-  Cpu,
   Briefcase,
   Brain,
   Settings,
@@ -23,7 +22,6 @@ const navItems = [
   { to: "/analytics", icon: BarChart3, labelKey: "nav.analytics" },
   { to: "/guide", icon: BookOpen, labelKey: "nav.guide" },
   { to: "/profile", icon: User, labelKey: "nav.profile" },
-  { to: "/llm", icon: Cpu, labelKey: "nav.llmSettings" },
   { to: "/jobs", icon: Briefcase, labelKey: "nav.jobs" },
   { to: "/inbox", icon: Mail, labelKey: "nav.inbox" },
   { to: "/memory", icon: Brain, labelKey: "nav.memory" },

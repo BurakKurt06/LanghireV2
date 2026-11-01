@@ -1,9 +1,14 @@
+# Version-update pull requests are off (user's decision, 2026-11-01): open-pull-requests-limit 0 on
+# every ecosystem. GitHub's Dependabot security alerts are a repository setting and stay on, and the
+# CI dependency audit (scripts/audit-dependencies.py, npm audit) still fails on known advisories.
+# Updates are done in one tested batch when asked.
 version: 2
 updates:
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 0
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
@@ -28,6 +33,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 0
     groups:
       minor-and-patch:
         update-types: ["minor", "patch"]
@@ -36,8 +42,10 @@ updates:
     directory: "/src-tauri"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 0
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 0

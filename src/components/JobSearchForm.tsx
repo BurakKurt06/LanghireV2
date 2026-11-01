@@ -23,7 +23,7 @@ interface Props {
   disabled?: boolean;
 }
 
-/** Profile → Job search, and the same form for one search on the Collect page. */
+/** Settings → Job search, and the same form for one search on the Collect page. */
 export default function JobSearchForm({ value, onChange, currency, showMode = true, disabled = false }: Props) {
   const { t } = useTranslation("profile");
   const uid = useId();

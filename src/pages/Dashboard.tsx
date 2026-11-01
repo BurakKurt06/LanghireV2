@@ -148,8 +148,8 @@ export default function Dashboard() {
   ];
 
   const setupSteps = [
-    { label: t("setup.configureAI"), done: setupStatus?.llm, path: "/llm", icon: Cpu, required: true },
-    { label: t("setup.setResume"), done: setupStatus?.resume, path: "/settings", icon: FileText, required: true },
+    { label: t("setup.configureAI"), done: setupStatus?.llm, path: "/settings?section=ai-model", icon: Cpu, required: true },
+    { label: t("setup.setResume"), done: setupStatus?.resume, path: "/settings?section=applications", icon: FileText, required: true },
     { label: t("setup.setupProfile"), done: setupStatus?.profile, path: "/profile", icon: User, required: true },
   ];
 

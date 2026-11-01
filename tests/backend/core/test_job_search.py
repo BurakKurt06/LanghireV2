@@ -87,6 +87,38 @@ def test_the_same_job_from_another_board_is_a_duplicate():
     assert job_search.screen(listing(company="Acme Test Co", location="Denver, CO"), prefs(), ctx) is None
 
 
+def test_a_listing_with_clearly_different_pay_is_another_job():
+    """User's decision 11-01: same title, employer and city, but both state pay and it clearly differs
+    (another period, another currency, or ranges that don't overlap) -> a different job. A real Reed run
+    left out a permanent "Data Analyst" (GBP 35,000-45,000/year) because the agency's contract
+    "Data Analyst" (GBP 400-500/day) in the same city was already saved."""
+    saved = {"title": "Data Analyst", "company": "Agency Test Ltd", "location": "London",
+             "pay": pay.Pay(400, 500, "GBP", "day").to_dict()}
+    ctx = job_search.Context.from_jobs({"https://a.example/1": saved}, prefs())
+    same = dict(company="Agency Test Ltd", location="London")
+    yearly = pay.Pay(35000, 45000, "GBP", "year")
+    assert job_search.screen(listing(**same, pay=yearly), prefs(), ctx) is None              # another period
+    assert job_search.screen(listing(**same, pay=pay.Pay(600, 700, "GBP", "day")), prefs(), ctx) is None  # no overlap
+    assert job_search.screen(listing(**same, pay=pay.Pay(450, 550, "GBP", "day")), prefs(), ctx)[0] == "duplicate"
+    assert job_search.screen(listing(**same, pay=pay.Pay(400, 500, "GBP", "day")), prefs(), ctx)[0] == "duplicate"
+    # A repost a little higher or lower is the same job: not "clearly different" (within 10%).
+    assert job_search.screen(listing(**same, pay=pay.Pay(520, 540, "GBP", "day")), prefs(), ctx)[0] == "duplicate"
+    hourly = job_search.Context.from_jobs({"https://a.example/2": {**saved, "pay": pay.Pay(25, 25, "USD", "hour").to_dict()}}, prefs())
+    assert job_search.screen(listing(**same, pay=pay.Pay(26, 26, "USD", "hour")), prefs(), hourly)[0] == "duplicate"
+    assert job_search.screen(listing(**same, pay=pay.Pay(30, 30, "USD", "hour")), prefs(), hourly) is None
+    # No pay on the listing: a card waits for the posting's pay; the final check can't tell them apart.
+    assert job_search.screen(listing(**same), prefs(), ctx, final=False) is None
+    assert job_search.screen(listing(**same), prefs(), ctx)[0] == "duplicate"
+    # No pay on the saved job: nothing to compare, so the old rule holds.
+    ctx = job_search.Context.from_jobs({"https://a.example/1": {**saved, "pay": None}}, prefs())
+    assert job_search.screen(listing(**same, pay=yearly), prefs(), ctx)[0] == "duplicate"
+    # Saved in this same run (the record's pay is a dict there too).
+    ctx = job_search.Context()
+    ctx.add({**saved, "pay": yearly.to_dict()})
+    assert job_search.screen(listing(**same, pay=yearly), prefs(), ctx)[0] == "duplicate"
+    assert job_search.screen(listing(**same, pay=pay.Pay(400, 500, "GBP", "day")), prefs(), ctx) is None
+
+
 def test_companies_applied_to_recently_wait_their_cooldown():
     now = datetime.now(timezone.utc)
     jobs = {"https://a.example/1": {"title": "Other", "company": "Acme Test Co", "status": "applied",

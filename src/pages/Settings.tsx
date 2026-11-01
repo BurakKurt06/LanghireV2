@@ -1,20 +1,37 @@
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Save, FolderOpen, X, Upload, Trash2, Sun, Moon, Monitor } from "lucide-react";
 import {
   getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin, getBrowsers,
-  getEmployerPasswordSites, revealEmployerPassword,
+  getEmployerPasswordSites, revealEmployerPassword, getProfile, saveProfile, getInbox, setInboxSchedule,
 } from "../lib/api";
 import { setTelemetryEnabled as setAnalyticsTelemetry } from "../lib/analytics";
 import { getStoredTheme, setTheme, type ThemeMode } from "../lib/theme";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTranslation } from "react-i18next";
-import { PageHeader, LoadingSpinner, Section, PasswordInput } from "../components/ui";
+import { PageHeader, LoadingSpinner, PasswordInput } from "../components/ui";
 import TagInput from "../components/ui/TagInput";
 import LoginCards from "../components/LoginCards";
-import type { PluginConfig, InstalledBrowser, OtherDocument } from "../lib/types";
+import LLMSettingsForm from "../components/forms/LLMSettingsForm";
+import JobSearchForm from "../components/JobSearchForm";
+import { withDefaults } from "../lib/jobSearch";
+import { INBOX_SCHEDULE_LABELS } from "../lib/inbox";
+import { PROFILE_SETTINGS_FIELDS } from "../lib/profileFields";
+import { SETTINGS_SECTIONS, type SettingsSectionId } from "../lib/settingsSections";
+import { TAILOR_OPTION_LABELS, loadAutoTailor, loadTailorOptions, saveAutoTailor, saveTailorOptions } from "../lib/tailoring";
+import type {
+  PluginConfig, InstalledBrowser, OtherDocument, CandidateProfile, InboxStatus, TailorOptions,
+} from "../lib/types";
+
+type ProfileSettings = Pick<CandidateProfile, (typeof PROFILE_SETTINGS_FIELDS)[number]>;
 
 export default function SettingsPage() {
   const { t } = useTranslation("settings");
+  const { t: tp } = useTranslation("profile");
+  const [params, setParams] = useSearchParams();
+  const requested = params.get("section");
+  const section: SettingsSectionId = SETTINGS_SECTIONS.some((s) => s.id === requested)
+    ? (requested as SettingsSectionId) : "ai-model";
   const [resumePath, setResumePath] = useState("");
   const [blockedDomains, setBlockedDomains] = useState<string[]>([]);
   const [newDomain, setNewDomain] = useState("");
@@ -44,6 +61,18 @@ export default function SettingsPage() {
   const [fitCheckEnabled, setFitCheckEnabled] = useState(true);
   const [coverLetterBoxes, setCoverLetterBoxes] = useState(false);
   const [parallelJobs, setParallelJobs] = useState(1);
+  // Profile fields edited here (job search, AI instructions); the profile's other fields are Profile's.
+  // The profile couldn't be read: those fields aren't shown (saving them could replace the profile).
+  const [profile, setProfile] = useState<CandidateProfile | null>(null);
+  const [profileFailed, setProfileFailed] = useState(false);
+  const [profileChanged, setProfileChanged] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newLocation, setNewLocation] = useState("");
+  // Saved at once, as before: tailoring options (browser storage) and the Inbox schedule.
+  const [autoTailor, setAutoTailor] = useState(loadAutoTailor);
+  const [tailorOptions, setTailorOptions] = useState<TailorOptions>(loadTailorOptions);
+  const [inboxSchedule, setInboxScheduleState] = useState<InboxStatus["schedule"] | null>(null);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     Promise.all([
@@ -78,6 +107,19 @@ export default function SettingsPage() {
         setBrowser(data.browser || "");
         setBrowserPath(data.browser_path || "");
       }).catch(() => setLoadFailed(true)),
+      getProfile().then((data) => {
+        // The same defaults Profile fills in, so a save never writes a partial object.
+        setProfile({
+          ...data,
+          target_job_titles: data.target_job_titles || [],
+          target_locations: data.target_locations || [],
+          search_area: { center_zip: "", radius: "any", ...(data.search_area || {}) },
+          job_search: withDefaults(data.job_search),
+          notes: data.notes || "",
+        });
+        setProfileChanged(false);
+      }).catch(() => setProfileFailed(true)),
+      getInbox().then((data) => setInboxScheduleState(data.schedule)).catch(() => {}),
       getPlugins().then((res) => setPlugins(res.plugins || [])).catch(() => {}),
       getBrowsers().then((res) => setBrowsers(res.browsers || [])).catch(() => {}),
     ]).finally(() => setLoading(false));
@@ -86,7 +128,20 @@ export default function SettingsPage() {
   const retry = () => {
     setLoading(true);
     setLoadFailed(false);
+    setProfileFailed(false);
     load();
+  };
+
+  const updateProfile = <K extends keyof ProfileSettings>(key: K, value: ProfileSettings[K]) => {
+    setProfile((p) => (p ? { ...p, [key]: value } : p));
+    setProfileChanged(true);
+  };
+
+  const addToList = (key: "target_job_titles" | "target_locations", value: string, clear: () => void) => {
+    const text = value.trim();
+    if (!text || !profile) return;
+    if (!profile[key].includes(text)) updateProfile(key, [...profile[key], text]);
+    clear();
   };
 
   const handleTogglePlugin = async (name: string, enabled: boolean) => {
@@ -116,6 +171,30 @@ export default function SettingsPage() {
     setThemeState(mode);
     setTheme(mode); // apply + persist locally immediately
     saveSettings({ theme: mode }).catch(() => {}); // mirror to backend
+  };
+
+  const handleAutoTailorToggle = () => {
+    const value = !autoTailor;
+    setAutoTailor(value);
+    saveAutoTailor(value);
+  };
+
+  const handleTailorOptionChange = (key: keyof TailorOptions) => {
+    const updated = { ...tailorOptions, [key]: !tailorOptions[key] };
+    setTailorOptions(updated);
+    saveTailorOptions(updated);
+  };
+
+  const handleScheduleChange = async (schedule: InboxStatus["schedule"]) => {
+    setScheduleError(null);
+    const previous = inboxSchedule;
+    setInboxScheduleState(schedule);
+    try {
+      await setInboxSchedule(schedule);
+    } catch (e) {
+      setInboxScheduleState(previous);
+      setScheduleError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const addDomain = () => {
@@ -154,6 +233,13 @@ export default function SettingsPage() {
         cover_letter_boxes: coverLetterBoxes,
         parallel_jobs: parallelJobs,
       });
+      if (profile && profileChanged) {
+        // Only these fields: re-read the profile so what Profile saved meanwhile is kept.
+        const current = await getProfile();
+        const own = Object.fromEntries(PROFILE_SETTINGS_FIELDS.map((key) => [key, profile[key]]));
+        await saveProfile({ ...current, ...own } as CandidateProfile);
+        setProfileChanged(false);
+      }
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (e) {
@@ -164,29 +250,40 @@ export default function SettingsPage() {
 
   if (loading) return <LoadingSpinner />;
 
-  if (loadFailed) {
-    return (
-      <div className="max-w-2xl">
-        <PageHeader title="Settings" subtitle="General application settings" />
-        <div role="alert" className="error-banner flex items-center justify-between gap-3">
-          <span>Couldn't load your settings, so they can't be changed right now (saving could replace them with defaults).</span>
-          <button type="button" onClick={retry} className="btn-secondary">Try again</button>
-        </div>
-      </div>
-    );
-  }
+  const loadError = (
+    <div role="alert" className="error-banner flex items-center justify-between gap-3">
+      <span>Couldn't load your settings, so they can't be changed right now (saving could replace them with defaults).</span>
+      <button type="button" onClick={retry} className="btn-secondary">Try again</button>
+    </div>
+  );
+  const profileError = (
+    <div role="alert" className="error-banner flex items-center justify-between gap-3">
+      <span>{tp("loadError")}</span>
+      <button type="button" onClick={retry} className="btn-secondary">{tp("retry")}</button>
+    </div>
+  );
+  const label = (id: SettingsSectionId) => {
+    const entry = SETTINGS_SECTIONS.find((s) => s.id === id)!;
+    return t(entry.labelKey, entry.label);
+  };
+  const panel = (id: SettingsSectionId, content: React.ReactNode) => (
+    <section key={id} id={`settings-${id}`} aria-label={label(id)} hidden={section !== id} className="card">
+      <h2 className="text-base font-bold text-foreground mb-4">{label(id)}</h2>
+      {content}
+    </section>
+  );
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-4xl">
       <PageHeader
         title="Settings"
         subtitle="General application settings"
-        actions={
+        actions={section !== "ai-model" && !loadFailed ? (
           <button onClick={handleSave} className="btn-primary">
             <Save className="w-4 h-4" />
             {saved ? "Saved" : "Save Settings"}
           </button>
-        }
+        ) : undefined}
       />
       {saveError && (
         <div className="error-banner mb-5 flex items-center justify-between">
@@ -195,395 +292,537 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Appearance / Theme */}
-      <Section title={t("appearance.title", "Appearance")}>
-        <label className="block text-sm font-semibold text-foreground mb-2">{t("appearance.theme", "Theme")}</label>
-        <div className="flex gap-2" role="radiogroup" aria-label={t("appearance.theme", "Theme")}>
-          {([
-            { mode: "light" as const, label: t("appearance.light", "Light"), Icon: Sun },
-            { mode: "dark" as const, label: t("appearance.dark", "Dark"), Icon: Moon },
-            { mode: "system" as const, label: t("appearance.system", "System"), Icon: Monitor },
-          ]).map(({ mode, label, Icon }) => (
-            <button
-              key={mode}
-              role="radio"
-              aria-checked={theme === mode}
-              onClick={() => handleThemeChange(mode)}
-              className={`filter-tab flex items-center gap-1.5 ${theme === mode ? "filter-tab-active" : "filter-tab-inactive"}`}
-            >
-              <Icon className="w-3.5 h-3.5" /> {label}
-            </button>
-          ))}
-        </div>
-        <p className="text-[13px] text-muted-foreground mt-2">{t("appearance.description", "Choose light, dark, or follow your system setting.")}</p>
-      </Section>
-
-      {/* Resume */}
-      <Section title="Resume">
-        <div className="flex gap-2">
-          <input value={resumePath} onChange={(e) => setResumePath(e.target.value)}
-            placeholder="/path/to/your/resume.pdf"
-            className="input-base flex-1" />
-          <button onClick={async () => {
-              const file = await open({ filters: [{ name: "PDF", extensions: ["pdf"] }] });
-              if (file) setResumePath(file as string);
-            }}
-            className="btn-secondary">
-            <FolderOpen className="w-4 h-4" /> Browse
-          </button>
-        </div>
-        <p className="text-[13px] text-muted-foreground mt-2">PDF resume file used for job applications</p>
-
-        <div className="mt-5">
-          <p className="text-sm font-semibold text-foreground">Other documents</p>
-          <p className="text-[13px] text-muted-foreground mt-1 mb-2">
-            Files the agent may upload when a form asks for them, like a transcript or a writing sample.
-            When a form requires a file you haven't added, the job is marked "Needs you".
-          </p>
-          {otherDocuments.map((doc, i) => (
-            <div key={i} className="flex gap-2 mb-2">
-              <input
-                value={doc.label}
-                aria-label="Document name"
-                placeholder="e.g. Transcript"
-                onChange={(e) => setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, label: e.target.value } : d)))}
-                className="input-base !w-44"
-              />
-              <input
-                value={doc.path}
-                aria-label="Document file"
-                placeholder="/path/to/file.pdf"
-                onChange={(e) => setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, path: e.target.value } : d)))}
-                className="input-base flex-1"
-              />
-              <button onClick={async () => {
-                  const file = await open({ filters: [{ name: "Documents", extensions: ["pdf", "doc", "docx", "txt"] }] });
-                  if (file) setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, path: file as string } : d)));
-                }}
-                className="btn-secondary">
-                <FolderOpen className="w-4 h-4" /> Browse
-              </button>
-              <button
-                onClick={() => setOtherDocuments(otherDocuments.filter((_, j) => j !== i))}
-                className="p-2 text-muted-foreground hover:text-destructive"
-                aria-label={`Remove ${doc.label || "document"}`}
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          ))}
-          <button onClick={() => setOtherDocuments([...otherDocuments, { label: "", path: "" }])} className="btn-secondary text-xs">
-            + Add document
-          </button>
-        </div>
-      </Section>
-
-      {/* AI features */}
-      <Section title="AI Features">
-        <SettingSwitch
-          label="Performance mode"
-          checked={performanceMode}
-          onChange={setPerformanceMode}
-          description={
-            "Turns off optional AI work that doesn't change your answers: the fit check, job naming by the agent, " +
-            "the agent's per-step learning notes and interview prep sheets. Screenshots, form checks and your " +
-            "saved answers stay on, so applications are filled just as carefully. In a test it saved one AI " +
-            "request and about 10 seconds per application, and also skips the one automatic retry after a failure."
-          }
-        />
-        <SettingSwitch
-          label="Fit check before applying"
-          checked={fitCheckEnabled && !performanceMode}
-          disabled={performanceMode}
-          onChange={setFitCheckEnabled}
-          description={
-            "Reads each posting first (one small AI request) and skips jobs with a hard requirement you don't meet: " +
-            "degree level (MBA / Master's / PhD only), graduation year, citizenship or clearance, or location outside " +
-            "your search area. Skipped jobs show the reason, and you can still apply by hand." +
-            (performanceMode ? " Off while performance mode is on." : "")
-          }
-        />
-        <SettingSwitch
-          label="Fill cover-letter boxes"
-          checked={coverLetterBoxes}
-          onChange={setCoverLetterBoxes}
-          description={
-            "When a form has a cover letter box or upload, write a short letter for that job from your profile, " +
-            "resume and the posting. Plain text, no formatting, no AI-sounding phrases."
-          }
-        />
-      </Section>
-
-      {/* Gmail / LinkedIn sign-in for the agent's browser */}
-      <Section title="Accounts">
-        <LoginCards />
-      </Section>
-
-      {/* Sensitive Data */}
-      <Section title="Account Credentials">
-        <p className="text-[13px] text-muted-foreground mb-4">
-          The email is used for accounts on employer application sites. Each site the agent
-          creates an account on gets its own password, made by the app and listed below. The
-          password here is only used to sign in to accounts you created earlier with it.
-          Both are saved encrypted for your Windows account. Prefer SSO (Sign in with
-          LinkedIn/Google) when a site offers it.
-        </p>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label htmlFor="account-email" className="block text-sm font-semibold text-foreground mb-1.5">Email</label>
-            <input id="account-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
-              className="input-base" />
-          </div>
-          <div>
-            <label htmlFor="account-password" className="block text-sm font-semibold text-foreground mb-1.5">Earlier password (sign-in only)</label>
-            <PasswordInput id="account-password" value={password} onChange={(e) => setPassword(e.target.value)}
-              className="input-base" />
-          </div>
-        </div>
-        <EmployerPasswords />
-      </Section>
-
-      {/* Browser */}
-      <Section title="Browser">
-        <div>
-          <label htmlFor="browser-choice" className="block text-sm font-semibold text-foreground mb-1.5">
-            Browser the agent uses
-          </label>
-          <select
-            id="browser-choice"
-            value={browser}
-            onChange={(e) => setBrowser(e.target.value)}
-            className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card max-w-sm"
-          >
-            <option value="">Automatic (Chrome if installed)</option>
-            {browsers.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.name}{b.is_default ? " (your default browser)" : ""}
-              </option>
+      <div className="flex gap-6 items-start">
+        <nav aria-label="Settings categories" className="w-48 flex-shrink-0">
+          <ul className="space-y-1">
+            {SETTINGS_SECTIONS.map(({ id }) => (
+              <li key={id}>
+                <button
+                  type="button"
+                  aria-current={section === id ? "page" : undefined}
+                  onClick={() => setParams({ section: id })}
+                  className={`w-full text-left px-3 py-2 rounded-lg text-sm ${
+                    section === id ? "bg-secondary font-semibold text-foreground" : "text-muted-foreground hover:bg-secondary/60"
+                  }`}
+                >
+                  {label(id)}
+                </button>
+              </li>
             ))}
-            {/* Keep a saved choice visible even if that browser is no longer found. */}
-            {browser && browser !== "custom" && !browsers.some((b) => b.id === browser) && (
-              <option value={browser}>{browser} (not found, using Automatic)</option>
-            )}
-            <option value="custom">Other Chromium browser (enter path)…</option>
-          </select>
-          {browser === "custom" && (
-            <input
-              value={browserPath}
-              onChange={(e) => setBrowserPath(e.target.value)}
-              placeholder="C:\Program Files\...\browser.exe"
-              className="input-base font-mono mt-2"
-            />
-          )}
-          <p className="text-[13px] text-muted-foreground mt-1.5">
-            Only Chromium-based browsers (Chrome, Edge, Brave, Vivaldi…) can be automated. The agent opens its own
-            window with a separate profile for each browser, not your everyday one, so log in to LinkedIn again
-            after switching.
-          </p>
-        </div>
-      </Section>
+          </ul>
+        </nav>
 
-      {/* Agent Settings */}
-      <Section title="Agent Settings">
-        <div className="mb-5">
-          <label htmlFor="parallel-jobs" className="block text-sm font-semibold text-foreground mb-1.5">Jobs at the same time</label>
-          <select id="parallel-jobs" value={parallelJobs} onChange={(e) => setParallelJobs(Number(e.target.value))}
-            className="input-base !w-32">
-            {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}
-          </select>
-          <p className="text-[13px] text-muted-foreground mt-1.5">
-            How many applications run at once, each in its own browser window with your sign-ins. 2-3 is a good
-            range: each window uses about 1 GB of memory, and your AI plan's usage goes up as fast. Two jobs on the
-            same site never run at once. Applies from the next run.
-          </p>
-        </div>
-        <div>
-          <label className="block text-sm font-semibold text-foreground mb-1.5">Max Failures Per Job</label>
-          <input type="number" value={maxFailures} onChange={(e) => {
-              const val = Number(e.target.value);
-              setMaxFailures(Math.max(1, Math.min(50, isNaN(val) ? 8 : val)));
-            }}
-            min={1} max={50} className="input-base !w-32" />
-          <p className="text-[13px] text-muted-foreground mt-1.5">
-            Agent stops trying after this many consecutive failures on a single job.
-          </p>
-        </div>
-      </Section>
-
-      {/* Job Sources */}
-      <Section title="Job Sources">
-        <SettingSwitch
-          label="Job board collection"
-          checked={jobCollectionEnabled}
-          onChange={setJobCollectionEnabled}
-          description="Let the agent search job boards (LinkedIn, Indeed, Handshake, Intern Insider and the other plugins) for listings. When off, the Collect controls are disabled and the collect script exits — pasting links still works."
-          className=""
-        />
-      </Section>
-
-      {/* Anti-detection */}
-      <Section title="Anti-Detection">
-        <SettingSwitch
-          label="Stealth mode"
-          checked={stealthEnabled}
-          onChange={setStealthEnabled}
-          description="Hide the signals that mark the browser as automated (navigator.webdriver, missing plugins, headless WebGL fingerprints) and drop the automation launch flags. The browser already runs visibly, not headless."
-          className=""
-        />
-
-        <SettingSwitch
-          label="Human-like delays"
-          checked={humanDelayEnabled}
-          onChange={setHumanDelayEnabled}
-          description="Wait a random amount of time between applications instead of starting the next one immediately. Slows a run down by roughly the average delay per job."
-          className="mt-5 pt-5 border-t border-border"
-        />
-
-        {humanDelayEnabled && (
-          <div className="flex items-end gap-3 mt-4">
-            <div>
-              <label htmlFor="delay-min" className="block text-sm font-semibold text-foreground mb-1.5">
-                Min seconds
-              </label>
-              <input
-                id="delay-min"
-                type="number"
-                min={0}
-                max={300}
-                value={humanDelayMin}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  setHumanDelayMin(Math.max(0, Math.min(300, isNaN(v) ? 5 : v)));
-                }}
-                className="input-base !w-28"
-              />
-            </div>
-            <div>
-              <label htmlFor="delay-max" className="block text-sm font-semibold text-foreground mb-1.5">
-                Max seconds
-              </label>
-              <input
-                id="delay-max"
-                type="number"
-                min={0}
-                max={300}
-                value={humanDelayMax}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  setHumanDelayMax(Math.max(0, Math.min(300, isNaN(v) ? 15 : v)));
-                }}
-                className="input-base !w-28"
-              />
-            </div>
-            {humanDelayMax < humanDelayMin && (
-              <p className="text-[13px] text-destructive pb-2">Max must be at least the min.</p>
-            )}
-          </div>
-        )}
-      </Section>
-
-      {/* CAPTCHA */}
-      <Section title="CAPTCHA Solving">
-        <SettingSwitch
-          label="Solve CAPTCHAs with 2Captcha"
-          checked={captchaEnabled}
-          onChange={setCaptchaEnabled}
-          description="When a CAPTCHA appears, send it to 2Captcha (max 2 attempts per application). If solving fails — or this is off — the job is marked Needs you (so you can apply yourself), and the agent moves to the next job. Your API key is never included in prompts or logs."
-          className=""
-        />
-        {captchaEnabled && (
-          <div className="mt-4">
-            <label htmlFor="captcha-key" className="block text-sm font-semibold text-foreground mb-1.5">
-              2Captcha API key
-            </label>
-            <PasswordInput
-              id="captcha-key"
-              value={captchaApiKey}
-              onChange={(e) => setCaptchaApiKey(e.target.value)}
-              placeholder="Your 2Captcha API key"
-              className="input-base"
-            />
-          </div>
-        )}
-      </Section>
-
-      {/* Privacy & Telemetry */}
-      <Section title="Privacy & Telemetry">
-        <SettingSwitch
-          label="Usage Analytics"
-          checked={telemetryEnabled}
-          onChange={(on) => {
-            setTelemetryEnabled(on);
-            setAnalyticsTelemetry(on);
-          }}
-          description="Off unless you turn it on. Sends which features you use and error reports (an error message can include a page or file name). Never your profile, resume, answers or job list. Only in builds set up with analytics keys."
-          className=""
-        />
-      </Section>
-
-      {/* Blocked Domains */}
-      <Section title={t("blockedDomains.title")} className="">
-        <p className="text-[13px] text-muted-foreground mb-4">{t("blockedDomains.description")}</p>
-        <TagInput
-          tags={blockedDomains}
-          value={newDomain}
-          onChange={setNewDomain}
-          onAdd={addDomain}
-          onRemove={removeDomain}
-          placeholder="example.com"
-          variant="destructive"
-        />
-        {blockedDomains.length === 0 && (
-          <p className="text-[13px] text-muted-foreground mt-2">No blocked domains</p>
-        )}
-      </Section>
-
-      {/* Plugins */}
-      <Section title="Job Source Plugins">
-        <p className="text-[13px] text-muted-foreground mb-4">
-          Manage job source plugins. Built-in plugins provide LinkedIn, Indeed, SEEK, Naukri, Reed, and StepStone.
-          Import community plugins (.yaml files) for additional job sites.
-        </p>
-        <div className="space-y-3 mb-4">
-          {plugins.map((plugin) => (
-            <div key={plugin.name} className="flex items-center justify-between p-3 border border-border rounded-lg">
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-foreground">{plugin.display_name}</span>
-                  <span className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">
-                    v{plugin.version}
-                  </span>
-                  {plugin.is_builtin && (
-                    <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">Built-in</span>
-                  )}
+        <div className="flex-1 min-w-0 max-w-2xl">
+          {panel("ai-model", (
+            <>
+              <p className="text-[13px] text-muted-foreground mb-4">{t("aiModelHint", "The AI model has its own Save button.")}</p>
+              <LLMSettingsForm />
+            </>
+          ))}
+          {panel("job-search", loadFailed ? loadError : (
+            <>
+              {profileFailed || !profile ? profileError : (
+                <>
+                  <Group label={tp("targetJobTitles.title")} first>
+                    <TagInput tags={profile.target_job_titles} value={newTitle} onChange={setNewTitle}
+                      onAdd={() => addToList("target_job_titles", newTitle, () => setNewTitle(""))}
+                      onRemove={(v) => updateProfile("target_job_titles", profile.target_job_titles.filter((x) => x !== v))}
+                      placeholder={tp("targetJobTitles.placeholder")} />
+                  </Group>
+                  <Group label={tp("targetLocations.title")}>
+                    <TagInput tags={profile.target_locations} value={newLocation} onChange={setNewLocation}
+                      onAdd={() => addToList("target_locations", newLocation, () => setNewLocation(""))}
+                      onRemove={(v) => updateProfile("target_locations", profile.target_locations.filter((x) => x !== v))}
+                      placeholder={tp("targetLocations.placeholder")} />
+                  </Group>
+                  <Group label={tp("searchArea.title")}>
+                    <p className="text-[13px] text-muted-foreground mb-3">{tp("searchArea.hint")}</p>
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label htmlFor="search-center" className="block text-sm font-semibold text-foreground mb-1.5">{tp("searchArea.centerZip")}</label>
+                        <input id="search-center" value={profile.search_area?.center_zip ?? ""}
+                          placeholder={profile.address?.zip || "e.g. 10001"}
+                          onChange={(e) => updateProfile("search_area", { ...(profile.search_area ?? { center_zip: "", radius: "any" }), center_zip: e.target.value })}
+                          className="input-base" />
+                      </div>
+                      <div>
+                        <label htmlFor="search-radius" className="block text-sm font-semibold text-foreground mb-1.5">{tp("searchArea.radius")}</label>
+                        <select id="search-radius" value={profile.search_area?.radius ?? "any"}
+                          onChange={(e) => updateProfile("search_area", { ...(profile.search_area ?? { center_zip: "", radius: "any" }), radius: e.target.value as NonNullable<CandidateProfile["search_area"]>["radius"] })}
+                          className="input-base">
+                          <option value="25">{tp("searchArea.under", { miles: 25 })}</option>
+                          <option value="50">{tp("searchArea.under", { miles: 50 })}</option>
+                          <option value="100">{tp("searchArea.under", { miles: 100 })}</option>
+                          <option value="any">{tp("searchArea.any")}</option>
+                        </select>
+                      </div>
+                    </div>
+                  </Group>
+                  <Group label={tp("jobSearch.title")}>
+                    <p className="text-[13px] text-muted-foreground mb-3">{tp("jobSearch.hint")}</p>
+                    <JobSearchForm value={withDefaults(profile.job_search)} onChange={(v) => updateProfile("job_search", v)}
+                      currency={profile.salary_expectation?.currency || "USD"} />
+                  </Group>
+                </>
+              )}
+              <Group label={t("blockedDomains.title")} first={profileFailed || !profile}>
+                <p className="text-[13px] text-muted-foreground mb-4">{t("blockedDomains.description")}</p>
+                <TagInput
+                  tags={blockedDomains}
+                  value={newDomain}
+                  onChange={setNewDomain}
+                  onAdd={addDomain}
+                  onRemove={removeDomain}
+                  placeholder="example.com"
+                  variant="destructive"
+                />
+                {blockedDomains.length === 0 && (
+                  <p className="text-[13px] text-muted-foreground mt-2">No blocked domains</p>
+                )}
+              </Group>
+            </>
+          ))}
+          {panel("applications", loadFailed ? loadError : (
+            <>
+              {profileFailed || !profile ? profileError : (
+                <Group label={tp("notes.title")} first>
+                  <p className="text-[13px] text-muted-foreground mb-2">{tp("notes.hint")}</p>
+                  <textarea aria-label={tp("notes.title")} value={profile.notes} onChange={(e) => updateProfile("notes", e.target.value)}
+                    rows={8} className="input-base"
+                    placeholder={tp("notes.placeholder")} />
+                </Group>
+              )}
+              <Group first={profileFailed || !profile}>
+                <label htmlFor="resume-path" className="block text-sm font-semibold text-foreground mb-1.5">{t("resume.title", "Resume")}</label>
+                <div className="flex gap-2">
+                  <input id="resume-path" value={resumePath} onChange={(e) => setResumePath(e.target.value)}
+                    placeholder="/path/to/your/resume.pdf"
+                    className="input-base flex-1" />
+                  <button onClick={async () => {
+                      const file = await open({ filters: [{ name: "PDF", extensions: ["pdf"] }] });
+                      if (file) setResumePath(file as string);
+                    }}
+                    className="btn-secondary">
+                    <FolderOpen className="w-4 h-4" /> Browse
+                  </button>
                 </div>
-                <p className="text-[12px] text-muted-foreground mt-0.5">
-                  {plugin.description} &middot; {plugin.countries.join(", ")}
-                </p>
-              </div>
-              <div className="flex items-center gap-2 ml-4">
-                <label className="relative inline-flex items-center cursor-pointer">
+                <p className="text-[13px] text-muted-foreground mt-2">PDF resume file used for job applications</p>
+
+                <div className="mt-5">
+                  <p className="text-sm font-semibold text-foreground">Other documents</p>
+                  <p className="text-[13px] text-muted-foreground mt-1 mb-2">
+                    Files the agent may upload when a form asks for them, like a transcript or a writing sample.
+                    When a form requires a file you haven't added, the job is marked "Needs you".
+                  </p>
+                  {otherDocuments.map((doc, i) => (
+                    <div key={i} className="flex gap-2 mb-2">
+                      <input
+                        value={doc.label}
+                        aria-label="Document name"
+                        placeholder="e.g. Transcript"
+                        onChange={(e) => setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, label: e.target.value } : d)))}
+                        className="input-base !w-44"
+                      />
+                      <input
+                        value={doc.path}
+                        aria-label="Document file"
+                        placeholder="/path/to/file.pdf"
+                        onChange={(e) => setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, path: e.target.value } : d)))}
+                        className="input-base flex-1"
+                      />
+                      <button onClick={async () => {
+                          const file = await open({ filters: [{ name: "Documents", extensions: ["pdf", "doc", "docx", "txt"] }] });
+                          if (file) setOtherDocuments(otherDocuments.map((d, j) => (j === i ? { ...d, path: file as string } : d)));
+                        }}
+                        className="btn-secondary">
+                        <FolderOpen className="w-4 h-4" /> Browse
+                      </button>
+                      <button
+                        onClick={() => setOtherDocuments(otherDocuments.filter((_, j) => j !== i))}
+                        className="p-2 text-muted-foreground hover:text-destructive"
+                        aria-label={`Remove ${doc.label || "document"}`}
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  <button onClick={() => setOtherDocuments([...otherDocuments, { label: "", path: "" }])} className="btn-secondary text-xs">
+                    + Add document
+                  </button>
+                </div>
+              </Group>
+              <Group>
+                <div className="mb-5">
+                  <label htmlFor="parallel-jobs" className="block text-sm font-semibold text-foreground mb-1.5">Jobs at the same time</label>
+                  <select id="parallel-jobs" value={parallelJobs} onChange={(e) => setParallelJobs(Number(e.target.value))}
+                    className="input-base !w-32">
+                    {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                  <p className="text-[13px] text-muted-foreground mt-1.5">
+                    How many applications run at once, each in its own browser window with your sign-ins. 2-3 is a good
+                    range: each window uses about 1 GB of memory, and your AI plan's usage goes up as fast. Two jobs on the
+                    same site never run at once. Applies from the next run.
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-foreground mb-1.5">Max Failures Per Job</label>
+                  <input type="number" value={maxFailures} onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setMaxFailures(Math.max(1, Math.min(50, isNaN(val) ? 8 : val)));
+                    }}
+                    min={1} max={50} className="input-base !w-32" />
+                  <p className="text-[13px] text-muted-foreground mt-1.5">
+                    Agent stops trying after this many consecutive failures on a single job.
+                  </p>
+                </div>
+              </Group>
+              <Group>
+                <SettingSwitch
+                  label="Performance mode"
+                  checked={performanceMode}
+                  onChange={setPerformanceMode}
+                  description={
+                    "Turns off optional AI work that doesn't change your answers: the fit check, job naming by the agent, " +
+                    "the agent's per-step learning notes and interview prep sheets. Screenshots, form checks and your " +
+                    "saved answers stay on, so applications are filled just as carefully. In a test it saved one AI " +
+                    "request and about 10 seconds per application, and also skips the one automatic retry after a failure."
+                  }
+                />
+                <SettingSwitch
+                  label="Fit check before applying"
+                  checked={fitCheckEnabled && !performanceMode}
+                  disabled={performanceMode}
+                  onChange={setFitCheckEnabled}
+                  description={
+                    "Reads each posting first (one small AI request) and skips jobs with a hard requirement you don't meet: " +
+                    "degree level (MBA / Master's / PhD only), graduation year, citizenship or clearance, or location outside " +
+                    "your search area. Skipped jobs show the reason, and you can still apply by hand." +
+                    (performanceMode ? " Off while performance mode is on." : "")
+                  }
+                />
+                <SettingSwitch
+                  label="Fill cover-letter boxes"
+                  checked={coverLetterBoxes}
+                  onChange={setCoverLetterBoxes}
+                  description={
+                    "When a form has a cover letter box or upload, write a short letter for that job from your profile, " +
+                    "resume and the posting. Plain text, no formatting, no AI-sounding phrases."
+                  }
+                />
+              </Group>
+              <Group label="Tailoring Options">
+                <p className="text-[13px] text-muted-foreground mb-3">{t("tailoringHint", "Saved as you change them. Review & Apply uses them when it tailors a resume.")}</p>
+                <label className="flex items-center gap-2 mb-3 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={plugin.enabled}
-                    onChange={(e) => handleTogglePlugin(plugin.name, e.target.checked)}
-                    className="sr-only peer"
+                    checked={autoTailor}
+                    onChange={handleAutoTailorToggle}
+                    className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
                   />
-                  <div className="w-9 h-5 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+                  <span className="text-sm text-foreground">
+                    Auto-tailor before applying
+                  </span>
                 </label>
-                {!plugin.is_builtin && (
-                  <button onClick={() => handleRemovePlugin(plugin.name)} aria-label={`Remove ${plugin.name}`} className="text-destructive hover:text-destructive/80">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                <div className="flex flex-wrap gap-4">
+                  {TAILOR_OPTION_LABELS.map(({ key, label }) => (
+                    <label
+                      key={key}
+                      className="flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={tailorOptions[key]}
+                        onChange={() => handleTailorOptionChange(key)}
+                        className="w-3.5 h-3.5 rounded border-border text-primary focus:ring-primary"
+                      />
+                      <span className="text-[13px] text-muted-foreground">
+                        {label}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </Group>
+            </>
+          ))}
+          {panel("accounts", loadFailed ? loadError : (
+            <>
+              <Group first>
+                <LoginCards />
+              </Group>
+              <Group label="Account Credentials">
+                <p className="text-[13px] text-muted-foreground mb-4">
+                  The email is used for accounts on employer application sites. Each site the agent
+                  creates an account on gets its own password, made by the app and listed below. The
+                  password here is only used to sign in to accounts you created earlier with it.
+                  Both are saved encrypted for your Windows account. Prefer SSO (Sign in with
+                  LinkedIn/Google) when a site offers it.
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="account-email" className="block text-sm font-semibold text-foreground mb-1.5">Email</label>
+                    <input id="account-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                      className="input-base" />
+                  </div>
+                  <div>
+                    <label htmlFor="account-password" className="block text-sm font-semibold text-foreground mb-1.5">Earlier password (sign-in only)</label>
+                    <PasswordInput id="account-password" value={password} onChange={(e) => setPassword(e.target.value)}
+                      className="input-base" />
+                  </div>
+                </div>
+                <EmployerPasswords />
+              </Group>
+              <Group>
+                <label htmlFor="inbox-schedule" className="block text-sm font-semibold text-foreground mb-1.5">Check automatically</label>
+                <select
+                  id="inbox-schedule"
+                  value={inboxSchedule ?? "off"}
+                  disabled={inboxSchedule === null}
+                  onChange={(e) => void handleScheduleChange(e.target.value as InboxStatus["schedule"])}
+                  className="input-base !w-32"
+                >
+                  {(Object.keys(INBOX_SCHEDULE_LABELS) as InboxStatus["schedule"][]).map((value) => (
+                    <option key={value} value={value}>{INBOX_SCHEDULE_LABELS[value]}</option>
+                  ))}
+                </select>
+                <p className="text-[13px] text-muted-foreground mt-1.5">
+                  {t("inboxHint", "How often the Inbox reads job emails from Gmail by itself. Saved as you change it.")}
+                </p>
+                {scheduleError && <p role="alert" className="text-[13px] text-destructive mt-1">{scheduleError}</p>}
+              </Group>
+            </>
+          ))}
+          {panel("job-sources", loadFailed ? loadError : (
+            <>
+              <Group first>
+                <SettingSwitch
+                  label="Job board collection"
+                  checked={jobCollectionEnabled}
+                  onChange={setJobCollectionEnabled}
+                  description="Let the agent search job boards (LinkedIn, Indeed, Handshake, Intern Insider and the other plugins) for listings. When off, the Collect controls are disabled and the collect script exits — pasting links still works."
+                  className=""
+                />
+              </Group>
+              <Group label="Job Source Plugins">
+                <p className="text-[13px] text-muted-foreground mb-4">
+                  Manage job source plugins. Built-in plugins provide LinkedIn, Indeed, Glassdoor, Handshake, ZipRecruiter, Intern Insider, Reed, StepStone, SEEK and Naukri.
+                  Import community plugins (.yaml files) for additional job sites.
+                </p>
+                <div className="space-y-3 mb-4">
+                  {plugins.map((plugin) => (
+                    <div key={plugin.name} className="flex items-center justify-between p-3 border border-border rounded-lg">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-foreground">{plugin.display_name}</span>
+                          <span className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">
+                            v{plugin.version}
+                          </span>
+                          {plugin.is_builtin && (
+                            <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">Built-in</span>
+                          )}
+                        </div>
+                        <p className="text-[12px] text-muted-foreground mt-0.5">
+                          {plugin.description} &middot; {plugin.countries.join(", ")}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 ml-4">
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={plugin.enabled}
+                            onChange={(e) => handleTogglePlugin(plugin.name, e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-9 h-5 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+                        </label>
+                        {!plugin.is_builtin && (
+                          <button onClick={() => handleRemovePlugin(plugin.name)} aria-label={`Remove ${plugin.name}`} className="text-destructive hover:text-destructive/80">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={handleImportPlugin} className="btn-secondary">
+                  <Upload className="w-4 h-4" /> Import Plugin
+                </button>
+              </Group>
+            </>
+          ))}
+          {panel("browser", loadFailed ? loadError : (
+            <>
+              <Group first>
+                <div>
+                  <label htmlFor="browser-choice" className="block text-sm font-semibold text-foreground mb-1.5">
+                    Browser the agent uses
+                  </label>
+                  <select
+                    id="browser-choice"
+                    value={browser}
+                    onChange={(e) => setBrowser(e.target.value)}
+                    className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card max-w-sm"
+                  >
+                    <option value="">Automatic (Chrome if installed)</option>
+                    {browsers.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.name}{b.is_default ? " (your default browser)" : ""}
+                      </option>
+                    ))}
+                    {/* Keep a saved choice visible even if that browser is no longer found. */}
+                    {browser && browser !== "custom" && !browsers.some((b) => b.id === browser) && (
+                      <option value={browser}>{browser} (not found, using Automatic)</option>
+                    )}
+                    <option value="custom">Other Chromium browser (enter path)…</option>
+                  </select>
+                  {browser === "custom" && (
+                    <input
+                      value={browserPath}
+                      onChange={(e) => setBrowserPath(e.target.value)}
+                      placeholder="C:\Program Files\...\browser.exe"
+                      className="input-base font-mono mt-2"
+                    />
+                  )}
+                  <p className="text-[13px] text-muted-foreground mt-1.5">
+                    Only Chromium-based browsers (Chrome, Edge, Brave, Vivaldi…) can be automated. The agent opens its own
+                    window with a separate profile for each browser, not your everyday one, so log in to LinkedIn again
+                    after switching.
+                  </p>
+                </div>
+              </Group>
+              <Group>
+                <SettingSwitch
+                  label="Stealth mode"
+                  checked={stealthEnabled}
+                  onChange={setStealthEnabled}
+                  description="Hide the signals that mark the browser as automated (navigator.webdriver, missing plugins, headless WebGL fingerprints) and drop the automation launch flags. The browser already runs visibly, not headless."
+                  className=""
+                />
+
+                <SettingSwitch
+                  label="Human-like delays"
+                  checked={humanDelayEnabled}
+                  onChange={setHumanDelayEnabled}
+                  description="Wait a random amount of time between applications instead of starting the next one immediately. Slows a run down by roughly the average delay per job."
+                  className="mt-5 pt-5 border-t border-border"
+                />
+
+                {humanDelayEnabled && (
+                  <div className="flex items-end gap-3 mt-4">
+                    <div>
+                      <label htmlFor="delay-min" className="block text-sm font-semibold text-foreground mb-1.5">
+                        Min seconds
+                      </label>
+                      <input
+                        id="delay-min"
+                        type="number"
+                        min={0}
+                        max={300}
+                        value={humanDelayMin}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setHumanDelayMin(Math.max(0, Math.min(300, isNaN(v) ? 5 : v)));
+                        }}
+                        className="input-base !w-28"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="delay-max" className="block text-sm font-semibold text-foreground mb-1.5">
+                        Max seconds
+                      </label>
+                      <input
+                        id="delay-max"
+                        type="number"
+                        min={0}
+                        max={300}
+                        value={humanDelayMax}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          setHumanDelayMax(Math.max(0, Math.min(300, isNaN(v) ? 15 : v)));
+                        }}
+                        className="input-base !w-28"
+                      />
+                    </div>
+                    {humanDelayMax < humanDelayMin && (
+                      <p className="text-[13px] text-destructive pb-2">Max must be at least the min.</p>
+                    )}
+                  </div>
                 )}
-              </div>
-            </div>
+              </Group>
+              <Group>
+                <SettingSwitch
+                  label="Solve CAPTCHAs with 2Captcha"
+                  checked={captchaEnabled}
+                  onChange={setCaptchaEnabled}
+                  description="When a CAPTCHA appears, send it to 2Captcha (max 2 attempts per application). If solving fails — or this is off — the job is marked Needs you (so you can apply yourself), and the agent moves to the next job. Your API key is never included in prompts or logs."
+                  className=""
+                />
+                {captchaEnabled && (
+                  <div className="mt-4">
+                    <label htmlFor="captcha-key" className="block text-sm font-semibold text-foreground mb-1.5">
+                      2Captcha API key
+                    </label>
+                    <PasswordInput
+                      id="captcha-key"
+                      value={captchaApiKey}
+                      onChange={(e) => setCaptchaApiKey(e.target.value)}
+                      placeholder="Your 2Captcha API key"
+                      className="input-base"
+                    />
+                  </div>
+                )}
+              </Group>
+            </>
+          ))}
+          {panel("appearance", loadFailed ? loadError : (
+            <>
+              <Group first>
+                <label className="block text-sm font-semibold text-foreground mb-2">{t("appearance.theme", "Theme")}</label>
+                <div className="flex gap-2" role="radiogroup" aria-label={t("appearance.theme", "Theme")}>
+                  {([
+                    { mode: "light" as const, label: t("appearance.light", "Light"), Icon: Sun },
+                    { mode: "dark" as const, label: t("appearance.dark", "Dark"), Icon: Moon },
+                    { mode: "system" as const, label: t("appearance.system", "System"), Icon: Monitor },
+                  ]).map(({ mode, label, Icon }) => (
+                    <button
+                      key={mode}
+                      role="radio"
+                      aria-checked={theme === mode}
+                      onClick={() => handleThemeChange(mode)}
+                      className={`filter-tab flex items-center gap-1.5 ${theme === mode ? "filter-tab-active" : "filter-tab-inactive"}`}
+                    >
+                      <Icon className="w-3.5 h-3.5" /> {label}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[13px] text-muted-foreground mt-2">{t("appearance.description", "Choose light, dark, or follow your system setting.")}</p>
+              </Group>
+              <Group>
+                <SettingSwitch
+                  label="Usage Analytics"
+                  checked={telemetryEnabled}
+                  onChange={(on) => {
+                    setTelemetryEnabled(on);
+                    setAnalyticsTelemetry(on);
+                  }}
+                  description="Off unless you turn it on. Sends which features you use and error reports (an error message can include a page or file name). Never your profile, resume, answers or job list. Only in builds set up with analytics keys."
+                  className=""
+                />
+              </Group>
+            </>
           ))}
         </div>
-        <button onClick={handleImportPlugin} className="btn-secondary">
-          <Upload className="w-4 h-4" /> Import Plugin
-        </button>
-      </Section>
+      </div>
+    </div>
+  );
+}
+
+
+/** One block of a category: an optional label (a setting's own name), separated from the one above. */
+function Group({ label, first = false, children }: { label?: string; first?: boolean; children: React.ReactNode }) {
+  return (
+    <div className={first ? "" : "mt-5 pt-5 border-t border-border"}>
+      {label && <h3 className="text-sm font-semibold text-foreground mb-2">{label}</h3>}
+      {children}
     </div>
   );
 }

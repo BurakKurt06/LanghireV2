@@ -148,3 +148,95 @@ async def test_a_clean_close_still_reaps_the_browsers_descendants(tmp_path):
             if _still_running(process):
                 process.kill()
         gc.collect()
+
+
+
+def _stop_scenario(monkeypatch, hard_kill):
+    """An application run on one of the app's own profiles, through the app's worker thread: a site
+    sets a cookie, the run keeps working, the user presses Stop. Returns (seconds until the run ended
+    or None, the cookie a fresh browser finds on the profile afterwards)."""
+    import http.server
+    import threading
+    import time
+
+    import psutil
+
+    import main
+    from browser_use import BrowserSession
+    from core import shared_config
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            if self.path == "/set":
+                self.send_header("Set-Cookie", "kept=yes; Max-Age=86400; Path=/")
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<title>local</title>")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    profile = main.get_data_dir() / "browser_profile"   # one of the app's own profiles: Stop sweeps it
+    monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {"browser_allowed_local_hosts": ["localhost"]})
+    monkeypatch.setattr(shared_config, "selected_browser", lambda settings=None: (conftest.live_browser(), profile))
+    if hard_kill:   # Windows: terminate() is TerminateProcess
+        monkeypatch.setattr(psutil.Process, "terminate", psutil.Process.kill)
+
+    def session():
+        kwargs = shared_config.build_browser_kwargs()
+        kwargs.update(headless=True, enable_default_extensions=False)
+        return BrowserSession(**kwargs)
+
+    cookie_set = threading.Event()
+
+    async def run():   # as apply_jobs does: the browser is killed in a finally
+        browser = session()
+        try:
+            await browser.start()
+            await browser.navigate_to(f"http://localhost:{server.server_port}/set")
+            cookie_set.set()
+            await asyncio.sleep(120)
+        finally:
+            await browser.kill()
+
+    async def read_cookie():
+        browser = session()
+        try:
+            await browser.start()
+            await browser.navigate_to(f"http://localhost:{server.server_port}/read")
+            return await (await browser.get_current_page()).evaluate("() => document.cookie")
+        finally:
+            await browser.kill()
+
+    status = {"running": False, "log": []}
+    thread = main._run_async_in_thread(run, status)
+    try:
+        assert cookie_set.wait(60), "the run never reached the page"
+        started = time.monotonic()
+        main._force_stop(status)
+        thread.join(30)
+        ended = None if status["running"] else time.monotonic() - started
+        main._kill_browser_processes()   # a hung run's browser must not hold the profile for the read
+        return ended, asyncio.run(read_cookie())
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_stop_ends_the_run_while_its_browser_is_open(monkeypatch):
+    """Stop cancelled every task on the run's loop, browser-use's own event bus too: the run's
+    browser.kill() then waited for an event nobody would handle, so the run never ended and stayed
+    "running" (a new run was refused) until the app restarted."""
+    ended, _ = _stop_scenario(monkeypatch, hard_kill=False)
+    assert ended is not None, "the run was still running 30 s after Stop"
+
+
+def test_stop_lets_the_browser_close_cleanly_so_a_cookie_just_set_is_kept(monkeypatch):
+    """With Windows' hard kill, Stop's sweep lost what the site stored just before. Stop now waits
+    briefly for the clean close the cancellation starts (user's decision 11-01)."""
+    ended, cookie = _stop_scenario(monkeypatch, hard_kill=True)
+    assert ended is not None, "the run was still running 30 s after Stop"
+    assert cookie == "kept=yes", "the cookie set just before Stop was lost"

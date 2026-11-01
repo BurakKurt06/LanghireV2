@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import Inbox from "./Inbox";
 import { getInbox, checkInbox, setInboxSchedule, makePrepSheet } from "../lib/api";
 import type { InboxStatus } from "../lib/types";
+import { INBOX_SCHEDULE_LABELS } from "../lib/inbox";
 
 vi.mock("../lib/api", () => ({
   getInbox: vi.fn(),
@@ -43,13 +44,16 @@ describe("Inbox", () => {
     expect(screen.getByText("Northwind")).toBeInTheDocument();
   });
 
-  it("checks now and changes the schedule", async () => {
+  it("checks now, and shows the automatic schedule with a link to change it in Settings", async () => {
     const user = userEvent.setup();
     render(<Inbox />);
     await user.click(await screen.findByRole("button", { name: /Check now/ }));
     expect(checkInbox).toHaveBeenCalled();
-    await user.selectOptions(screen.getByLabelText("Check automatically"), "weekly");
-    expect(setInboxSchedule).toHaveBeenCalledWith("weekly");
+    // The schedule is changed in Settings → Accounts & email (tested in Settings.test.tsx).
+    expect(screen.queryByRole("combobox", { name: "Check automatically" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Check automatically:/).parentElement).toHaveTextContent(INBOX_SCHEDULE_LABELS[base.schedule]);
+    expect(screen.getByRole("link", { name: "Change in Settings" })).toHaveAttribute("href", "#/settings?section=accounts");
+    expect(setInboxSchedule).not.toHaveBeenCalled();
   });
 
   it("shows progress and errors", async () => {

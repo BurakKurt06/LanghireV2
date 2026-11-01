@@ -36,7 +36,7 @@ CODEX_CLIENT_VERSION = "0.999.0"
 REFRESH_MARGIN_SECONDS = 300
 LOGIN_TIMEOUT_SECONDS = 600
 
-SIGN_IN_AGAIN = "Sign in to ChatGPT again in Settings → LLM."
+SIGN_IN_AGAIN = "Sign in to ChatGPT again in Settings → AI model."
 
 
 class ChatGPTAuthError(RuntimeError):

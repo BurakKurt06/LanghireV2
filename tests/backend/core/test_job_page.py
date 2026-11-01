@@ -317,6 +317,20 @@ def test_pay_written_in_the_description_is_found_when_the_data_has_none():
     assert job_page.parse("https://jobs.example.com/1", 200, page(OG.format("Analyst"))).pay is None
 
 
+def test_a_zero_salary_in_the_posting_data_falls_back_to_the_pay_in_its_text():
+    """Reed writes baseSalary 0 on some postings whose pay is only in the text (user's decision 11-01:
+    never drop a paying job over a placeholder 0)."""
+    ld = ('<script type="application/ld+json">{"@type": "JobPosting", "title": "Customer Service Advisor", '
+          '"hiringOrganization": {"name": "Acme Test Ltd"}, '
+          '"baseSalary": {"currency": "GBP", "value": {"value": 0, "unitText": "YEAR"}}, '
+          '"description": "Initial 1 year temp, \u00a314.85 per hour."}</script>')
+    posting = job_page.parse("https://www.reed.co.uk/jobs/customer-service-advisor/1", 200, page(ld), currency="GBP")
+    assert (posting.pay.low, posting.pay.currency, posting.pay.period) == (14.85, "GBP", "hour")
+    no_text = ld.replace(", \u00a314.85 per hour.", ".")
+    assert no_text != ld
+    assert job_page.parse("https://www.reed.co.uk/jobs/x/2", 200, page(no_text), currency="GBP").pay is None
+
+
 @pytest.mark.parametrize("og, title, company, place", [
     # 2026 LinkedIn pages; "&" arrives escaped twice.
     ("Senior Data Analyst at Acme Test Co — New York, NY | LinkedIn Jobs", "Senior Data Analyst", "Acme Test Co", "New York, NY"),

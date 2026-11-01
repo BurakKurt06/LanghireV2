@@ -103,13 +103,17 @@ describe("Profile page", () => {
     );
   });
 
-  it("shows date of birth for US profiles too, and the AI instructions box", async () => {
+  it("shows date of birth for US profiles too; the AI instructions and job search are linked in Settings", async () => {
     mockGetProfile.mockResolvedValue({ ...sampleProfile, notes: "Use Apply with resume first." } as CandidateProfile);
     render(<Profile />);
     expect(await screen.findByText("personal.dateOfBirth")).toBeInTheDocument();
-    expect(screen.getByText("notes.title")).toBeInTheDocument();
-    expect(screen.getByText("notes.hint")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("Use Apply with resume first.")).toBeInTheDocument();
+    // Moved to Settings (Applications, Job search); tested in Settings.test.tsx.
+    expect(screen.queryByText("notes.title")).not.toBeInTheDocument();
+    expect(screen.queryByDisplayValue("Use Apply with resume first.")).not.toBeInTheDocument();
+    expect(screen.queryByText("jobSearch.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("searchArea.title")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "movedJobSearch" })).toHaveAttribute("href", "#/settings?section=job-search");
+    expect(screen.getByRole("link", { name: "movedInstructions" })).toHaveAttribute("href", "#/settings?section=applications");
   });
 
   it("renders fetched profile values into the inputs", async () => {
@@ -117,8 +121,7 @@ describe("Profile page", () => {
     expect(await screen.findByDisplayValue("Ada Lovelace")).toBeInTheDocument();
     expect(screen.getByDisplayValue("ada@example.com")).toBeInTheDocument();
     expect(screen.getByDisplayValue("Engineer")).toBeInTheDocument();
-    // Tags from the loaded profile render.
-    expect(screen.getByText("Backend Engineer")).toBeInTheDocument();
+    // Tags from the loaded profile render (target job titles are in Settings → Job search now).
     expect(screen.getByText("Python")).toBeInTheDocument();
   });
 
@@ -259,18 +262,14 @@ describe("Profile page", () => {
     expect(screen.getByRole("button", { name: "save" })).toBeInTheDocument();
   });
 
-  it("sets a search area and a field-of-study fallback", async () => {
-    mockGetProfile.mockResolvedValue({ ...sampleProfile, address: { street: "", city: "", state: "", zip: "10001", country: "USA" } } as CandidateProfile);
+  it("sets a field-of-study fallback (the search area is in Settings → Job search)", async () => {
     const user = userEvent.setup();
     render(<Profile />);
-    expect(await screen.findByText("searchArea.title")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("10001")).toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText("searchArea.radius"), "50");
+    await screen.findByDisplayValue("Ada Lovelace");
     await user.type(screen.getByPlaceholderText("education.majorAlternativePlaceholder"), "Finance");
     await user.click(screen.getByRole("button", { name: "save" }));
     await waitFor(() =>
       expect(mockSaveProfile).toHaveBeenCalledWith(expect.objectContaining({
-        search_area: { center_zip: "", radius: "50" },
         education: expect.objectContaining({ major_alternative: "Finance" }),
       })),
     );
@@ -289,18 +288,31 @@ describe("Profile labels", () => {
     expect(screen.getAllByLabelText(/./).length).toBeGreaterThan(5);
   });
 
-  it("saves the Job search preferences with the profile", async () => {
-    mockGetProfile.mockResolvedValue({ ...sampleProfile } as CandidateProfile);
+  it("saving keeps what Settings saved meanwhile (job search, AI instructions): only Profile's own fields", async () => {
     const user = userEvent.setup();
+    const elsewhere = {
+      ...sampleProfile,
+      target_job_titles: ["Data Analyst"],
+      target_locations: ["Remote"],
+      search_area: { center_zip: "02139", radius: "25" },
+      job_search: { mode: "detailed", notes: "Mornings only" },
+      notes: "New instructions",
+    };
+    mockGetProfile
+      .mockResolvedValueOnce({ ...sampleProfile } as CandidateProfile)
+      .mockResolvedValueOnce(elsewhere as unknown as CandidateProfile);
     render(<Profile />);
-    expect(await screen.findByText("jobSearch.title")).toBeInTheDocument();
-    await user.click(screen.getByRole("checkbox", { name: "Part-time" }));
-    await user.type(screen.getByLabelText("jobSearch.notes"), "Mornings only");
+    const name = await screen.findByDisplayValue("Ada Lovelace");
+    await user.clear(name);
+    await user.type(name, "Grace Hopper");
     await user.click(screen.getByRole("button", { name: "save" }));
-    await waitFor(() =>
-      expect(mockSaveProfile).toHaveBeenCalledWith(expect.objectContaining({
-        job_search: expect.objectContaining({ job_types: ["part_time"], notes: "Mornings only", mode: "quick" }),
-      })),
-    );
+    await waitFor(() => expect(mockSaveProfile).toHaveBeenCalledTimes(1));
+    const saved = mockSaveProfile.mock.calls[0][0];
+    expect(saved.name).toBe("Grace Hopper");
+    expect(saved.target_job_titles).toEqual(["Data Analyst"]);
+    expect(saved.target_locations).toEqual(["Remote"]);
+    expect(saved.search_area).toEqual({ center_zip: "02139", radius: "25" });
+    expect(saved.job_search).toEqual({ mode: "detailed", notes: "Mornings only" });
+    expect(saved.notes).toBe("New instructions");
   });
 });

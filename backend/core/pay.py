@@ -274,6 +274,11 @@ def from_json_ld(item: dict, default_currency: str = "USD") -> Pay | None:
         high = float(str(high if high is not None else low).replace(",", ""))
     except (TypeError, ValueError):
         return None
+    if max(low, high) <= 0:
+        # Boards such as Reed write 0 when the pay is only in the text: no pay information here
+        # (user's decision 11-01: never drop a paying job over a placeholder 0). The caller reads the
+        # description next; with no pay anywhere the job takes the no-pay rule.
+        return None
     currency = str(base.get("currency") or (value.get("currency") if isinstance(value, dict) else "") or "").upper()
     period = _UNITS.get(unit, "")
     inferred = not period

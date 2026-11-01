@@ -937,6 +937,20 @@ class _LogCapture(io.StringIO):
 _run_metrics_start_lock = threading.Lock()
 
 
+def _finish_leftover_tasks(loop, timeout: float = 10.0) -> None:
+    """As asyncio.run does when its main task ends: cancel the tasks still pending on the run's loop
+    and let them finish (bounded), so nothing is destroyed while pending."""
+    try:
+        pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        loop.run_until_complete(asyncio.wait(pending, timeout=timeout))
+    except Exception as e:
+        _log.warning(f"Leftover tasks after the run didn't finish cleanly: {e}")
+
+
 def _run_async_in_thread(coro_factory, status_dict):
     """Run an async function in a new thread with its own event loop, capturing stdout and logs."""
     run_id = str(uuid.uuid4())[:8]
@@ -989,7 +1003,11 @@ def _run_async_in_thread(coro_factory, status_dict):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             status_dict["_loop"] = loop
-            loop.run_until_complete(coro_factory())
+            # Stop cancels this task only: cancelling every task on the loop also cancelled
+            # browser-use's event bus, so the run's browser.kill() waited forever for it.
+            task = loop.create_task(coro_factory())
+            status_dict["_task"] = task
+            loop.run_until_complete(task)
             with _status_lock:
                 if status_dict.get("cancel_requested"):
                     status_dict["log"].append("🛑 Stopped by user")
@@ -1011,12 +1029,14 @@ def _run_async_in_thread(coro_factory, status_dict):
             _run_captures.pop(run_id, None)
             if metrics:
                 metrics.close()
+            _finish_leftover_tasks(loop)
             loop.close()
             with _status_lock:
                 status_dict["running"] = False
                 status_dict["cancel_requested"] = False
                 status_dict["finished_at"] = datetime.now().isoformat()
             status_dict.pop("_loop", None)
+            status_dict.pop("_task", None)
 
     status_dict["running"] = True
     status_dict["cancel_requested"] = False
@@ -1048,6 +1068,34 @@ def _uses_owned_profile(cmdline: list[str], prefixes: tuple[str, ...]) -> bool:
     return False
 
 
+STOP_CLEAN_CLOSE_SECONDS = 2.0
+
+
+def _owned_browser_processes() -> list:
+    """Browser processes running on this app's automation profiles."""
+    import psutil
+    prefixes = _owned_profile_prefix()
+    found = []
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if _uses_owned_profile(proc.info.get("cmdline") or [], prefixes):
+                found.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    return found
+
+
+def _wait_for_browsers_to_close(timeout: float) -> None:
+    """Wait up to `timeout` seconds for the app's browsers to exit on their own."""
+    try:
+        import psutil
+        browsers = _owned_browser_processes()
+        if browsers:
+            psutil.wait_procs(browsers, timeout=timeout)
+    except Exception as e:
+        _log.warning(f"Couldn't wait for the browsers to close: {e}")
+
+
 def _kill_browser_processes():
     """Close browsers running on this app's automation profiles (and nothing else).
 
@@ -1061,14 +1109,7 @@ def _kill_browser_processes():
         _log.warning("psutil missing: leftover automation browsers were not closed")
         return
     try:
-        prefixes = _owned_profile_prefix()
-        procs_to_kill = []
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-            try:
-                if _uses_owned_profile(proc.info.get("cmdline") or [], prefixes):
-                    procs_to_kill.append(proc)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+        procs_to_kill = _owned_browser_processes()
         for proc in procs_to_kill:
             try:
                 proc.terminate()
@@ -1123,12 +1164,22 @@ def _force_stop(status_dict):
             return
         status_dict["cancel_requested"] = True
 
-    # Cancel all tasks in the worker's event loop
+    # Cancel the run; its finally blocks close its browsers cleanly (browser_lifecycle).
     loop = status_dict.get("_loop")
+    task = status_dict.get("_task")
+    cancelled = False
     if loop and loop.is_running():
-        for task in asyncio.all_tasks(loop):
+        if task is not None:
             loop.call_soon_threadsafe(task.cancel)
+        else:
+            for each in asyncio.all_tasks(loop):
+                loop.call_soon_threadsafe(each.cancel)
+        cancelled = True
 
+    if cancelled:
+        # A short, bounded wait for that clean close (user's decision 11-01): the sweep below is a
+        # hard kill on Windows and would lose what a site stored in the run's last moments.
+        _wait_for_browsers_to_close(STOP_CLEAN_CLOSE_SECONDS)
     _kill_browser_processes()
     with _status_lock:
         status_dict["log"].append("🛑 Force stopped")
@@ -2077,7 +2128,7 @@ def _inbox_check_now() -> dict:
     import core.shared_config as shared
     llm_settings = load_llm_settings()
     if not llm_settings.get("provider"):
-        return {"error": "No AI model set up. Choose one in LLM Settings first.", "new": 0}
+        return {"error": "No AI model set up. Choose one in Settings → AI model first.", "new": 0}
     llm = create_llm(llm_settings)
     loop = asyncio.new_event_loop()
     try:
@@ -2105,7 +2156,7 @@ async def check_inbox():
     """Check Gmail now (or as soon as the current application run ends)."""
     from core import inbox
     if not load_llm_settings().get("provider"):
-        return _api_error("no_llm", "No AI model set up. Choose one in LLM Settings first.")
+        return _api_error("no_llm", "No AI model set up. Choose one in Settings → AI model first.")
     inbox.request_check()
     return {"success": True}
 
@@ -2131,7 +2182,7 @@ async def make_prep_sheet(body: dict):
         return _api_error("not_found", "Email not found", 404)
     llm_settings = load_llm_settings()
     if not llm_settings.get("provider"):
-        return _api_error("no_llm", "No AI model set up. Choose one in LLM Settings first.")
+        return _api_error("no_llm", "No AI model set up. Choose one in Settings → AI model first.")
     job = read_jobs().get(email.get("job_url") or "") if email.get("job_url") else None
     posting = await asyncio.to_thread(job_page.fetch, email["job_url"]) if job else None
     from cli.apply_jobs import resume_text
@@ -2361,7 +2412,7 @@ async def parse_resume_to_profile():
     # 2. Send to LLM for structured extraction
     llm_settings = load_llm_settings()
     if not llm_settings.get("provider"):
-        return {"success": False, "message": "No LLM provider configured. Set it in LLM Settings first."}
+        return {"success": False, "message": "No LLM provider configured. Set it in Settings → AI model first."}
 
     try:
         from core.llm_factory import create_llm
@@ -2516,11 +2567,11 @@ def _llm_ready(llm: dict) -> bool:
 def _start_problem(apply: bool) -> str:
     """Why a run can't start yet ("" when it can): without these, every job would just fail."""
     if not _llm_ready(load_llm_settings()):
-        return "Set up an AI model in LLM Settings first."
+        return "Set up an AI model in Settings → AI model first."
     if apply:
         resume = (load_settings().get("resume_path") or "").strip()
         if not resume or not Path(resume).is_file():
-            return "Choose your resume PDF in Settings first."
+            return "Choose your resume PDF in Settings → Applications first."
         if not (load_profile().get("name") or "").strip():
             return "Fill in your name in Profile first."
     return ""

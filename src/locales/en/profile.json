@@ -161,5 +161,8 @@
     "cooldown": "Employers you applied to recently",
     "cooldownOff": "Collect them too",
     "cooldownDays": "Skip for {{days}} days"
-  }
+  },
+  "movedToSettings": "Job search preferences and the instructions for the AI are in Settings:",
+  "movedJobSearch": "Job search",
+  "movedInstructions": "Applications (instructions for the AI)"
 }

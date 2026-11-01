@@ -51,10 +51,15 @@ vi.mock("./components/SetupWizard", () => ({
 }));
 vi.mock("./pages/Dashboard", () => ({ default: () => <div>Dashboard Page</div> }));
 vi.mock("./pages/Profile", () => ({ default: () => <div>Profile Page</div> }));
-vi.mock("./pages/LLMSettings", () => ({ default: () => <div>LLM Page</div> }));
 vi.mock("./pages/Jobs", () => ({ default: () => <div>Jobs Page</div> }));
 vi.mock("./pages/Memory", () => ({ default: () => <div>Memory Page</div> }));
-vi.mock("./pages/Settings", () => ({ default: () => <div>Settings Page</div> }));
+vi.mock("./pages/Settings", async () => {
+  const { useLocation } = await import("react-router-dom");
+  function SettingsPage() {
+    return <div>Settings Page {useLocation().search}</div>;
+  }
+  return { default: SettingsPage };
+});
 vi.mock("./pages/Logs", () => ({ default: () => <div>Logs Page</div> }));
 vi.mock("./pages/Guide", () => ({ default: () => <div>Guide Page</div> }));
 vi.mock("./pages/Feedback", () => ({ default: () => <div>Feedback Page</div> }));
@@ -99,6 +104,11 @@ describe("App", () => {
   it("renders the route matching the current location (lazy-loaded)", async () => {
     renderApp(["/jobs"]);
     expect(await screen.findByText("Jobs Page")).toBeInTheDocument();
+  });
+
+  it("/llm (old links, Ctrl+4) opens Settings → AI model", async () => {
+    renderApp(["/llm"]);
+    expect(await screen.findByText("Settings Page ?section=ai-model")).toBeInTheDocument();
   });
 
   it("redirects /apply to /jobs", async () => {

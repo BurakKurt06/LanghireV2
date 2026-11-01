@@ -54,7 +54,6 @@ describe("Sidebar", () => {
       "nav.dashboard",
       "nav.guide",
       "nav.profile",
-      "nav.llmSettings",
       "nav.jobs",
       "nav.memory",
       "nav.qa",
@@ -65,6 +64,8 @@ describe("Sidebar", () => {
     for (const key of expectedNav) {
       expect(screen.getByText(key)).toBeInTheDocument();
     }
+    // The AI model is a Settings category now (/llm still opens it).
+    expect(screen.queryByText("nav.llmSettings")).not.toBeInTheDocument();
   });
 
   it("renders nav items as links pointing at the right routes", () => {

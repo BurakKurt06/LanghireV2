@@ -35,18 +35,18 @@
       "essential": "Essential fields:",
       "essentialDesc": "Name, Email, Phone — these appear on every application.",
       "targetTitles": "Target Job Titles:",
-      "targetTitlesDesc": "These are the search terms used when collecting jobs from LinkedIn. Add multiple titles to cast a wider net (e.g., \"Data Analyst\", \"Business Analyst\", \"Junior Data Scientist\").",
+      "targetTitlesDesc": "These are the search terms used when collecting jobs from LinkedIn. Add multiple titles to cast a wider net (e.g., \"Data Analyst\", \"Business Analyst\", \"Junior Data Scientist\"). Set them in Settings → Job search.",
       "targetLocations": "Target Locations:",
-      "targetLocationsDesc": "Geographic preferences for job search (e.g., \"San Francisco, CA\", \"Remote\").",
+      "targetLocationsDesc": "Geographic preferences for job search (e.g., \"San Francisco, CA\", \"Remote\"). Set them in Settings → Job search.",
       "skills": "Skills:",
       "skillsDesc": "These help the agent answer skills-related questions on application forms.",
       "notes": "Notes:",
-      "notesDesc": "Free-text instructions for the AI agent. Use this for special instructions like \"Only apply to fully remote positions\" or \"I prefer companies under 500 employees.\""
+      "notesDesc": "Free-text instructions for the AI agent. Use this for special instructions like \"Only apply to fully remote positions\" or \"I prefer companies under 500 employees.\" Write them in Settings → Applications (Instructions for the AI)."
     },
     "aiProvider": {
       "title": "Configuring your AI provider",
       "intro": "The AI model is the \"brain\" that drives the browser automation. It reads web pages, decides what to click, fills in form fields, and answers application questions. Go to",
-      "linkText": "LLM Settings",
+      "linkText": "Settings → AI model",
       "introEnd": "to configure it.",
       "recommended": "Recommended:",
       "recommendedDesc": "OpenAI GPT-4o or Anthropic Claude Sonnet — both work well. Cost is typically $0.02–0.10 per application depending on form complexity.",
@@ -98,7 +98,7 @@
       "limitDesc": "Set a number to cap how many jobs to apply to in one session. Leave blank for no limit.",
       "blockedDomains": "Blocked domains:",
       "blockedDomainsDesc": "If certain sites cause issues, add them to the blocked list in",
-      "blockedDomainsLink": "Settings",
+      "blockedDomainsLink": "Settings → Job search",
       "blockedDomainsEnd": ". The agent will skip jobs on those domains."
     },
     "memory": {
