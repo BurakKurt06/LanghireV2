@@ -121,7 +121,8 @@ def _still_running(process):
         return False
 
 
-async def test_a_clean_close_still_reaps_the_browsers_descendants(tmp_path):
+@pytest.mark.parametrize("expire_child", [False, True], ids=["ordinary", "child-exits-before-snapshot"])
+async def test_a_clean_close_still_reaps_the_browsers_descendants(tmp_path, monkeypatch, expire_child):
     """After Browser.close the kill's own snapshot found the browser gone and recorded no
     descendants, so none could be reaped. They are recorded before the close, and none outlive the kill.
     (A zombie, left by a container init that does not reap orphans, has exited.)"""
@@ -136,15 +137,59 @@ async def test_a_clean_close_still_reaps_the_browsers_descendants(tmp_path):
     await browser.start()
     watchdog = browser._local_browser_watchdog
     child = watchdog.__dict__[browser_lifecycle._STATE].children[0]
-    before = watchdog._subprocess.children(recursive=True)
+    initially_running = watchdog._subprocess.children(recursive=True)
+    before = []
+    children = child.root.children
+
+    def observed_children(*args, **kwargs):
+        # Observe the exact list production consumes. A separate earlier read
+        # can include a renderer that has already exited by the cleanup read.
+        captured = children(*args, **kwargs)
+        before.extend(captured)
+        return captured
+
+    monkeypatch.setattr(child.root, "children", observed_children)
+    expired = False
+    if expire_child:
+        snapshot = child.snapshot
+
+        def snapshot_after_child_exit():
+            nonlocal expired
+            if not expired:
+                import psutil
+                # A separate Process instance keeps this setup read out of the
+                # production-snapshot observer. Only this owned browser is used.
+                candidates = psutil.Process(child.root.pid).children(recursive=True)
+                renderer = None
+                for candidate in candidates:
+                    try:
+                        if "--type=renderer" in candidate.cmdline():
+                            renderer = candidate
+                            break
+                    except psutil.NoSuchProcess:
+                        pass
+                assert renderer is not None, "the test browser had no renderer to expire"
+                initially_running.append(renderer)
+                renderer.terminate()
+                renderer.wait(timeout=5)
+                assert not _still_running(renderer)
+                expired = True
+            return snapshot()
+
+        monkeypatch.setattr(child, "snapshot", snapshot_after_child_exit)
     try:
         await browser.kill()
+        assert not expire_child or expired, "the child-exit regression was not exercised"
+        assert initially_running, "the test browser had no descendants"
         assert before and child.descendants, "the browser's descendants were not recorded"
         assert {p.pid for p in before} <= {p.pid for p in child.descendants}
         assert not any(_still_running(p) for p in before)
+        assert not any(_still_running(p) for p in initially_running)
+        assert child.process.returncode is not None and child.process._transport.is_closing()
+        assert all(t.done() and not t.cancelled() and t.exception() is None for t in child.readers)
         assert not net_guard._profile_in_use(profile)
     finally:
-        for process in before:
+        for process in [*initially_running, *before]:
             if _still_running(process):
                 process.kill()
         gc.collect()
