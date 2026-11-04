@@ -131,3 +131,82 @@ async def test_trial_still_uploads_a_resume_on_an_upload_step(wire_site, monkeyp
         '<h1>Documents</h1><form method="post" action="/upload-step" enctype="multipart/form-data">'
         '<input type="file" name="resume"><button id="upload">Upload resume</button></form>')
     assert sent and not result.error, result.error
+
+
+@pytest.mark.parametrize('mode', ['trial', 'auto'])
+@pytest.mark.parametrize('activation', ['click', 'coordinate', 'Enter', 'input'])
+@pytest.mark.parametrize('markup', [
+    '<h1>Review your application</h1><button id="final" type="button">Apply</button>',
+    '<button id="final" type="button" aria-label="Submit application">Continue</button>',
+    '<span id="final-label">Submit application</span><button id="final" type="button" aria-labelledby="final-label">Continue</button>',
+])
+async def test_default_trial_final_controls_without_native_forms(wire_site, monkeypatch, mode, markup, activation):
+    """An agent click must not activate a final SPA control; Auto is the wire control."""
+    local, seen, site = wire_site
+    url = 'https://careers.example.test/review'
+    site['html'] = markup + """<script>
+      document.querySelector('#final').onclick = () => fetch('/final', {
+        method: 'POST', body: 'local-final-application'
+      });</script>"""
+    from tests.backend.core.test_request_gate_live import bridge_to
+    browser, gate = await browser_and_gate(mode, url, transport_factory=bridge_to(local), strict_trial_protocols=False)
+    monkeypatch.setattr(apply_jobs, 'update_job', lambda *a, **kw: True)
+    apply_jobs.set_run_mode(mode)
+    try:
+        tools = apply_jobs.build_tools({'url': url, 'company': 'Acme', 'title': 'Local'}, '', mode == 'trial', {'request_gate': gate}, 1)
+    finally:
+        apply_jobs.set_run_mode('auto')
+    try:
+        await browser.navigate_to(url)
+        state = await browser.get_browser_state_summary()
+        index = next(i for i, node in state.dom_state.selector_map.items() if node.attributes.get('id') == 'final')
+        action, params = 'click', {'index': index}
+        if activation == 'coordinate':
+            tools.set_coordinate_clicking(True)
+            point = await browser_policy.evaluate(browser, "() => {const r=document.querySelector('#final').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};}")
+            params = {'coordinate_x': int(point['x']), 'coordinate_y': int(point['y'])}
+        elif activation == 'Enter':
+            await browser_policy.evaluate(browser, "() => {document.querySelector('#final').focus();return true;}")
+            action, params = 'send_keys', {'keys': 'Enter'}
+        elif activation == 'input':
+            action, params = 'input', {'index': index, 'text': ' '}
+        result = await tools.registry.execute_action(action, params, browser_session=browser)
+        if mode == 'auto':
+            assert not result.error, result
+            assert await wait_for(lambda: ('POST', '/final', b'local-final-application') in seen, gate)
+        else:
+            await asyncio.sleep(.3)
+            await gate.wait_idle()
+            assert 'final submission is disabled' in (result.error or '') and not any(r[0] == 'POST' for r in seen), (result, seen)
+        assert gate.healthy() and not request_gate.pending() and not apply_jobs.pending_reviews()
+    finally:
+        await gate.close()
+
+
+async def test_default_trial_initial_apply_and_native_next_still_progress(wire_site, monkeypatch):
+    from tests.backend.core.test_request_gate_live import bridge_to
+    local, seen, site = wire_site
+    url = 'https://careers.example.test/job'
+    site['responses'] = {
+        '/job': (200, {}, b'''<div style="opacity:0"><h1>Review your application</h1></div>
+          <button id="action" type="button" onclick="location.href='/prepare'">Apply now</button>'''),
+        '/prepare': (200, {}, b'<h1>Review your application</h1><form method="post" action="/next"><input name="answer" value="local"><button id="action">Next</button></form>'),
+    }
+    browser, gate = await browser_and_gate('trial', url, transport_factory=bridge_to(local), strict_trial_protocols=False)
+    monkeypatch.setattr(apply_jobs, 'update_job', lambda *a, **kw: True)
+    apply_jobs.set_run_mode('trial')
+    try:
+        tools = apply_jobs.build_tools({'url': url, 'company': 'Acme', 'title': 'Local'}, '', True, {'request_gate': gate}, 1)
+    finally:
+        apply_jobs.set_run_mode('auto')
+    try:
+        await browser.navigate_to(url)
+        for _ in range(2):
+            state = await browser.get_browser_state_summary()
+            index = next(i for i, node in state.dom_state.selector_map.items() if node.attributes.get('id') == 'action')
+            result = await tools.registry.execute_action('click', {'index': index}, browser_session=browser)
+            assert not result.error, result
+        assert await wait_for(lambda: ('POST', '/next', b'answer=local') in seen, gate)
+        assert ('GET', '/prepare') in seen and gate.healthy() and not request_gate.pending()
+    finally:
+        await gate.close()

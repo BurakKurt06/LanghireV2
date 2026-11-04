@@ -77,6 +77,7 @@ class Control:
     document_url: str = ""
     hidden_tree: bool = False  # inside a closed shadow root: the form scan (and so a review) can't see it
     final_context: bool = False  # readable page heading identifies the final application/review step
+    application_review: bool = False  # generic review heading identifies Apply, without reclassifying Next
     submitter_text: str = ""  # native default submitter, for Enter/newline in a form field
     text_alternative: str = ""  # retain visible text when an accessible name overrides it
     submitter_alternative: str = ""
@@ -106,6 +107,10 @@ class Control:
     def is_final_submit(self) -> bool:
         """Activating it could send the application (a possible submit)."""
         if any(is_submit_label(text) for text in self.labels):
+            return True
+        if (self.in_form is True or self.final_context or self.application_review) and any(
+            re.fullmatch(r"\s*(?:" + _APPLY_WORD + r")[.!\s]*", text, re.I) for text in self.labels
+        ):
             return True
         return self.native_submit
 
@@ -196,8 +201,8 @@ class SubmitGuard:
             return bool(re.fullmatch(r"\s*(?:" + _APPLY_WORD + r")[.!\s]*", label, re.I))
 
         label_final = any(is_submit_label(label) and not intermediate(label) for label in labels)
-        final_apply = bool(self.mode == "trial" and self.live_steps and not self.strict_network
-            and control is not None and control.in_form is True
+        final_apply = bool((self.mode == "auto" or (self.mode == "trial" and self.live_steps and not self.strict_network))
+            and control is not None and (control.in_form is True or control.final_context or control.application_review)
             and any(apply_label(label) for label in labels))
         context_final = bool(control is not None and control.final_context and (
             control.native_submit or (control.activatable and not control.combo and control.role != "combobox"
@@ -379,16 +384,19 @@ _CONTROL_NAME_JS = r"""
 _FORM_CONTEXT_JS = r"""
   function formContext(el) {
     const doc = el.ownerDocument;
-    const headings = Array.from(doc.querySelectorAll('h1,h2,h3,[aria-current=step]')).slice(0,30)
-      .filter(n => { const r=n.getBoundingClientRect(); return r.width>0 && r.height>0; })
-      .map(n => n.innerText || n.textContent || '').join(' ').slice(0,2000);
+    const visibleHeadings = Array.from(doc.querySelectorAll('h1,h2,h3,[aria-current=step]')).slice(0,30)
+      .filter(n => { const r=n.getBoundingClientRect(); return r.width>0 && r.height>0 &&
+        !n.closest('[hidden],[aria-hidden=true]') &&
+        (!n.checkVisibility || n.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})); });
+    const headings = visibleHeadings.map(n => n.innerText || n.textContent || '').join(' ').slice(0,2000);
     const final = /\bfinal\b.{0,50}\b(application|review|step)\b|\blast\s+step\b|\breview\s+(and|&)\s+submit\b|\bstep\s+(\d+)\s+(?:of|\/)\s+\3\b/i.test(headings);
+    const application_review = visibleHeadings.some(n => /^\s*(?:review(?:\s+(?:your|the))?\s+application|application\s+review)\s*[.!:]?\s*$/i.test(n.innerText || n.textContent || ''));
     const form = el.form || (el.closest && el.closest('form'));
     const root = form && form.getRootNode();
     const buttons = root ? Array.from(root.querySelectorAll('button,input')) : [];
     const submitter = buttons.find(n => n.form === form && (n.type === 'submit' || n.type === 'image'));
     const submitter_pseudo = submitter ? generatedControlName(submitter) : '';
-    return {final_context: final, submitter_text: submitter ? controlName(submitter, submitter_pseudo) : '',
+    return {final_context: final, application_review, submitter_text: submitter ? controlName(submitter, submitter_pseudo) : '',
       submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo};
   }
 """

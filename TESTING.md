@@ -22,6 +22,16 @@ final-control checking. Intermediate native Submit profile/resume/code and Next
 are allowed; explicit final controls are checked for click/Enter/Space/type
 activation. Whole-form approval scanning is unnecessary for this mode.
 
+The recovered October29 regressions also exercise final SPA controls outside
+native forms: Apply beside a visible application-review heading, and controls
+whose aria-label/aria-labelledby says Submit application despite different visible
+text. Indexed clicks, coordinate clicks, Enter and typed Space use independently
+read target metadata. Initial Apply navigation and native Next have positive
+local HTTP controls. Collection's production _open_browser is separately tested
+with runtime third-party scripts and a jobs API: built-in reads work while writes,
+private/Gmail requests, hidden listings and sealed-page requests remain refused;
+imported plugins retain their narrower policy.
+
 ---
 
 # Testing Guide

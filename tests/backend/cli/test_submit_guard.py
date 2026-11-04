@@ -301,7 +301,7 @@ def test_labels_that_say_submit(label, submit):
     (dict(text="Sign in and apply", tag="button", type="submit", in_form=True), True),
     # Not a form submit: outside any form, or a script button.
     (dict(text="Next", tag="button", in_form=False), False),
-    (dict(text="Apply Now", tag="button", type="button", in_form=True), False),
+    (dict(text="Apply Now", tag="button", type="button", in_form=True), True),
     (dict(text="Apply Now", tag="a", in_form=False), False),
 ])
 def test_form_submit_buttons_count_whatever_they_say(control, submit):

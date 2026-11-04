@@ -229,3 +229,72 @@ async def test_only_observed_canonical_jobs_can_be_opened_not_job_shaped_payload
         assert request_gate.pending()==[]
     finally:
         await gate.close()
+
+
+@pytest.mark.parametrize('builtin', [True, False])
+async def test_production_collector_loads_runtime_third_party_reads_without_write_authority(wire_site, data_dir, monkeypatch, builtin):
+    """Use _open_browser, dynamic chunks/API and actual wire evidence; no public traffic."""
+    from dataclasses import replace
+    import httpx
+    from browser_use import BrowserSession
+    from core import job_page, shared_config
+    from core.browsers import find_browser
+    from sources.registry import PluginRegistry
+    from tests.backend.core.test_request_gate_live import wait_for
+
+    local, seen, site = wire_site
+    url = 'https://www.linkedin.com/jobs/search/?keywords=Local'
+    site['html'] = '''<div id="jobs" hidden></div><script>
+      const s=document.createElement('script');s.src='https://bot.example.test/bootstrap.js';document.head.append(s);
+      </script>'''
+    site['responses'] = {
+        '/bootstrap.js': (200, {'Content-Type': 'application/javascript'}, b"{const s=document.createElement('script');s.src='https://chunks.example.test/runtime.js';document.head.append(s);}"),
+        '/runtime.js': (200, {'Content-Type': 'application/javascript'}, b"""
+          fetch('https://www.linkedin.com/jobs/api').then(r=>r.text()).then(html=>{
+            document.querySelector('#jobs').innerHTML=html;document.querySelector('#jobs').hidden=false;
+          });
+          fetch('https://www.linkedin.com/write',{method:'POST',body:'must-not-send'}).catch(()=>{});
+          fetch('https://mail.google.com/mail/u/0/').catch(()=>{});
+          fetch('https://127.0.0.1/private').catch(()=>{});
+        """),
+        '/jobs/api': (200, {}, b'<a style="display:block;width:200px;height:40px" href="https://www.linkedin.com/jobs/view/1234567890/">Local Analyst</a><a hidden href="https://www.linkedin.com/jobs/view/9999999999/">Hidden trap</a>'),
+    }
+    monkeypatch.setattr(shared_config, 'selected_browser', lambda settings: (find_browser('brave') or find_browser('chrome'), data_dir/'browser'))
+    monkeypatch.setattr(shared_config, 'load_runtime_settings', lambda: {})
+    def headless(**kwargs):
+        kwargs['args'] = [arg for arg in kwargs.get('args', []) if not arg.startswith('--host-resolver-rules=')] + ['--host-resolver-rules=MAP * ~NOTFOUND']
+        return BrowserSession(headless=True, **kwargs)
+    monkeypatch.setattr(collect_jobs, 'BrowserSession', headless)
+    real_gate = request_gate.RequestGate
+    class LocalPages(httpx.BaseTransport):
+        def __init__(self):
+            self.pages, self.other = bridge_to(local)(), job_page._PinnedTransport()
+        def handle_request(self, request):
+            if request.url.host in {'www.linkedin.com', 'bot.example.test', 'chunks.example.test'}:
+                return self.pages.handle_request(request)
+            return self.other.handle_request(request)  # real private-address check, never mocked public
+        def close(self):
+            self.pages.close()
+            self.other.close()
+    monkeypatch.setattr(request_gate, 'RequestGate', lambda *a, **kw: real_gate(*a, **kw, transport_factory=LocalPages))
+    plugin = replace(PluginRegistry().get_by_name('linkedin'), is_builtin=builtin)
+    browser, gate = collect_jobs._open_browser(plugin, url, 'Local Analyst')
+    try:
+        assert gate.collection_policy.any_public_reads == builtin
+        await browser.start()
+        await gate.start()
+        await browser.navigate_to(url)
+        if builtin:
+            assert await wait_for(lambda: ('GET', '/jobs/api') in seen, gate), seen
+        await asyncio.sleep(.5)
+        result = await browser_policy.collection_evaluate(browser, collect_jobs.LISTING_JS, [r'/jobs/view/(\d+)'], 60)
+        assert {c['id'] for c in result['cards']} == ({'1234567890'} if builtin else set()), (result, seen)
+        assert (('GET', '/runtime.js') in seen) == builtin
+        assert not any(r[0] != 'GET' or r[1] in ('/private', '/mail/u/0/', '/write') for r in seen), seen
+        gate.collection_policy.seal()
+        await browser_policy.evaluate(browser, "() => {fetch('/sealed').catch(()=>{});return true;}")
+        await asyncio.sleep(.2)
+        assert ('GET', '/sealed') not in seen
+        assert gate.healthy() and not request_gate.pending()
+    finally:
+        await gate.close()

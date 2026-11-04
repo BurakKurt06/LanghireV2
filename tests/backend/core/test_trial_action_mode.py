@@ -193,3 +193,27 @@ def test_default_submitter_css_text_remains_final_when_its_accessible_name_is_ne
         submitter_text='Next', submitter_pseudo='Submit application')
     decision = guard.decide(action, control, text=text)
     assert decision.submit and not decision.allowed
+
+
+@pytest.mark.parametrize('action,text', [('click', ''), ('send_keys', 'Enter'), ('send_keys', 'Space'), ('input', ' ')])
+@pytest.mark.parametrize('control', [
+    submit_guard.Control(text='Apply', tag='button', type='button', in_form=False, application_review=True),
+    submit_guard.Control(text='Continue', tag='button', type='button', in_form=False, text_alternative='Submit application'),
+    submit_guard.Control(text='Submit profile', tag='button', type='button', in_form=False, text_alternative='Submit application'),
+])
+def test_review_and_accessible_final_controls_cannot_be_activated(control, action, text):
+    decision = submit_guard.SubmitGuard(mode='trial', live_steps=True).decide(action, control, text=text)
+    assert not decision.allowed and decision.submit
+
+
+@pytest.mark.parametrize('label', ['Apply', 'Apply now', 'Next', 'Submit profile'])
+def test_landing_and_intermediate_controls_remain_automatic(label):
+    control = submit_guard.Control(text=label, tag='button', type='button', in_form=False, text_alternative=label)
+    assert submit_guard.SubmitGuard(mode='trial', live_steps=True).decide('click', control).allowed
+
+
+@pytest.mark.parametrize('action,text', [('click', ''), ('send_keys', 'Enter')])
+def test_generic_application_review_heading_does_not_turn_next_into_final_submit(action, text):
+    control = submit_guard.Control(text='Next', tag='button', type='submit', in_form=True, application_review=True)
+    decision = submit_guard.SubmitGuard(mode='trial', live_steps=True).decide(action, control, text=text)
+    assert decision.allowed and not decision.submit
