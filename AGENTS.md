@@ -11,6 +11,11 @@ backend) that collects job listings and fills in applications in a real browser.
   Before publishing: run the checks below and scan for personal data.
   Leave out internal review files (`REMEDIATION.md`, `CODEX_RESPONSE.md`,
   `CODEX_RESUME_CHECKPOINT.md`, `SETTINGS_REORG_PLAN.md`, `security/`).
+- **Installer releases:** both READMEs link to the public repo's
+  `releases/latest/download/LangHireV2-setup.exe`. A publish that changes the app raises the version
+  (`package.json` + lockfile, `src-tauri/tauri.conf.json`, `backend/main.py`, `src/main.tsx`); after
+  the public Integration Tests pass on that push, `build.yml` builds and publishes release
+  `v<version>` automatically (README → Releasing).
 
 ## Hard rules
 

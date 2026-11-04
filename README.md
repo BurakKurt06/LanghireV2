@@ -9,6 +9,11 @@
   An independent fork of <a href="https://github.com/jaimaann/LangHire">LangHire</a> (MIT).
 </p>
 
+<p align="center">
+  <a href="https://github.com/BurakKurt06/LanghireV2/releases/latest/download/LangHireV2-setup.exe"><b>⬇ Download LangHireV2 for Windows (LangHireV2-setup.exe)</b></a><br />
+  <sub>Always the newest release · <a href="https://github.com/BurakKurt06/LanghireV2/releases/latest">release notes</a> · see <a href="#install">Install</a> before running it</sub>
+</p>
+
 ---
 
 ## What this is
@@ -27,11 +32,10 @@ and fill in applications. It is a **personal fork**, not a distribution:
 
 ## Install
 
-If this repository's [Releases page](../../releases) lists a release, download the
-`LangHireV2_<version>_x64-setup.exe` file under its **Assets**. If it lists none,
-build the installer yourself (see [Building from source](#building-from-source)); it lands in
-`src-tauri/target/release/bundle/nsis/`. Installing a newer version over an older one keeps
-your settings, profile and jobs.
+Download **[LangHireV2-setup.exe](https://github.com/BurakKurt06/LanghireV2/releases/latest/download/LangHireV2-setup.exe)** (Windows 10/11, x64). The link always gives the newest
+release; its notes are on the [Releases page](https://github.com/BurakKurt06/LanghireV2/releases/latest). Installing a newer version over an older one
+keeps your settings, profile and jobs. You can also build the installer yourself (see
+[Building from source](#building-from-source)); it lands in `src-tauri/target/release/bundle/nsis/`.
 
 The installer isn't code-signed. Before running a downloaded copy, right-click the `.exe` →
 **Properties**, tick **Unblock** at the bottom of the General tab and click **OK**. Windows
@@ -219,12 +223,18 @@ uv run pytest tests/
 
 ### Releasing
 
-Raise the version in `package.json` (and its lockfile) and `src-tauri/tauri.conf.json`,
-then run the **Build & Release** workflow with **release** ticked (or push a `v<version>`
-tag, for example `v1.1.0`). It builds the Windows installer and publishes it as release
-`v<version>` on the repository it runs in (a published copy of this repository has no releases
-until a release is made there too). A manual run
-without **release** only builds (the installer is a 7-day download on the run's page).
+The download link above always points to the newest release of the public repository
+([BurakKurt06/LanghireV2](https://github.com/BurakKurt06/LanghireV2)). To ship a new installer, raise
+the version in `package.json` (and its lockfile) and `src-tauri/tauri.conf.json` (and the matching
+strings in `backend/main.py` and `src/main.tsx`), then push it to the public repository's `main`.
+When the **Integration Tests** run for that push passes, **Build & Release** builds the installer
+from that exact commit and publishes release `v<version>` with two copies of the same installer:
+`LangHireV2_<version>_x64-setup.exe` and `LangHireV2-setup.exe` (the fixed name the link uses).
+A push that keeps the version builds nothing, and nothing is released from a commit whose tests failed.
+
+You can also run **Build & Release** by hand from the Actions page: it only builds (the installer is
+a 7-day download on the run's page), or with **release** ticked it publishes `v<version>` or
+replaces that release's files. Pushing a `v<version>` tag publishes that release too.
 
 ## Safety boundaries and remaining limits
 

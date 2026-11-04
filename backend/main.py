@@ -102,7 +102,7 @@ def _stop_operations_and_browsers():
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHireV2 Backend", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.2.0", lifespan=lifespan)
 
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
@@ -599,7 +599,7 @@ async def health():
     all_ok = db_ok and chromium_ok and llm_configured
     return {
         "status": "ok" if all_ok else "degraded",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "frozen": getattr(sys, 'frozen', False),
         "checks": {
             "database": db_ok,

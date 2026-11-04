@@ -2,6 +2,8 @@
 
 All notable changes to this project are documented in this file.
 
+LangHireV2 (this fork) lists its releases, from v1.1.0 on, on the [Releases page](https://github.com/BurakKurt06/LanghireV2/releases). The entries below are the original LangHire project's history, which uses its own version numbers.
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.4.0](https://github.com/jaimaann/LangHire/compare/v1.3.0...v1.4.0) - 2026-05-06
