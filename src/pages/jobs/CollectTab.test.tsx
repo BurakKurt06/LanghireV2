@@ -35,7 +35,7 @@ vi.mock("../../lib/api", () => ({
   addJob: vi.fn(),
   addJobsBulk: vi.fn(),
   getSettings: vi.fn(),
-  saveProfile: vi.fn(),
+  patchProfile: vi.fn(),
   getSavedSearches: vi.fn(),
   saveSavedSearches: vi.fn(),
   getFilteredJobs: vi.fn(),

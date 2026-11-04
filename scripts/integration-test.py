@@ -319,14 +319,29 @@ def main():
         print("Testing from SOURCE")
 
     print(f"Starting backend on port {TEST_PORT}...")
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # The backend's output goes to a file: an undrained pipe can fill up and stall it, and reading a
+    # pipe of a process that is still alive never ends (review R19).
+    log_path = os.path.join(TEST_HOME, "backend-output.log")
+    log_file = open(log_path, "wb")
+    proc = subprocess.Popen(cmd, env=env, stdout=log_file, stderr=subprocess.STDOUT)
+
+    def stop_backend():
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+        log_file.close()
 
     try:
         if not wait_for_backend():
             print("FATAL: Backend did not start within timeout")
-            if proc.stdout:
-                output = proc.stdout.read().decode(errors="replace")
-                print(f"Output (last 2000 chars):\n{output[-2000:]}")
+            stop_backend()
+            with open(log_path, "rb") as f:
+                output = f.read().decode(errors="replace")
+            print(f"Output (last 2000 chars):\n{output[-2000:]}")
             sys.exit(1)
 
         TOKEN = read_token()
@@ -358,11 +373,7 @@ def main():
         sys.exit(0 if failed == 0 else 1)
 
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stop_backend()
         shutil.rmtree(TEST_HOME, ignore_errors=True)
 
 

@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release v<version> (version from src-tauri/tauri.conf.json); off = build only"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -59,10 +64,11 @@ jobs:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
         with:
-          # A release only for a v* tag push; a manual run from a branch just builds
+          # A release for a v* tag push, or a manual run with "release" ticked (tag v<version>, made
+          # on this commit; __VERSION__ is the app's version). Otherwise a manual run only builds
           # (its installer is uploaded below) instead of drafting a release named after the branch.
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: 'LangHireV2 ${{ github.ref_name }}'
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (inputs.release && 'v__VERSION__' || '') }}
+          releaseName: 'LangHireV2 v__VERSION__'
           releaseBody: |
             ## Download
 
@@ -77,7 +83,8 @@ jobs:
             - Windows 10 or 11 (x64). Python is bundled; no separate install.
             - The app downloads Chromium (~150 MB) on first launch.
             - An AI provider: an API key (OpenRouter, OpenAI, Anthropic, Gemini, Ollama or Bedrock) or a ChatGPT Plus/Pro plan.
-          releaseDraft: true
+          # Published (not a draft): the README's download link points to the latest release.
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
 

@@ -142,7 +142,10 @@ async def test_pages_and_script_saves_go_through_without_questions(wire_site, mo
             assert ('GET','/') in seen and ('GET','/pixel') in seen and not request_gate.pending()
             assert all(r[0] == 'GET' and r[1] in ('/', '/pixel', '/favicon.ico') for r in seen), seen
             return
-        assert await wait_for(lambda: ("POST", "/sent", b"candidate") in seen and ("GET", "/pixel") in seen, gate)
+        # The local server records a request before the gate counts it as sent (the count is updated
+        # when the response is back on the gate's loop), so wait for both.
+        assert await wait_for(lambda: ("POST", "/sent", b"candidate") in seen and ("GET", "/pixel") in seen
+                              and gate.sent >= 3, gate)
         assert request_gate.pending() == [] and gate.sent >= 3
     finally:
         await gate.close()
@@ -242,7 +245,8 @@ async def test_new_documents_go_through_the_gate_from_their_first_request(wire_s
             child_url = url.replace("127.0.0.1", "localhost") + "child"
             await page.evaluate("() => {let f=document.createElement('iframe');f.src='" + child_url
                                 + "';document.body.append(f);}")
-        assert await wait_for(lambda: ("POST", "/sent", b"child document") in seen, gate)
+        # As above: the server sees a request before the gate counts it, so wait for both.
+        assert await wait_for(lambda: ("POST", "/sent", b"child document") in seen and gate.sent >= before + 2, gate)
         assert gate.sent >= before + 2
     finally:
         await gate.close()

@@ -11,15 +11,15 @@ const softwareSchema = {
   '@context': 'https://schema.org',
   '@type': 'SoftwareApplication',
   name: 'LangHire',
-  description: 'AI-powered job application automation with a native desktop UI. Uses browser agents to search LinkedIn, fill out applications, and submit — with a self-learning memory system.',
+  description: 'AI-powered job application automation with a native desktop UI. Uses browser agents to collect jobs from ten job boards and fill out applications, with a memory of what worked.',
   applicationCategory: 'ProductivityApplication',
-  operatingSystem: 'macOS, Windows, Linux',
+  operatingSystem: 'Windows',
   offers: {
     '@type': 'Offer',
     price: '0',
     priceCurrency: 'USD',
   },
-  downloadUrl: 'https://github.com/jaimaann/LangHire/releases/latest',
+  downloadUrl: 'https://github.com/BurakKurt06/LanghireV2/releases',
   softwareVersion: '1.0.0',
   license: 'https://opensource.org/licenses/MIT',
 };
@@ -27,7 +27,7 @@ const softwareSchema = {
 
 <BaseLayout
   title="LangHire - AI-Powered Job Application Automation"
-  description="Automate your job applications with AI. LangHire uses browser agents to search LinkedIn, fill out applications, upload your resume, and submit — with a self-learning memory system. Free, open source, 100% local."
+  description="Automate your job applications with AI. LangHireV2 uses browser agents to collect jobs from ten job boards, fill out applications and upload your resume, with a memory of what worked. Free, open source, for Windows; your data stays on your machine."
 >
   <StructuredData data={softwareSchema} />
   <Hero />

@@ -127,11 +127,24 @@ def _vault_path() -> Path:
     return get_data_dir() / "site_credentials.json"
 
 
-def _load_vault() -> dict:
+class VaultUnreadable(RuntimeError):
+    """The saved employer-passwords file exists but can't be read: it is kept as it is."""
+
+
+def _vault_state() -> tuple[dict, bool]:
+    """(the vault, whether it could be read). A missing file is an empty, readable vault."""
+    path = _vault_path()
     try:
-        return json.loads(_vault_path().read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, True
     except (OSError, ValueError):
-        return {}
+        return {}, False
+    return (data, True) if isinstance(data, dict) else ({}, False)
+
+
+def _load_vault() -> dict:
+    return _vault_state()[0]
 
 
 def generate_password(length: int = 20) -> str:
@@ -153,7 +166,7 @@ def site_password(site: str, create: bool = True, *, migrate_from: str | None = 
     if not site:
         return ""
     with _lock:
-        vault = _load_vault()
+        vault, readable = _vault_state()
         entry = vault.get(site)
         if entry:
             try:
@@ -162,6 +175,11 @@ def site_password(site: str, create: bool = True, *, migrate_from: str | None = 
                 return ""
         if not create:
             return ""
+        if not readable:
+            # Writing now would replace the damaged file and every password still in it (review R08).
+            raise VaultUnreadable(
+                f"The saved employer passwords ({_vault_path().name}) can't be read, so no new account "
+                "password was made; the file was left as it is. Restore or move it, then try again.")
         # Only trusted approval code supplies migrate_from. The old entry is
         # retained; this never silently aliases a newly approved origin.
         previous = vault.get(migrate_from or "")

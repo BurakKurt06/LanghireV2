@@ -27,74 +27,61 @@ This project follows a standard code of conduct. Be respectful, inclusive, and c
 
 ### Prerequisites
 
-Make sure you have these installed:
-
 | Tool | Version | Check | Install |
 |------|---------|-------|---------|
-| **Node.js** | 18+ | `node --version` | [nodejs.org](https://nodejs.org) |
-| **npm** | 9+ | `npm --version` | Comes with Node.js |
-| **Rust** | 1.77+ | `rustc --version` | [rustup.rs](https://rustup.rs) |
-| **Python** | 3.13+ | `python3 --version` | [python.org](https://python.org) |
-| **uv** | latest | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| **Node.js** | 22.12+ (22.22+ for the website) | `node --version` | [nodejs.org](https://nodejs.org) |
+| **npm** | comes with Node.js | `npm --version` | |
+| **Rust** | 1.77+ (MSVC toolchain on Windows) | `rustc --version` | [rustup.rs](https://rustup.rs) |
+| **uv** | latest | `uv --version` | [docs.astral.sh/uv](https://docs.astral.sh/uv/) |
 | **Git** | 2+ | `git --version` | [git-scm.com](https://git-scm.com) |
 
-### Fork & Clone
+uv installs the project's Python (3.13) itself. Building the Windows installer also needs Visual
+Studio Build Tools with the **Desktop development with C++** workload.
+
+### Clone
 
 ```bash
-# 1. Fork the repo on GitHub (click "Fork" button)
-
-# 2. Clone your fork
-git clone https://github.com/YOUR_USERNAME/langhire.git
-cd langhire
-
-# 3. Add upstream remote
-git remote add upstream https://github.com/ORIGINAL_OWNER/langhire.git
+git clone https://github.com/BurakKurt06/LanghireV2.git
+cd LanghireV2
 ```
 
 ### Install Dependencies
 
 ```bash
-# Install Node.js dependencies (frontend + Tauri)
-npm install
-
-# Install Python dependencies (backend + automation)
-uv sync
-
-# Install Playwright browser for automation
-uv run python -m playwright install chromium
+# Exactly the locked versions; never --upgrade
+npm ci
+uv sync --locked
 ```
+
+The app downloads its own Chromium on first launch (about 150 MB); no separate browser install is needed.
 
 ### Verify Setup
 
 ```bash
-# Start the backend (Terminal 1)
+# Start the backend (Terminal 1); it listens on port 8743
 uv run python backend/main.py
-# Should print: "Starting backend on port 8742"
 
-# Start the frontend (Terminal 2)
+# Start the frontend (Terminal 2); Vite serves http://localhost:1420
 npm run dev
-# Should print: "VITE ready" and open http://localhost:1420
 
-# Verify backend health
-curl http://127.0.0.1:8742/health
-# Should return: {"status":"ok","version":"1.0.0"}
+# Backend health
+curl http://127.0.0.1:8743/health
+```
+
+Every endpoint except `/health` needs the app's API token, which the desktop shell passes in;
+in a plain browser on port 1420 most requests return 401. Use the desktop app (below) for
+anything beyond the health check.
+
+Checks to run before a pull request (also in `AGENTS.md`):
+
+```bash
+uv run python -B -m pytest tests/backend -p no:cacheprovider
+npx vitest run && npx tsc -b --noEmit && npx eslint .
 ```
 
 ---
 
 ## Development Environment
-
-### Two-Terminal Workflow
-
-For day-to-day development, run both processes:
-
-```bash
-# Terminal 1: Python backend (auto-reloads on save)
-uv run python backend/main.py
-
-# Terminal 2: Vite dev server (HMR, instant reload)
-npm run dev
-```
 
 ### Native Desktop App
 
@@ -102,8 +89,11 @@ To test as a native desktop app:
 
 ```bash
 # This compiles the Rust shell + starts Vite + opens native window
-cargo tauri dev
+npm run tauri dev
 ```
+
+The shell starts the backend as a sidecar (`externalBin` in `src-tauri/tauri.conf.json`), so build it
+once first: `powershell -ExecutionPolicy Bypass -File scripts/build-backend.ps1`.
 
 > ⚠️ First run takes ~2 minutes to compile Rust. Subsequent runs are fast.
 
@@ -114,8 +104,8 @@ cargo tauri dev
 | `src/` | TypeScript/React | Frontend UI components |
 | `backend/` | Python | FastAPI REST API server |
 | `src-tauri/` | Rust | Tauri native shell |
-| `memory/` | Python | Agent memory system |
-| `*.py` (root) | Python | CLI automation scripts |
+| `backend/memory/` | Python | Agent memory and Q&A store |
+| `cli/` | Python | Collection and application runs |
 
 ---
 
@@ -146,10 +136,10 @@ User → React UI → HTTP API → Python Backend → {
 ### Create a Branch
 
 ```bash
-# Sync with upstream
-git fetch upstream
+# Start from the latest main
+git fetch origin
 git checkout main
-git merge upstream/main
+git merge origin/main
 
 # Create a feature branch
 git checkout -b feature/your-feature-name
@@ -171,9 +161,9 @@ git checkout -b feature/your-feature-name
 |--------------|---------------|
 | Add a new UI page | `src/pages/NewPage.tsx` + `src/App.tsx` (route) + `src/components/layout/Sidebar.tsx` (nav) |
 | Add a backend endpoint | `backend/main.py` + `src/lib/api.ts` (client function) |
-| Add an LLM provider | `backend/core/llm_factory.py` + `src/pages/LLMSettings.tsx` |
-| Add an ATS platform | `memory/store.py` (`ATS_DOMAINS` + `DOMAIN_NORMALIZATION`) |
-| Add a memory category | `memory/store.py` (`CATEGORIES` dict) |
+| Add an LLM provider | `backend/core/llm_factory.py` + `src/components/forms/LLMSettingsForm.tsx` |
+| Add an ATS platform | `backend/memory/store.py` (`ATS_DOMAINS` + `DOMAIN_NORMALIZATION`) |
+| Add a memory category | `backend/memory/store.py` (`CATEGORIES` dict) |
 | Change app styling | `src/index.css` (Tailwind theme vars) |
 
 ---
@@ -414,12 +404,12 @@ The AI agent (powered by an LLM + Playwright browser) will follow your prompts t
 #### Installing Your Plugin
 
 **For personal use:**
-1. Open LangHire → Settings → Plugins section
+1. Open LangHireV2 → Settings → Job sources
 2. Click "Import Plugin"
 3. Select your `.yaml` file
 4. The plugin appears in the job source dropdown for matching countries
 
-**Or manually:** Copy your `.yaml` file to `~/.langhire/plugins/` (macOS: `~/Library/Application Support/langhire/plugins/`)
+**Or manually:** Copy your `.yaml` file to `%APPDATA%\langhirev2\plugins\` (the app's data folder).
 
 #### Sharing with the Community
 

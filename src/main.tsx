@@ -15,7 +15,7 @@ if (SENTRY_DSN) {
   Sentry.init({
     dsn: SENTRY_DSN,
     environment: import.meta.env.MODE,
-    release: "langhirev2@1.0.0",
+    release: "langhirev2@1.1.0",
     tracesSampleRate: 0,
     // Breadcrumbs carry recent console lines and request addresses (job links, names): not sent.
     beforeBreadcrumb: () => null,

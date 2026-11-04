@@ -5,6 +5,7 @@ permission hardening), and the profile / llm_settings / app-settings
 load/save roundtrips and defaults.
 """
 import json
+from pathlib import Path
 import os
 import stat
 
@@ -75,15 +76,15 @@ def test_save_json_hardens_settings_permissions(tmp_path):
     assert mode == stat.S_IRUSR | stat.S_IWUSR
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
-def test_save_json_does_not_harden_other_files(tmp_path):
-    """Non-settings files are not chmod-restricted."""
-    p = tmp_path / "candidate_profile.json"
-    config._save_json(p, {"a": 1})
-    mode = stat.S_IMODE(p.stat().st_mode)
-    # Profile files keep default umask perms (group/other bits may be set).
-    assert mode != (stat.S_IRUSR | stat.S_IWUSR) or mode == (stat.S_IRUSR | stat.S_IWUSR)
-    # The important branch assertion: chmod is only invoked for settings names.
+def test_save_json_does_not_harden_other_files(tmp_path, monkeypatch):
+    """Only settings files are chmod-restricted (review R20: this used to assert `x or not x`)."""
+    calls = []
+    real_chmod = os.chmod
+    monkeypatch.setattr(os, "chmod", lambda path, mode, *a, **k: calls.append(Path(path).name) or real_chmod(path, mode, *a, **k))
+    config._save_json(tmp_path / "candidate_profile.json", {"a": 1})
+    assert calls == []
+    config._save_json(tmp_path / "llm_settings.json", {"a": 1})
+    assert calls == ["llm_settings.json"]
 
 
 def test_save_json_permission_failure_is_swallowed(tmp_path, monkeypatch):

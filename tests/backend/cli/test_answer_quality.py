@@ -205,7 +205,8 @@ def test_changed_fields():
     before = {"a": ("Name", "Ada"), "b": ("City", ""), "c": ("GPA", "3.2")}
     after = {"a": ("Name", "Ada"), "b": ("City", "Boston"), "c": ("GPA", ""), "d": ("New", "x")}
     # "New" only appeared during the wait: the page could have added it, so it isn't the user's edit.
-    assert form_snapshot.changed_fields(before, after) == [("City", "", "Boston")]
+    # A cleared field is an edit too (review R07): the agent must leave GPA empty.
+    assert form_snapshot.changed_fields(before, after) == [("City", "", "Boston"), ("GPA", "3.2", "")]
 
 
 def test_snapshot_without_a_page_is_empty():

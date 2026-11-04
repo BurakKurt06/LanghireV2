@@ -49,7 +49,7 @@
     "browser": "Browser & automation",
     "appearance": "Appearance & privacy"
   },
-  "aiModelHint": "The AI model has its own Save button.",
+  "aiModelHint": "The AI model saves as you change it.",
   "tailoringHint": "Saved as you change them. Review & Apply uses them when it tailors a resume.",
   "inboxHint": "How often the Inbox reads job emails from Gmail by itself. Saved as you change it."
 }

@@ -63,7 +63,7 @@ npm ci
 ```bash
 .venv/Scripts/python -B -m pytest tests/backend -p no:cacheprovider   # Linux: .venv/bin/python
 LANGHIRE_REAL_BROWSER=1 .venv/Scripts/python -B -m pytest tests/backend -k "collect or trial_action_mode"
-npx vitest run && npx tsc --noEmit -p . && npx eslint .
+npx vitest run && npx tsc -b --noEmit && npx eslint .
 ```
 
 pyproject already adds `-q`; a second `-q` hides pytest's final pass/fail count.

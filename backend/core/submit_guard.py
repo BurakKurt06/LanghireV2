@@ -22,9 +22,27 @@ _SUBMIT = re.compile(
     r"|\b(submit|send|complete|finish|finalize)\s+(my\s+|your\s+|the\s+)?application\b"
     r"|^\s*(complete|finish|finalize)\s*$"                      # a bare Finish / Complete
     r"|\bconfirm\s*(and|&)\s*(submit|apply|send)\b"
-    r"|\bsubmit\s*(and|&)\s*apply\b",
+    r"|\bsubmit\s*(and|&)\s*apply\b"
+    r"|\b(?:save|finish)\s*(?:and|&)\s*submit\b"
+    r"|^\s*(?:done|confirm)\s*$"
+    r"|\bbaşvuruyu\s+gönder\b|\bwyślij\s+aplikację\b|応募を送信"
+    # The same final controls on international employers' sites (German, French, Spanish, Portuguese,
+    # Italian, Dutch): "Bewerbung absenden", "Envoyer ma candidature", "Enviar solicitud", ...
+    r"|\bbewerbung\s+(jetzt\s+)?(absenden|abschicken|senden|einreichen|übermitteln|uebermitteln)\b"
+    r"|^\s*(absenden|abschicken|einreichen)\s*$"
+    r"|\b(envoyer|soumettre|valider)\s+(ma\s+|la\s+|votre\s+|mon\s+)?(candidature|dossier)\b"
+    r"|^\s*(envoyer|soumettre)\s*$"
+    r"|\b(enviar|presentar|submeter)\s+(mi\s+|la\s+|su\s+|a\s+|minha\s+|sua\s+)?(solicitud|candidatura|postulaci[oó]n|inscri[cç][aã]o)\b"
+    r"|^\s*enviar\s*$"
+    r"|\binvia(re)?\s+(la\s+)?(candidatura|domanda)\b"
+    r"|^\s*invia\s*$"
+    r"|\bsollicitatie\s+(versturen|verzenden|indienen)\b"
+    r"|^\s*(versturen|verzenden|indienen)\s*$",
     re.I,
 )
+# A form control saying "Apply" in another language (inside a form it sends the application).
+_APPLY_WORD = (r"apply(?:\s+now|\s+(?:for\s+)?(?:this\s+)?(?:job|position))?"
+               r"|(?:jetzt\s+)?bewerben|postuler|postular(?:me)?|candidatar(?:-se)?|candidati|solliciteren|solliciteer")
 # Submit buttons of other small forms on the way (a verification code, a search): not the application,
 # unless the label also says application / apply ("Submit application verification" still counts).
 _NOT_APPLICATION = re.compile(r"\b(code|otp|verif\w*|search|filter|feedback|question|comment|rating)\b", re.I)
@@ -58,6 +76,12 @@ class Control:
     multiline: bool = False   # textarea / contenteditable (Enter adds a line)
     document_url: str = ""
     hidden_tree: bool = False  # inside a closed shadow root: the form scan (and so a review) can't see it
+    final_context: bool = False  # readable page heading identifies the final application/review step
+    submitter_text: str = ""  # native default submitter, for Enter/newline in a form field
+    text_alternative: str = ""  # retain visible text when an accessible name overrides it
+    submitter_alternative: str = ""
+    text_pseudo: str = ""  # rendered CSS text remains evidence even when ARIA/title says Next
+    submitter_pseudo: str = ""
 
     def __post_init__(self):
         self.tag, self.type = (self.tag or "").lower(), (self.type or "").lower()
@@ -65,6 +89,11 @@ class Control:
             self.type = "submit"  # the HTML default
         if self.tag == "input":
             self.multiline = False  # contenteditable does not change a native input's Enter behavior
+
+    @property
+    def labels(self) -> tuple[str, ...]:
+        # A page's ARIA name must not hide final-submit text we could already read.
+        return tuple(dict.fromkeys(t for t in (self.text, self.text_alternative, self.text_pseudo) if t)) or ("",)
 
     @property
     def native_submit(self) -> bool:
@@ -76,7 +105,7 @@ class Control:
     @property
     def is_final_submit(self) -> bool:
         """Activating it could send the application (a possible submit)."""
-        if is_submit_label(self.text):
+        if any(is_submit_label(text) for text in self.labels):
             return True
         return self.native_submit
 
@@ -149,13 +178,41 @@ class SubmitGuard:
     def decide(self, action: str, control: Control | None, page_url: str = "", fingerprint: str = "",
                text: str = "") -> Decision:
         """Whether `action` may run. `control` is the element clicked / focused; `text` is typed text."""
-        intermediate = bool(self.mode == "trial" and self.live_steps and not self.strict_network
-            and control is not None and not re.search(r"\bappl(?:y|ication)\b", control.text or "", re.I)
-            and re.search(r"\b(?:profile|account|password|verification|code|otp|resume|document|upload)\b", control.text or "", re.I))
-        label_final = bool(control is not None and is_submit_label(control.text) and not intermediate)
+        # Steps on the way (an account, a code, an upload) are allowed like Next. A label that reads as a
+        # final submit and names the resume or documents ("Submit resume", "Submit documents") is final:
+        # one-page applications use it as their only Submit, often in a form with a file input, so neither
+        # the label nor the form tells it apart from an upload step. Attaching the file needs no button,
+        # and upload buttons ("Upload resume") stay allowed. (Codex review R01 and its re-check.)
+        labels = control.labels if control is not None else ()
+
+        def intermediate(label: str) -> bool:
+            return bool(self.mode == "trial" and self.live_steps and not self.strict_network
+                and control is not None and not control.final_context
+                and not re.search(r"\bappl(?:y|ication)\b", label, re.I)
+                and re.search(r"\b(?:profile|account|password|verification|code|otp|resume|document|upload)\b", label, re.I)
+                and not (is_submit_label(label) and re.search(r"\b(?:resume|cv|documents?)\b", label, re.I)))
+
+        def apply_label(label: str) -> bool:
+            return bool(re.fullmatch(r"\s*(?:" + _APPLY_WORD + r")[.!\s]*", label, re.I))
+
+        label_final = any(is_submit_label(label) and not intermediate(label) for label in labels)
         final_apply = bool(self.mode == "trial" and self.live_steps and not self.strict_network
             and control is not None and control.in_form is True
-            and re.fullmatch(r"\s*apply(?:\s+now|\s+(?:for\s+)?(?:this\s+)?(?:job|position))?[.!\s]*", control.text or "", re.I))
+            and any(apply_label(label) for label in labels))
+        context_final = bool(control is not None and control.final_context and (
+            control.native_submit or (control.activatable and not control.combo and control.role != "combobox"
+                and any(re.fullmatch(r"\s*(?:next|continue)[.!\s]*", label, re.I)
+                        or not re.search(r"\w", label) for label in labels))))
+        # Enter in an ordinary text field activates its form's default button. Inspect that button,
+        # rather than exempting the action because the field's own label does not say Submit.
+        implicit_final = bool(control is not None and (control.final_context or
+            any((is_submit_label(label) and not re.search(
+                    r"\b(?:profile|account|password|verification|code|otp)\b", label, re.I))
+                or (self.mode == "trial" and self.live_steps and not self.strict_network
+                    and control.tag == "input" and not control.activatable and control.enter_submits
+                    and apply_label(label))
+                for label in (control.submitter_text, control.submitter_alternative, control.submitter_pseudo))))
+        label_final = label_final or context_final
         final_control = bool(control is not None and (control.native_submit or label_final or final_apply))
         if action == "evaluate":
             if self.mode == "trial" and self.live_steps and self.strict_network:
@@ -213,7 +270,8 @@ class SubmitGuard:
                                            "in this field can submit the form).", submit=submit)
         if not submit:
             return Decision(True)
-        native_only = control is not None and not label_final and not final_apply
+        native_only = (control is not None and not label_final and not final_apply
+                       and not (implicit_final and action in ("send_keys", "input")))
         if self.mode == "trial" and self.live_steps and native_only:
             # Native form submission also powers login, saves and Next. Normal
             # Trial deliberately permits those requests, including site scripts;
@@ -266,6 +324,75 @@ def fingerprint(fields: list[dict], approval_state: list[dict] | None = None) ->
     return hashlib.sha256(json.dumps((canonical, approval_state), ensure_ascii=False).encode()).hexdigest()
 
 
+# Shared name lookup in the target's isolated world. Prefer explicit accessible names, but retain
+# the old visible/value label separately: ARIA saying "Next" must not hide a visible "Submit".
+_CONTROL_NAME_JS = r"""
+  function legacyControlName(el) {
+    return String(el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().slice(0,120);
+  }
+  function controlName(el, pseudo) {
+    const trim = value => String(value || '').trim().slice(0,120);
+    const root = el.getRootNode();
+    const ids = String(el.getAttribute('aria-labelledby') || '').trim().split(/\s+/).slice(0,32);
+    const referenced = ids.map(id => root.getElementById && root.getElementById(id))
+      .filter(Boolean).map(n => trim(n.innerText || n.textContent)).filter(Boolean).join(' ');
+    if (referenced) return trim(referenced);
+    const aria = trim(el.getAttribute('aria-label'));
+    if (aria) return aria;
+    if (el.tagName === 'IMG' || (el.tagName === 'INPUT' && el.type === 'image')) {
+      const alt = trim(el.getAttribute('alt'));
+      if (alt) return alt;
+    }
+    const text = trim(el.innerText || el.value);
+    if (text) return text;
+    const images = Array.from(el.querySelectorAll('img[alt]')).slice(0,16)
+      .map(n => trim(n.getAttribute('alt'))).filter(Boolean).join(' ');
+    if (images) return trim(images);
+    const title = trim(el.getAttribute('title'));
+    if (title) return title;
+    return trim(pseudo);
+  }
+  function generatedControlName(el) {
+    // Replaced/native field widgets don't render these pseudo-elements as button labels.
+    if (['INPUT','IMG','TEXTAREA','SELECT'].includes(el.tagName)) return '';
+    const fragments = [];
+    for (const pseudo of ['::before','::after']) {
+      const style = el.ownerDocument.defaultView.getComputedStyle(el, pseudo);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') continue;
+      const content = style.content;
+      // Only string content, never url()/counter()/none/normal. Decode CSS string escapes as text.
+      const strings = content.match(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g);
+      if (!strings || content.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '').trim()) continue;
+      fragments.push(strings.map(s => s.slice(1,-1).replace(/\\([0-9a-fA-F]{1,6}\s?|[\s\S])/g, (_, escaped) => {
+        if (!/^[0-9a-fA-F]/.test(escaped)) return /[\r\n\f]/.test(escaped) ? '' : escaped;
+        const code = parseInt(escaped.trim(),16);
+        return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd';
+      })).join(''));
+    }
+    return fragments.join(' ').trim().slice(0,120);
+  }
+"""
+
+# Read in the same isolated world as the target. A final-step heading is positive evidence;
+# a missing heading is not proof that a step is intermediate. The default submitter also matters
+# when Enter/newline in a field activates it without directly clicking that button.
+_FORM_CONTEXT_JS = r"""
+  function formContext(el) {
+    const doc = el.ownerDocument;
+    const headings = Array.from(doc.querySelectorAll('h1,h2,h3,[aria-current=step]')).slice(0,30)
+      .filter(n => { const r=n.getBoundingClientRect(); return r.width>0 && r.height>0; })
+      .map(n => n.innerText || n.textContent || '').join(' ').slice(0,2000);
+    const final = /\bfinal\b.{0,50}\b(application|review|step)\b|\blast\s+step\b|\breview\s+(and|&)\s+submit\b|\bstep\s+(\d+)\s+(?:of|\/)\s+\3\b/i.test(headings);
+    const form = el.form || (el.closest && el.closest('form'));
+    const root = form && form.getRootNode();
+    const buttons = root ? Array.from(root.querySelectorAll('button,input')) : [];
+    const submitter = buttons.find(n => n.form === form && (n.type === 'submit' || n.type === 'image'));
+    const submitter_pseudo = submitter ? generatedControlName(submitter) : '';
+    return {final_context: final, submitter_text: submitter ? controlName(submitter, submitter_pseudo) : '',
+      submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo};
+  }
+"""
+
 # The focused element (through shadow roots), for key presses.
 FOCUSED_JS = r"""() => {
   let el = document.activeElement;
@@ -284,11 +411,11 @@ FOCUSED_JS = r"""() => {
   if (!el || el === document.body || el === document.documentElement) return JSON.stringify(null);
   return JSON.stringify(describe(el));
   function describe(el) {
-    const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim().slice(0, 120);
+    const text_pseudo = generatedControlName(el), text = controlName(el, text_pseudo), text_alternative = legacyControlName(el);
     const role = el.getAttribute('role') || '';
     const combo = role === 'combobox' || el.hasAttribute('aria-autocomplete') || el.getAttribute('aria-haspopup') === 'listbox'
       || !!(el.closest && el.closest('[role=listbox],[role=combobox]'));
-    return { text, tag: el.tagName.toLowerCase(), type: String(el.type || el.getAttribute('type') || '').toLowerCase(), role,
+    return { ...formContext(el), text, text_alternative, text_pseudo, tag: el.tagName.toLowerCase(), type: String(el.type || el.getAttribute('type') || '').toLowerCase(), role,
              combo, in_form: !!(el.form || (el.closest && el.closest('form'))),
              multiline: el.tagName === 'TEXTAREA' || el.isContentEditable,
              document_url: el.ownerDocument.location.href };
@@ -304,8 +431,8 @@ AT_POINT_JS = r"""(x, y) => {
   // Use an element-index action there so its own document can be inspected.
   if (!el || el.tagName === 'IFRAME' || el.tagName === 'FRAME') return JSON.stringify(null);
   const target = el.closest('button, a, input, summary, [role=button], [role=link]') || el;
-  const text = (target.innerText || target.value || target.getAttribute('aria-label') || target.getAttribute('title') || '').trim().slice(0, 120);
-  return JSON.stringify({ text, tag: target.tagName.toLowerCase(), type: String(target.type || target.getAttribute('type') || '').toLowerCase(),
+  const text_pseudo = generatedControlName(target), text = controlName(target, text_pseudo), text_alternative = legacyControlName(target);
+  return JSON.stringify({ ...formContext(target), text, text_alternative, text_pseudo, tag: target.tagName.toLowerCase(), type: String(target.type || target.getAttribute('type') || '').toLowerCase(),
                           role: target.getAttribute('role') || '', in_form: !!(target.form || target.closest('form')),
                           document_url: target.ownerDocument.location.href });
 }"""
@@ -321,13 +448,18 @@ NODE_JS = """function() {
   const label = !own && start.closest && start.closest('label');
   const hit = (label && label.control) || start;
   const el = (hit.closest && hit.closest('button, a, input, summary, [role=button], [role=link]')) || hit;
-  const text = (el.innerText || el.value || (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '').trim().slice(0, 120);
+  const text_pseudo = generatedControlName(el), text = controlName(el, text_pseudo), text_alternative = legacyControlName(el);
   let hidden = false;
   for (let root = el.getRootNode(); root instanceof ShadowRoot; root = root.host.getRootNode()) hidden = hidden || root.mode === 'closed';
-  return JSON.stringify({ text, tag: (el.tagName || '').toLowerCase(), type: String(el.type || (el.getAttribute && el.getAttribute('type')) || '').toLowerCase(),
+  return JSON.stringify({ ...formContext(el), text, text_alternative, text_pseudo, tag: (el.tagName || '').toLowerCase(), type: String(el.type || (el.getAttribute && el.getAttribute('type')) || '').toLowerCase(),
                           role: (el.getAttribute && el.getAttribute('role')) || '', in_form: !!(el.form || (el.closest && el.closest('form'))),
                           document_url: el.ownerDocument.location.href, hidden_tree: hidden });
 }"""
+
+# Keep all action entry points on the same form-context reader.
+FOCUSED_JS = FOCUSED_JS.replace("() => {", "() => {" + _CONTROL_NAME_JS + _FORM_CONTEXT_JS, 1)
+AT_POINT_JS = AT_POINT_JS.replace("(x, y) => {", "(x, y) => {" + _CONTROL_NAME_JS + _FORM_CONTEXT_JS, 1)
+NODE_JS = NODE_JS.replace("function() {", "function() {" + _CONTROL_NAME_JS + _FORM_CONTEXT_JS, 1)
 
 # What select_dropdown could click for `target` (run on its element): browser-use clicks an item whose
 # text or data-value matches ([role=option]/[role=menuitem], or .item/.option/[data-value] under a

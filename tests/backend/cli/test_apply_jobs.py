@@ -1156,3 +1156,37 @@ def test_each_jobs_metrics_carry_the_runs_id(run, monkeypatch):
     finally:
         apply_jobs.new_run()
     assert [r["run_id"] for r in rows] == ["run-1234"]
+
+
+def test_stop_during_cleanup_preserves_confirmed_applied_status(run, monkeypatch):
+    """Codex review R02: the receipt made the job Applied; Stop arrives while the browser closes.
+    The outer claim handler must not put it back to pending (a later batch would apply again)."""
+    import copy
+    from cli import apply_jobs
+    state = {'https://boards.greenhouse.io/acme/jobs/123': {'status': 'pending'}}
+    monkeypatch.setattr(apply_jobs, 'read_jobs', lambda: copy.deepcopy(state))
+    monkeypatch.setattr(apply_jobs, 'update_job', lambda url, **kw: state[url].update(kw))
+    async def save(url, status, error=None, agent_words=False):
+        state[url].update(status=status, error=error)
+    monkeypatch.setattr(apply_jobs, 'save_job_status', save)
+    async def stopped_while_closing(self):
+        assert next(iter(state.values()))['status'] == 'applied'
+        asyncio.current_task().cancel()
+        await asyncio.sleep(0)
+    monkeypatch.setattr(run.browser, 'kill', stopped_while_closing)
+    with pytest.raises(asyncio.CancelledError):
+        run(history=FakeHistory(success=True, steps=3))
+    assert next(iter(state.values()))['status'] == 'applied'
+
+
+def test_stop_before_an_outcome_still_releases_the_claim(run, monkeypatch):
+    """The other side of R02: stopped mid-application with nothing recorded -> pending again."""
+    import copy
+    from cli import apply_jobs
+    state = {'https://boards.greenhouse.io/acme/jobs/123': {'status': 'in_progress'}}
+    monkeypatch.setattr(apply_jobs, 'read_jobs', lambda: copy.deepcopy(state))
+    async def save(url, status, error=None, agent_words=False):
+        state[url].update(status=status, error=error)
+    monkeypatch.setattr(apply_jobs, 'save_job_status', save)
+    asyncio.run(apply_jobs._release_claim('https://boards.greenhouse.io/acme/jobs/123', 'Role', 'Acme', 1, {}, 'stopped'))
+    assert state['https://boards.greenhouse.io/acme/jobs/123']['status'] == 'pending'

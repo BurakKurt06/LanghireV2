@@ -102,7 +102,7 @@ def _stop_operations_and_browsers():
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHireV2 Backend", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.1.0", lifespan=lifespan)
 
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
@@ -599,7 +599,7 @@ async def health():
     all_ok = db_ok and chromium_ok and llm_configured
     return {
         "status": "ok" if all_ok else "degraded",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "frozen": getattr(sys, 'frozen', False),
         "checks": {
             "database": db_ok,
@@ -620,9 +620,12 @@ _PROFILE_OBJECTS = ("address", "education", "salary_expectation", "screening", "
 _PROFILE_LISTS = ("target_job_titles", "target_locations", "languages", "skills")
 
 
-@app.put("/profile")
-async def update_profile(profile: dict):
-    # The agent reads these shapes: a wrong one (a string for the address) is refused, not saved.
+# One profile write at a time: a read-merge-write must not interleave with another (review R05).
+_profile_lock = threading.Lock()
+
+
+def _profile_problem(profile: dict):
+    """The agent reads these shapes: a wrong one (a string for the address) is refused, not saved."""
     for key in _PROFILE_OBJECTS:
         if key in profile and not isinstance(profile[key], dict):
             return _api_error("invalid_profile", f"{key} must be an object", 400)
@@ -632,7 +635,30 @@ async def update_profile(profile: dict):
     if "job_search" in profile:
         from core import job_search
         profile["job_search"] = job_search.normalize(profile["job_search"])
-    save_profile(profile)
+    return None
+
+
+@app.put("/profile")
+async def update_profile(profile: dict):
+    problem = _profile_problem(profile)
+    if problem is not None:
+        return problem
+    with _profile_lock:
+        save_profile(profile)
+    return {"success": True}
+
+
+@app.patch("/profile")
+async def update_profile_fields(fields: dict):
+    """Change only these top-level fields, on the profile as saved now. Profile and Settings each
+    edit their own fields; one screen's save can't undo the other's (review R05)."""
+    problem = _profile_problem(fields)
+    if problem is not None:
+        return problem
+    with _profile_lock:
+        current = load_profile()
+        current.update(fields)
+        save_profile(current)
     return {"success": True}
 
 
@@ -951,6 +977,15 @@ def _finish_leftover_tasks(loop, timeout: float = 10.0) -> None:
         _log.warning(f"Leftover tasks after the run didn't finish cleanly: {e}")
 
 
+def _finish_executor_work(loop) -> None:
+    """Wait for the run's worker threads (asyncio.to_thread: profile copies) as asyncio.run does:
+    a cancelled await doesn't stop its thread, and the run keeps the browser profiles until they end."""
+    try:
+        loop.run_until_complete(loop.shutdown_default_executor())
+    except Exception as e:
+        _log.warning(f"The run's background threads didn't finish cleanly: {e}")
+
+
 def _run_async_in_thread(coro_factory, status_dict):
     """Run an async function in a new thread with its own event loop, capturing stdout and logs."""
     run_id = str(uuid.uuid4())[:8]
@@ -1030,6 +1065,7 @@ def _run_async_in_thread(coro_factory, status_dict):
             if metrics:
                 metrics.close()
             _finish_leftover_tasks(loop)
+            _finish_executor_work(loop)
             loop.close()
             with _status_lock:
                 status_dict["running"] = False
@@ -1134,6 +1170,7 @@ def _kill_browser_processes():
 _browser_lock = threading.Lock()
 
 _BROWSER_BUSY = {
+    "stop": "The last run is still stopping. Try again in a moment.",
     "apply": "Applications are running. Stop them first.",
     "collect": "Job collection is running. Stop it first.",
     "login": "A sign-in window is open. Finish there and close it first.",
@@ -1144,12 +1181,18 @@ _BROWSER_BUSY = {
 def _browser_user(exclude: str = "") -> str:
     """Which operation is using the browser profiles now ("" for none)."""
     users = (
+        ("stop", _stopping.is_set()),
         ("apply", _apply_status.get("running")),
         ("collect", _collection_status.get("running")),
         ("login", _login_process is not None and _login_process.poll() is None),
         ("inbox", _inbox_checking()),
     )
     return next((name for name, busy in users if busy and name != exclude), "")
+
+
+# Set while a Stop waits for and sweeps the app's browsers: a run started meanwhile could have its
+# new browsers closed by that sweep, so starts wait (Stop itself runs off the server's event loop).
+_stopping = threading.Event()
 
 
 def _force_stop(status_dict):
@@ -1176,11 +1219,15 @@ def _force_stop(status_dict):
                 loop.call_soon_threadsafe(each.cancel)
         cancelled = True
 
-    if cancelled:
-        # A short, bounded wait for that clean close (user's decision 11-01): the sweep below is a
-        # hard kill on Windows and would lose what a site stored in the run's last moments.
-        _wait_for_browsers_to_close(STOP_CLEAN_CLOSE_SECONDS)
-    _kill_browser_processes()
+    _stopping.set()
+    try:
+        if cancelled:
+            # A short, bounded wait for that clean close (user's decision 11-01): the sweep below is a
+            # hard kill on Windows and would lose what a site stored in the run's last moments.
+            _wait_for_browsers_to_close(STOP_CLEAN_CLOSE_SECONDS)
+        _kill_browser_processes()
+    finally:
+        _stopping.clear()
     with _status_lock:
         status_dict["log"].append("🛑 Force stopped")
 
@@ -1349,7 +1396,8 @@ async def start_collection(body: CollectRequest):
 
 @app.post("/jobs/collect/stop")
 async def stop_collection():
-    _force_stop(_collection_status)
+    # Off the event loop: the clean-close wait and the sweep take seconds (review R17).
+    await asyncio.to_thread(_force_stop, _collection_status)
     return {"success": True}
 
 
@@ -1518,15 +1566,25 @@ async def start_applying(body: ApplyRequest):
         # For mode="all", pass True for easy_apply (agent handles both types via the job URL)
         worker_easy_apply = True if easy_apply_filter is None else easy_apply_filter
         tasks = []
-        for i in range(num_workers):
-            if i > 0:
-                from core.shared_config import worker_stagger
-                await worker_stagger()
-            tasks.append(asyncio.create_task(
-                apply_jobs.worker(f"W{i+1}", i+1, queue, profile, qa, applied_labels, worker_easy_apply, stats, cancel_flag=_apply_status)
-            ))
-        await asyncio.gather(*tasks)
-        cred_task.cancel()
+        try:
+            for i in range(num_workers):
+                if i > 0:
+                    from core.shared_config import worker_stagger
+                    await worker_stagger()
+                tasks.append(asyncio.create_task(
+                    apply_jobs.worker(f"W{i+1}", i+1, queue, profile, qa, applied_labels, worker_easy_apply, stats, cancel_flag=_apply_status)
+                ))
+            await asyncio.gather(*tasks)
+        except BaseException:
+            # Stopped (even between worker starts): stop the workers already running and let each
+            # finish its own cleanup (its browser's kill needs browser-use's event bus, still running
+            # here) before the run ends and its leftover tasks are swept.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        finally:
+            cred_task.cancel()
 
         print(f"\nResults: {stats}")
         total_applied = sum(1 for j in load_json(JOBS_FILE, {}).values() if j.get("status") == "applied")
@@ -1546,7 +1604,8 @@ async def start_applying(body: ApplyRequest):
 @app.post("/apply/stop")
 async def stop_applying():
     _set_apply_paused(False)
-    _force_stop(_apply_status)
+    # Off the event loop: the clean-close wait and the sweep take seconds (review R17).
+    await asyncio.to_thread(_force_stop, _apply_status)
     return {"success": True}
 
 
@@ -2864,7 +2923,7 @@ async def refine_tailored_resume(body: dict):
     options = body.get("options", {"skills": True, "overview": True, "experience": True, "title": False})
 
     try:
-        result = await tailor_resume(job_url, description + f"\n\nADDITIONAL INSTRUCTION: {instruction}", options)
+        result = await tailor_resume(job_url, description, options, refinement=instruction)
         update_job(job_url, tailored_resume_path=result["path"])
         return {"success": True, "content": result["content"], "path": result["path"]}
     except Exception as e:

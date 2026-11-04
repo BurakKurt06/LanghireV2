@@ -27,18 +27,26 @@ and fill in applications. It is a **personal fork**, not a distribution:
 
 ## Install
 
-Build it yourself (below) and run:
+If this repository's [Releases page](../../releases) lists a release, download the
+`LangHireV2_<version>_x64-setup.exe` file under its **Assets**. If it lists none,
+build the installer yourself (see [Building from source](#building-from-source)); it lands in
+`src-tauri/target/release/bundle/nsis/`. Installing a newer version over an older one keeps
+your settings, profile and jobs.
 
-```
-src-tauri/target/release/bundle/nsis/LangHireV2_1.0.0_x64-setup.exe
-```
+The installer isn't code-signed. Before running a downloaded copy, right-click the `.exe` →
+**Properties**, tick **Unblock** at the bottom of the General tab and click **OK**. Windows
+SmartScreen checks files marked as downloaded, and Unblock removes that mark, so the warning
+normally doesn't appear. This isn't guaranteed: Windows 11's Smart App Control, where it is
+turned on, can still stop an unsigned installer. An installer you built yourself isn't marked
+and has no Unblock box. Signing wouldn't remove the warning at once either: a new certificate
+has to build up SmartScreen reputation first.
 
 You do **not** need Python installed — it is bundled into the backend sidecar.
 On first launch the app downloads Chromium (~150 MB) automatically.
 
 ## First-run setup
 
-1. **LLM API key** — required; nothing works without it. OpenRouter is the
+1. **AI model** — Settings → AI model; required, nothing works without it. OpenRouter is the
    default provider; OpenAI, Anthropic, Gemini, Ollama and Bedrock also work.
 
    A **ChatGPT Plus/Pro plan** works without an API key: pick "ChatGPT plan" and
@@ -47,15 +55,17 @@ On first launch the app downloads Chromium (~150 MB) automatically.
    of being billed per token. That backend isn't a published API and could
    change. The sign-in is stored in `chatgpt_auth.json` in the app data folder,
    separate from the Codex CLI's own login.
-2. **Resume** — Settings → Resume, a PDF path.
-3. **Profile** — name, contact details, work authorization, target job titles
-   and locations. Collection uses the target titles as its search terms.
-4. **Logins** — Select your boards in Jobs → Collector, then use their **Sign in**
+2. **Resume** — Settings → Applications, a PDF path.
+3. **Profile** — name, contact details and work authorization, on the Profile page.
+4. **What to look for** — Settings → Job search: target job titles and locations, the search
+   area and the default search. Collection uses the target titles as its search terms. Your
+   notes for the AI (what you want and don't want) are in Settings → Applications.
+5. **Logins** — Select your boards in Jobs → Collect, then use their **Sign in**
    buttons before collecting. All ten built-in boards open a normal browser window
    for password login, SSO or verification. Close that window when finished; the
    collector reuses its saved session in the same app-selected browser profile.
    If a session expires, sign in again here and retry. Gmail's separate button is
-   in Settings → Accounts. Sign-in and automation never use the profile at the
+   in Settings → Accounts & email. Sign-in and automation never use the profile at the
    same time. Imported plugins cannot launch unrestricted sign-in windows.
 
 Gmail verification is read by app code in a separate browser profile. The application
@@ -81,7 +91,7 @@ title is collected from every selected source in turn.
 - **Glassdoor** ignores a typed place and shows the whole US, so the app asks Glassdoor
   for its own ID for your first target location ("Toronto, ON" is Ontario, not Ohio).
   If Glassdoor doesn't know the place, the log says its results may come from anywhere.
-- **Profile → Job search** sets what to look for: job type, work arrangement,
+- **Settings → Job search** sets what to look for: job type, work arrangement,
   experience, posting age, minimum pay, a lowest match score, notes for the AI, and
   what to leave out (employers, title words, phrases, staffing agencies, employers
   applied to recently). The Collect page can change any of them for one search, and
@@ -149,8 +159,12 @@ login, assets, redirects, uploads, saves and Next run automatically like Full au
 The agent stops before pressing the final Submit application control, without approval.
 The site can still send data or submit during an intermediate step or its own scripts;
 Trial does not refuse a request merely because its ATS operation is unknown.
-Completed Trial leaves the job pending for the user to check.
+Completed Trial leaves the job pending for the user to check. Ambiguous submit labels such as
+Done, Confirm or Submit resume can stop Trial before the last page.
 **Full auto** applies on the live site, final Submit included. Collection keeps its separate policy.
+Bare Done and Confirm also count as possible submit attempts in Full auto, including controls
+outside native forms. A later unconfirmed failure can therefore be marked possibly submitted,
+with automatic retries stopped so the user can check it.
 
 Previously reviewed ATS contracts remain available for explicit protocol diagnostics,
 including Workday, Greenhouse, Lever, Ashby, Workable and Oracle Candidate Experience.
@@ -181,6 +195,12 @@ Requires Node 22.22+ (also supports the website build), Rust (MSVC toolchain), V
 **Desktop development with C++** workload, and `uv`.
 
 ```
+powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
+```
+
+That installs the locked dependencies, builds the backend sidecar and then the installer. By hand:
+
+```
 npm ci
 uv sync --locked
 powershell -ExecutionPolicy Bypass -File scripts/build-backend.ps1   # sidecar first
@@ -196,6 +216,15 @@ Tests (see TESTING.md for the isolated environment and what the safety net block
 npm run test:coverage
 uv run pytest tests/
 ```
+
+### Releasing
+
+Raise the version in `package.json` (and its lockfile) and `src-tauri/tauri.conf.json`,
+then run the **Build & Release** workflow with **release** ticked (or push a `v<version>`
+tag, for example `v1.1.0`). It builds the Windows installer and publishes it as release
+`v<version>` on the repository it runs in (a published copy of this repository has no releases
+until a release is made there too). A manual run
+without **release** only builds (the installer is a 7-day download on the run's page).
 
 ## Safety boundaries and remaining limits
 

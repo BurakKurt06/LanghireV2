@@ -6,7 +6,7 @@ import {
   getCollectionStatus,
   getPlugins,
   getProfile,
-  saveProfile,
+  patchProfile,
   addJob,
   addJobsBulk,
   getSettings,
@@ -261,13 +261,12 @@ export default function CollectTab({ onJobsChanged }: CollectTabProps) {
 
   const saveAsDefault = async () => {
     try {
-      const profile = await getProfile();
-      await saveProfile({ ...profile, job_search: search });
+      await patchProfile({ job_search: search });
       setProfileSearch(search);
       setSavedDefault(true);
       setTimeout(() => setSavedDefault(false), 2500);
     } catch (e) {
-      alert(e instanceof Error ? e.message : "Couldn't save to Profile");
+      alert(e instanceof Error ? e.message : "Couldn't save as the default");
     }
   };
 

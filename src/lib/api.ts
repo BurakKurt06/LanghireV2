@@ -159,6 +159,14 @@ export async function saveProfile(profile: CandidateProfile) {
   });
 }
 
+/** Change only these profile fields, on the profile as saved now (one atomic update on the backend). */
+export async function patchProfile(fields: Partial<CandidateProfile>) {
+  return request<{ success: boolean }>("/profile", {
+    method: "PATCH",
+    body: JSON.stringify(fields),
+  });
+}
+
 // ── LLM Settings ──────────────────────────────────────────────────────────
 export async function getLLMSettings() {
   return request<LLMSettings>("/settings/llm");

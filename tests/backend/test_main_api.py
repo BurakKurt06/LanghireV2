@@ -1974,3 +1974,23 @@ def test_deleting_the_same_job_twice_in_one_request(auth_client):
     auth_client.post("/jobs/add", json={"url": url})
     resp = auth_client.request("DELETE", "/jobs", json={"urls": [url, url]})
     assert resp.status_code == 200 and resp.json()["deleted"] == 1
+
+
+def test_profile_and_settings_saves_keep_each_others_fields(auth_client):
+    """Codex review R05: both screens read the profile; Profile saves a new name, then Settings saves
+    new instructions. Each sends only its own fields (PATCH): neither undoes the other."""
+    import copy
+    from core.config import DEFAULT_PROFILE
+    original = copy.deepcopy(DEFAULT_PROFILE)
+    original.update(name="Synthetic Original", notes="Original notes")
+    assert auth_client.put('/profile', json=original).status_code == 200
+    assert auth_client.patch('/profile', json={'name': 'Synthetic Updated'}).json()['success']
+    assert auth_client.patch('/profile', json={'notes': 'Updated instructions'}).json()['success']
+    saved = auth_client.get('/profile').json()
+    assert (saved['name'], saved['notes']) == ('Synthetic Updated', 'Updated instructions')
+    assert saved['address'] == original['address']          # untouched fields stay
+
+
+def test_profile_patch_refuses_a_wrong_shape(auth_client):
+    assert auth_client.patch('/profile', json={'address': 'a string'}).status_code == 400
+    assert auth_client.patch('/profile', json={'target_job_titles': [1, 2]}).status_code == 400

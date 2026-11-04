@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Profile from "./Profile";
-import { getProfile, saveProfile, getCountries } from "../lib/api";
+import { getProfile, patchProfile, getCountries } from "../lib/api";
 import type { CandidateProfile, CountryConfig } from "../lib/types";
 
 // ── i18n: identity translator (returns the raw key) ────────────────────────
@@ -15,12 +15,12 @@ vi.mock("react-i18next", () => ({
 
 vi.mock("../lib/api", () => ({
   getProfile: vi.fn(),
-  saveProfile: vi.fn(),
+  patchProfile: vi.fn(),
   getCountries: vi.fn(),
 }));
 
 const mockGetProfile = vi.mocked(getProfile);
-const mockSaveProfile = vi.mocked(saveProfile);
+const mockSaveProfile = vi.mocked(patchProfile);  // Profile saves its own fields (PATCH)
 const mockGetCountries = vi.mocked(getCountries);
 
 const usConfig: CountryConfig = {
@@ -213,8 +213,8 @@ describe("Profile page", () => {
     await user.click(screen.getByRole("button", { name: "save" }));
     await waitFor(() => expect(mockSaveProfile).toHaveBeenCalled());
     const saved = mockSaveProfile.mock.calls[0][0];
-    expect(saved.salary_expectation.currency).toBe("EUR");     // was the US default: follows the country
-    expect(saved.salary_expectation.period).toBe("annual");
+    expect(saved.salary_expectation!.currency).toBe("EUR");     // was the US default: follows the country
+    expect(saved.salary_expectation!.period).toBe("annual");
   });
 
   it("a currency the user chose stays when the country changes", async () => {
@@ -227,7 +227,7 @@ describe("Profile page", () => {
     await user.selectOptions(screen.getByDisplayValue("🇺🇸 United States"), "DE");
     await user.click(screen.getByRole("button", { name: "save" }));
     await waitFor(() => expect(mockSaveProfile).toHaveBeenCalled());
-    expect(mockSaveProfile.mock.calls[0][0].salary_expectation.currency).toBe("GBP");
+    expect(mockSaveProfile.mock.calls[0][0].salary_expectation!.currency).toBe("GBP");
   });
 
   it("shows an error banner when saveProfile rejects (page stays mounted)", async () => {
@@ -288,19 +288,12 @@ describe("Profile labels", () => {
     expect(screen.getAllByLabelText(/./).length).toBeGreaterThan(5);
   });
 
-  it("saving keeps what Settings saved meanwhile (job search, AI instructions): only Profile's own fields", async () => {
+  it("saves only Profile's own fields, never Settings' job search or AI instructions (review R05)", async () => {
     const user = userEvent.setup();
-    const elsewhere = {
-      ...sampleProfile,
-      target_job_titles: ["Data Analyst"],
-      target_locations: ["Remote"],
-      search_area: { center_zip: "02139", radius: "25" },
-      job_search: { mode: "detailed", notes: "Mornings only" },
-      notes: "New instructions",
-    };
-    mockGetProfile
-      .mockResolvedValueOnce({ ...sampleProfile } as CandidateProfile)
-      .mockResolvedValueOnce(elsewhere as unknown as CandidateProfile);
+    mockGetProfile.mockResolvedValue({
+      ...sampleProfile, target_job_titles: ["Data Analyst"], notes: "Old instructions",
+      job_search: { mode: "detailed" }, search_area: { center_zip: "02139", radius: "25" },
+    } as unknown as CandidateProfile);
     render(<Profile />);
     const name = await screen.findByDisplayValue("Ada Lovelace");
     await user.clear(name);
@@ -309,10 +302,8 @@ describe("Profile labels", () => {
     await waitFor(() => expect(mockSaveProfile).toHaveBeenCalledTimes(1));
     const saved = mockSaveProfile.mock.calls[0][0];
     expect(saved.name).toBe("Grace Hopper");
-    expect(saved.target_job_titles).toEqual(["Data Analyst"]);
-    expect(saved.target_locations).toEqual(["Remote"]);
-    expect(saved.search_area).toEqual({ center_zip: "02139", radius: "25" });
-    expect(saved.job_search).toEqual({ mode: "detailed", notes: "Mornings only" });
-    expect(saved.notes).toBe("New instructions");
+    for (const field of ["target_job_titles", "target_locations", "search_area", "job_search", "notes"]) {
+      expect(saved).not.toHaveProperty(field);   // the backend keeps what is saved for these
+    }
   });
 });

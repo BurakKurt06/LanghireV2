@@ -225,6 +225,8 @@ async def _generate_tailored_text(
         "- Do NOT fabricate experience the candidate doesn't have\n"
         "- Do NOT add skills not present in the original resume\n"
         "- Reorder and rephrase to highlight what matters for this role\n"
+        "- A 'title' section is a one-line headline under the candidate's name, built only from the "
+        "role and skills given: never claim a job title, seniority or skill the candidate doesn't have\n"
         f"{refinement_note}\n"
         f"TARGET JOB DESCRIPTION:\n{job_description[:3000]}\n\n"
         + "\n".join(section_prompts) + "\n\n"
@@ -355,6 +357,7 @@ def _generate_fresh_pdf(
     contact_info: str,
     education_text: str,
     output_path: Path,
+    headline: str = "",
 ):
     """Generate a professional PDF matching the user's resume style.
 
@@ -371,6 +374,7 @@ def _generate_fresh_pdf(
     light_color = (0.40, 0.40, 0.40)   # lighter gray for dates/secondary
 
     state = {"page": page, "y": _TOP_MARGIN}
+    embedded: set = set()  # pages the fallback font is registered on
 
     def ensure_space(needed: float):
         """Start a new page if drawing ``needed`` points would overflow."""
@@ -383,7 +387,7 @@ def _generate_fresh_pdf(
         ensure_space(line_height)
         state["page"].insert_text(
             fitz.Point(x, state["y"] + baseline_pad),
-            text, fontsize=fontsize, fontname=fontname, color=color,
+            text, fontsize=fontsize, fontname=_font_for(state["page"], text, fontname, embedded), color=color,
         )
         state["y"] += line_height
 
@@ -402,7 +406,7 @@ def _generate_fresh_pdf(
         ensure_space(28)
         state["page"].insert_text(
             fitz.Point(_MARGIN_LEFT, state["y"] + 12), title,
-            fontsize=12, fontname="helvetica-bold", color=header_color,
+            fontsize=12, fontname=_font_for(state["page"], title, "helvetica-bold", embedded), color=header_color,
         )
         state["y"] += 18
         state["page"].draw_line(
@@ -414,12 +418,16 @@ def _generate_fresh_pdf(
 
     # ─── Name ───
     ensure_space(42)
+    name_text = profile_name.upper() if profile_name else ""
     state["page"].insert_text(
-        fitz.Point(_MARGIN_LEFT, state["y"] + 30),
-        profile_name.upper() if profile_name else "",
-        fontsize=28, fontname="helvetica-bold", color=(0, 0, 0),
+        fitz.Point(_MARGIN_LEFT, state["y"] + 30), name_text,
+        fontsize=28, fontname=_font_for(state["page"], name_text, "helvetica-bold", embedded), color=(0, 0, 0),
     )
     state["y"] += 42
+    if headline.strip():
+        # The "Job Title" tailoring option: a one-line headline under the name (review R18).
+        draw_line_text(" ".join(headline.split()), x=_MARGIN_LEFT, fontsize=12, fontname="helvetica-bold",
+                       color=(0.25, 0.25, 0.25), line_height=18, baseline_pad=12)
     state["page"].draw_line(
         fitz.Point(_MARGIN_LEFT, state["y"]), fitz.Point(_MARGIN_RIGHT, state["y"]),
         color=(0.85, 0.20, 0.35), width=2,
@@ -505,6 +513,8 @@ def _generate_fresh_pdf(
         draw_section_header("Education")
         draw_lines(education_text)
 
+    if embedded:
+        doc.subset_fonts()  # only the characters used: a few KB, not the whole fallback font
     doc.save(str(output_path))
     doc.close()
 
@@ -512,6 +522,36 @@ def _generate_fresh_pdf(
 # Shared font used for both measuring and rendering so wrapping matches output.
 # "helv" maps to Helvetica, the same base-14 font used by insert_text below.
 _MEASURE_FONT = fitz.Font("helv")
+
+# The base-14 fonts are written with WinAnsi (cp1252) encoding: anything outside it ("Łukasz", "王",
+# "ğ") would print as dots. Such lines use an embedded font that covers them (review R11).
+_FALLBACK_NAME = "lhfallback"
+_fallback = None
+
+
+def _fallback_font() -> "fitz.Font":
+    global _fallback
+    if _fallback is None:
+        _fallback = fitz.Font("cjk")  # Droid Sans Fallback, bundled with PyMuPDF: Latin, Greek, CJK...
+    return _fallback
+
+
+def _needs_fallback(text: str) -> bool:
+    try:
+        (text or "").encode("cp1252")
+        return False
+    except UnicodeEncodeError:
+        return True
+
+
+def _font_for(page, text: str, fontname: str, embedded: set) -> str:
+    """`fontname`, or the embedded fallback font (registered on this page once) for text it can't print."""
+    if not _needs_fallback(text):
+        return fontname
+    if page.xref not in embedded:
+        page.insert_font(fontname=_FALLBACK_NAME, fontbuffer=_fallback_font().buffer)
+        embedded.add(page.xref)
+    return _FALLBACK_NAME
 
 
 def _wrap_text(text: str, max_width: float, fontsize: float) -> list[str]:
@@ -527,7 +567,8 @@ def _wrap_text(text: str, max_width: float, fontsize: float) -> list[str]:
     current = ""
     for word in words:
         test = f"{current} {word}" if current else word
-        if current and _MEASURE_FONT.text_length(test, fontsize) > max_width:
+        font = _fallback_font() if _needs_fallback(test) else _MEASURE_FONT
+        if current and font.text_length(test, fontsize) > max_width:
             lines.append(current)
             current = word
         else:
@@ -540,8 +581,10 @@ def _wrap_text(text: str, max_width: float, fontsize: float) -> list[str]:
 def _draw_wrapped(page, x: float, y: float, text: str, max_width: float, fontsize: float, fontname: str, color: tuple):
     """Draw text with word wrap. Returns the new y-cursor after drawing."""
     lines = _wrap_text(text, max_width, fontsize)
+    embedded: set = set()
     for line in lines:
-        page.insert_text(fitz.Point(x, y + 8), line, fontsize=fontsize, fontname=fontname, color=color)
+        page.insert_text(fitz.Point(x, y + 8), line, fontsize=fontsize,
+                         fontname=_font_for(page, line, fontname, embedded), color=color)
         y += fontsize + 2
     return y
 
@@ -550,22 +593,45 @@ async def tailor_resume(
     job_url: str,
     job_description: str,
     options: dict,
+    refinement: str = "",
 ) -> dict:
-    """Generate a tailored resume PDF for a specific job. Returns path and content."""
+    """Generate a tailored resume PDF for a specific job. Returns path and content.
+
+    `refinement`: the user's own instruction (Refine), sent as its own part of the prompt; it
+    used to be appended to the posting text and cut off with it (review R10).
+    """
     settings = load_settings()
     resume_path = settings.get("resume_path", "")
     if not resume_path or not Path(resume_path).exists():
         raise FileNotFoundError("No resume PDF configured or file not found")
 
-    doc = fitz.open(resume_path)
+    # The bytes read here are the ones tailored and fingerprinted: a resume replaced while the AI
+    # works is never certified as the source of this copy (review R09).
+    source_bytes = Path(resume_path).read_bytes()
+    source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    doc = fitz.open(stream=source_bytes, filetype="pdf")
     sections = _extract_sections(doc)
     tailorable = _identify_tailorable_sections(sections, options)
+
+    try:
+        from core.config import load_profile
+        profile = load_profile()
+    except Exception:
+        profile = {}
+    if options.get("title"):
+        # A headline under the name, from the candidate's own role and skills (never a title they
+        # didn't hold; see the prompt's rules).
+        role = str(profile.get("current_role") or "").strip()
+        skills = ", ".join(str(x) for x in (profile.get("skills") or [])[:12] if str(x).strip())
+        base = "; ".join(p for p in (f"current role: {role}" if role else "", f"skills: {skills}" if skills else "") if p)
+        tailorable.append({"section_type": "title", "text": base or "(no role or skills in the profile)",
+                           "char_count": 80, "heading": ""})
 
     if not tailorable:
         doc.close()
         raise ValueError("No tailorable sections found in resume matching selected options")
 
-    tailored_text = await _generate_tailored_text(tailorable, job_description, options)
+    tailored_text = await _generate_tailored_text(tailorable, job_description, options, refinement)
 
     if not tailored_text:
         doc.close()
@@ -577,8 +643,6 @@ async def tailor_resume(
 
     # Extract name, contact, and education from the original resume/profile
     try:
-        from core.config import load_profile
-        profile = load_profile()
         profile_name = profile.get("name", "")
         contact_parts = []
         if profile.get("email"):
@@ -609,25 +673,30 @@ async def tailor_resume(
             pass
 
     # Every section goes to the PDF (tailored ones with their new text), in order.
-    full_tailored = {}
+    full_tailored, headline = {}, ""
     for ti, ts in enumerate(tailorable):
-        if ti in tailored_text:
-            full_tailored[next(i for i, s in enumerate(sections) if s is ts)] = tailored_text[ti]
+        if ti not in tailored_text:
+            continue
+        if ts["section_type"] == "title":
+            headline = tailored_text[ti]
+            continue
+        full_tailored[next(i for i, s in enumerate(sections) if s is ts)] = tailored_text[ti]
 
-    _generate_fresh_pdf(sections, full_tailored, profile_name, contact_info, education_text, output_pdf)
+    _generate_fresh_pdf(sections, full_tailored, profile_name, contact_info, education_text, output_pdf,
+                        headline=headline)
     doc.close()
 
     content_parts = []
     for i, s in enumerate(tailorable):
         original = s["text"]
         tailored = tailored_text.get(i, original)
-        content_parts.append(f"## {_heading_of(s)}\n\n{tailored}")
+        content_parts.append(f"## {_heading_of(s) if s['section_type'] != 'title' else 'Headline'}\n\n{tailored}")
 
     content = "\n\n".join(content_parts)
     output_md.write_text(content, encoding="utf-8")
     # Which resume it was made from: a tailored copy of an older resume is never used for applying.
     _source_file(job_url).write_text(json.dumps(
-        {"resume_path": str(Path(resume_path).resolve()), "sha256": _file_sha256(Path(resume_path))}), encoding="utf-8")
+        {"resume_path": str(Path(resume_path).resolve()), "sha256": source_sha256}), encoding="utf-8")
 
     return {
         "path": str(output_pdf),
@@ -639,7 +708,7 @@ async def tailor_resume(
 
 async def refine_resume(job_url: str, job_description: str, instruction: str, options: dict) -> dict:
     """Refine an existing tailored resume with additional instructions."""
-    return await tailor_resume(job_url, job_description, options)
+    return await tailor_resume(job_url, job_description, options, refinement=instruction)
 
 
 def get_tailored_content(job_url: str) -> Optional[dict]:

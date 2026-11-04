@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { Save, FolderOpen, X, Upload, Trash2, Sun, Moon, Monitor } from "lucide-react";
 import {
   getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin, getBrowsers,
-  getEmployerPasswordSites, revealEmployerPassword, getProfile, saveProfile, getInbox, setInboxSchedule,
+  getEmployerPasswordSites, revealEmployerPassword, getProfile, patchProfile, getInbox, setInboxSchedule,
 } from "../lib/api";
 import { setTelemetryEnabled as setAnalyticsTelemetry } from "../lib/analytics";
 import { getStoredTheme, setTheme, type ThemeMode } from "../lib/theme";
@@ -74,9 +74,9 @@ export default function SettingsPage() {
   const [inboxSchedule, setInboxScheduleState] = useState<InboxStatus["schedule"] | null>(null);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    Promise.all([
-      getSettings().then((data) => {
+  // Each source loads (and retries) on its own: retrying one never replaces unsaved edits in another
+  // (review R06). A source that failed shows its own error and Retry until it loads.
+  const loadSettings = useCallback(() => getSettings().then((data) => {
         setResumePath(data.resume_path || "");
         setOtherDocuments(data.other_documents || []);
         setPerformanceMode(data.performance_mode === true);
@@ -106,8 +106,9 @@ export default function SettingsPage() {
         setCaptchaApiKey(data.captcha_api_key || "");
         setBrowser(data.browser || "");
         setBrowserPath(data.browser_path || "");
-      }).catch(() => setLoadFailed(true)),
-      getProfile().then((data) => {
+        setLoadFailed(false);
+      }).catch(() => setLoadFailed(true)), []);
+  const loadProfile = useCallback(() => getProfile().then((data) => {
         // The same defaults Profile fills in, so a save never writes a partial object.
         setProfile({
           ...data,
@@ -118,19 +119,22 @@ export default function SettingsPage() {
           notes: data.notes || "",
         });
         setProfileChanged(false);
-      }).catch(() => setProfileFailed(true)),
+        setProfileFailed(false);
+      }).catch(() => setProfileFailed(true)), []);
+  const loadLists = useCallback(() => Promise.all([
+    getPlugins().then((res) => setPlugins(res.plugins || [])).catch(() => {}),
+    getBrowsers().then((res) => setBrowsers(res.browsers || [])).catch(() => {}),
+  ]), []);
+  useEffect(() => {
+    Promise.all([
+      loadSettings(),
+      loadProfile(),
       getInbox().then((data) => setInboxScheduleState(data.schedule)).catch(() => {}),
-      getPlugins().then((res) => setPlugins(res.plugins || [])).catch(() => {}),
-      getBrowsers().then((res) => setBrowsers(res.browsers || [])).catch(() => {}),
+      loadLists(),
     ]).finally(() => setLoading(false));
-  }, []);
-  useEffect(() => { load(); }, [load]);
-  const retry = () => {
-    setLoading(true);
-    setLoadFailed(false);
-    setProfileFailed(false);
-    load();
-  };
+  }, [loadSettings, loadProfile, loadLists]);
+  const retrySettings = () => { void loadSettings(); void loadLists(); };
+  const retryProfile = () => { void loadProfile(); };
 
   const updateProfile = <K extends keyof ProfileSettings>(key: K, value: ProfileSettings[K]) => {
     setProfile((p) => (p ? { ...p, [key]: value } : p));
@@ -234,10 +238,9 @@ export default function SettingsPage() {
         parallel_jobs: parallelJobs,
       });
       if (profile && profileChanged) {
-        // Only these fields: re-read the profile so what Profile saved meanwhile is kept.
-        const current = await getProfile();
+        // Only these fields, updated atomically by the backend: what Profile saved meanwhile is kept.
         const own = Object.fromEntries(PROFILE_SETTINGS_FIELDS.map((key) => [key, profile[key]]));
-        await saveProfile({ ...current, ...own } as CandidateProfile);
+        await patchProfile(own as Partial<CandidateProfile>);
         setProfileChanged(false);
       }
       setSaved(true);
@@ -253,13 +256,13 @@ export default function SettingsPage() {
   const loadError = (
     <div role="alert" className="error-banner flex items-center justify-between gap-3">
       <span>Couldn't load your settings, so they can't be changed right now (saving could replace them with defaults).</span>
-      <button type="button" onClick={retry} className="btn-secondary">Try again</button>
+      <button type="button" onClick={retrySettings} className="btn-secondary">Try again</button>
     </div>
   );
   const profileError = (
     <div role="alert" className="error-banner flex items-center justify-between gap-3">
       <span>{tp("loadError")}</span>
-      <button type="button" onClick={retry} className="btn-secondary">{tp("retry")}</button>
+      <button type="button" onClick={retryProfile} className="btn-secondary">{tp("retry")}</button>
     </div>
   );
   const label = (id: SettingsSectionId) => {
@@ -315,7 +318,7 @@ export default function SettingsPage() {
         <div className="flex-1 min-w-0 max-w-2xl">
           {panel("ai-model", (
             <>
-              <p className="text-[13px] text-muted-foreground mb-4">{t("aiModelHint", "The AI model has its own Save button.")}</p>
+              <p className="text-[13px] text-muted-foreground mb-4">{t("aiModelHint", "The AI model saves as you change it.")}</p>
               <LLMSettingsForm />
             </>
           ))}

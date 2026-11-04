@@ -34,29 +34,28 @@ Write-Host "================================================================"
 # 1. Tooling checks
 foreach ($tool in @("uv", "npm", "cargo")) {
   if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-    Write-Error "'$tool' not found on PATH. Install uv, Node.js 20+, and Rust (rustup)."
+    Write-Error "'$tool' not found on PATH. Install uv, Node.js 22.12+, and Rust (rustup)."
     exit 1
   }
 }
 
-# Resolve the Tauri CLI: prefer the local npm binary, fall back to cargo-tauri.
+# 2. Install dependencies, exactly as locked (never upgraded by a build)
+Write-Host "Installing JS dependencies..."
+npm ci
+Assert-Exit "npm ci"
+Write-Host "Syncing Python dependencies..."
+uv sync --locked
+Assert-Exit "uv sync --locked"
+
+# Resolve the Tauri CLI after the install, which provides the local one.
 $Tauri = $null
 if (Test-Path "node_modules\.bin\tauri.cmd") {
   $Tauri = "node_modules\.bin\tauri.cmd"
 } elseif (cargo tauri --version 2>$null) {
   $Tauri = "cargo-tauri"
 }
-
-# 2. Install dependencies
-Write-Host "Installing JS dependencies..."
-npm install
-Assert-Exit "npm install"
-Write-Host "Syncing Python dependencies..."
-uv sync
-Assert-Exit "uv sync"
-
 if (-not $Tauri) {
-  Write-Error "Tauri CLI not found. Run 'npm install' or 'cargo install tauri-cli --version ^2'."
+  Write-Error "Tauri CLI not found. Run 'npm ci' or 'cargo install tauri-cli --version ^2'."
   exit 1
 }
 

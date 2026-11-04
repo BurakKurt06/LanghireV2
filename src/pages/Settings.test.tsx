@@ -14,7 +14,7 @@ import {
   getEmployerPasswordSites,
   revealEmployerPassword,
   getProfile,
-  saveProfile,
+  patchProfile,
   getInbox,
   setInboxSchedule,
 } from "../lib/api";
@@ -58,7 +58,7 @@ vi.mock("../lib/api", () => ({
   getEmployerPasswordSites: vi.fn(async () => ({ sites: [] })),
   revealEmployerPassword: vi.fn(),
   getProfile: vi.fn(),
-  saveProfile: vi.fn(),
+  patchProfile: vi.fn(),
   getInbox: vi.fn(),
   setInboxSchedule: vi.fn(),
 }));
@@ -87,7 +87,7 @@ const mockGetBrowsers = vi.mocked(getBrowsers);
 const mockSetTelemetry = vi.mocked(setTelemetryEnabled);
 const mockOpenDialog = vi.mocked(openDialog);
 const mockGetProfile = vi.mocked(getProfile);
-const mockSaveProfile = vi.mocked(saveProfile);
+const mockSaveProfile = vi.mocked(patchProfile);  // Settings saves its profile fields (PATCH)
 const mockGetInbox = vi.mocked(getInbox);
 const mockSetInboxSchedule = vi.mocked(setInboxSchedule);
 
@@ -559,19 +559,15 @@ describe("Settings categories (reorganization, user-approved 11-01)", () => {
     expect(screen.getByLabelText("Browser the agent uses")).toBeVisible();
   });
 
-  it("opens the AI model by default (and for an unknown link), with the form's own Save only", async () => {
+  it("opens the AI model by default (and for an unknown link); it saves as you change it, without Save Settings", async () => {
     renderSettings("nonsense");
     expect(await screen.findByRole("heading", { name: "sections.aiModel" })).toBeVisible();
     expect(screen.getByTestId("llm-settings-form")).toBeVisible();
     expect(screen.queryByRole("button", { name: /Save Settings/ })).not.toBeInTheDocument();
   });
 
-  it("Job search edits the profile's search fields and saves only those, on the profile as saved now", async () => {
+  it("Job search edits the profile's search fields and saves only those (review R05: one atomic PATCH)", async () => {
     const user = userEvent.setup();
-    // Profile was saved elsewhere after this page loaded: its change must survive this save.
-    mockGetProfile
-      .mockResolvedValueOnce(structuredClone(baseProfile) as never)
-      .mockResolvedValueOnce({ ...structuredClone(baseProfile), name: "Changed On Profile" } as never);
     renderSettings("job-search");
     expect(await screen.findByText("Backend Engineer")).toBeVisible();
     expect(screen.getByText("Boston, MA")).toBeVisible();
@@ -582,8 +578,8 @@ describe("Settings categories (reorganization, user-approved 11-01)", () => {
     await user.click(screen.getByRole("button", { name: /Save Settings/ }));
     await waitFor(() => expect(mockSaveProfile).toHaveBeenCalledTimes(1));
     const saved = mockSaveProfile.mock.calls[0][0];
-    expect(saved.name).toBe("Changed On Profile");
-    expect(saved.skills).toEqual(["Python"]);
+    // Only Settings' own profile fields: the backend keeps everything else as saved now.
+    expect(Object.keys(saved).sort()).toEqual(["job_search", "notes", "search_area", "target_job_titles", "target_locations"]);
     expect(saved.target_job_titles).toEqual(["Backend Engineer", "Data Analyst"]);
     expect(saved.target_locations).toEqual(["Boston, MA"]);
     expect(saved.search_area).toEqual({ center_zip: "", radius: "50" });
@@ -610,8 +606,8 @@ describe("Settings categories (reorganization, user-approved 11-01)", () => {
     await user.click(screen.getByRole("button", { name: /Save Settings/ }));
     await waitFor(() => expect(mockSaveProfile).toHaveBeenCalledWith(expect.objectContaining({
       notes: "Use Apply with resume first. Then check every field.",
-      name: "Ada Lovelace",
     })));
+    expect(mockSaveProfile.mock.calls[0][0]).not.toHaveProperty("name");
   });
 
   it("a profile that couldn't be read hides its fields and is never written; the settings still save", async () => {
@@ -624,6 +620,20 @@ describe("Settings categories (reorganization, user-approved 11-01)", () => {
     await user.click(screen.getByRole("button", { name: /Save Settings/ }));
     await waitFor(() => expect(mockSaveSettings).toHaveBeenCalled());
     expect(mockSaveProfile).not.toHaveBeenCalled();
+  });
+
+  it("Retry for a failed profile read keeps an unsaved settings edit (review R06)", async () => {
+    const user = userEvent.setup();
+    mockGetProfile.mockRejectedValueOnce(new Error("synthetic read failure"));
+    renderSettings("applications");
+    const resume = await screen.findByLabelText("resume.title");
+    await user.clear(resume);
+    await user.type(resume, "C:/synthetic/new.pdf");
+    const panel = screen.getByRole("region", { name: "sections.applications" });
+    await user.click(within(panel).getByRole("button", { name: "retry" }));
+    expect(await screen.findByRole("textbox", { name: "notes.title" })).toHaveValue("Use Apply with resume first.");
+    expect(screen.getByLabelText("resume.title")).toHaveValue("C:/synthetic/new.pdf");
+    expect(mockGetSettings).toHaveBeenCalledTimes(1);   // only the failed source was read again
   });
 
   it("tailoring options moved here: saved at once in the same browser storage", async () => {

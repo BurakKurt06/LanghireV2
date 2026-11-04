@@ -74,12 +74,12 @@ jobs:
         run: uv run --locked python scripts/browser-preflight.py
 
       - name: Browser security regressions (local pages and fake LLM only)
-        # 257 cases take ~20 min; faulthandler prints where a stuck test is waiting, and
+        # These browser cases can take over 20 min; faulthandler prints where a stuck test is waiting, and
         # --maxfail stops a broken browser setup early so the errors are printed in time.
         timeout-minutes: 60
         env:
           LANGHIRE_REAL_BROWSER: '1'
-        run: uv run --locked pytest -o faulthandler_timeout=300 --maxfail=5 tests/backend/cli/test_submit_guard_live.py tests/backend/cli/test_review_round5_live.py tests/backend/core/test_browser_network_live.py tests/backend/core/test_browser_lifecycle_live.py tests/backend/core/test_trial_action_mode_live.py tests/backend/core/test_request_gate_live.py tests/backend/core/test_application_pipeline_live.py tests/backend/core/test_application_compat_live.py tests/backend/core/test_trial_no_send_live.py tests/backend/core/test_trial_ats_live.py tests/backend/core/test_trial_identity_live.py tests/backend/core/test_trial_vendors_live.py tests/backend/core/test_vendor_scope_live.py tests/backend/cli/test_collect_quick_live.py tests/backend/cli/test_collect_review_1018_live.py tests/backend/cli/test_collect_remaining_live.py tests/backend/cli/test_collection_login_live.py -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
+        run: uv run --locked pytest -o faulthandler_timeout=300 --maxfail=5 tests/backend/cli/test_submit_guard_live.py tests/backend/cli/test_review_round5_live.py tests/backend/core/test_browser_network_live.py tests/backend/core/test_browser_lifecycle_live.py tests/backend/core/test_trial_action_mode_live.py tests/backend/core/test_trial_action_mode_recheck_live.py tests/backend/core/test_request_gate_live.py tests/backend/core/test_application_pipeline_live.py tests/backend/core/test_application_compat_live.py tests/backend/core/test_trial_no_send_live.py tests/backend/core/test_trial_ats_live.py tests/backend/core/test_trial_identity_live.py tests/backend/core/test_trial_vendors_live.py tests/backend/core/test_vendor_scope_live.py tests/backend/cli/test_collect_quick_live.py tests/backend/cli/test_collect_review_1018_live.py tests/backend/cli/test_collect_remaining_live.py tests/backend/cli/test_collection_login_live.py -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
 
       - name: Dependency advisories (locked Python and active Windows Rust graph)
         run: uv run --locked python scripts/audit-dependencies.py

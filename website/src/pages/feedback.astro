@@ -68,7 +68,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         <h2 class="text-lg font-bold mb-2">Feedback Submitted!</h2>
         <p class="text-sm text-muted-foreground mb-4">Finish posting it on the GitHub page that opened (sign in to GitHub if asked).</p>
         <a id="discussion-link" href="#" target="_blank" rel="noopener noreferrer" class="btn-primary text-xs inline-flex items-center gap-2">
-          View Discussion
+          View Issue
         </a>
       </div>
 
@@ -84,16 +84,16 @@ import BaseLayout from '../layouts/BaseLayout.astro';
     <div class="mt-8 text-center">
       <p class="text-sm text-muted-foreground">
         You can also browse existing feedback on
-        <a href="https://github.com/jaimaann/LangHire/discussions" target="_blank" rel="noopener noreferrer" class="text-primary font-semibold hover:underline">GitHub Discussions</a>.
+        <a href="https://github.com/BurakKurt06/LanghireV2/issues" target="_blank" rel="noopener noreferrer" class="text-primary font-semibold hover:underline">GitHub Issues</a>.
       </p>
     </div>
   </section>
 </BaseLayout>
 
 <script>
-  // No token in the page: feedback opens GitHub's own "new discussion" form,
+  // No token in the page: feedback opens GitHub's own "new issue" form,
   // pre-filled, and the visitor posts it with their GitHub account.
-  const NEW_DISCUSSION = "https://github.com/jaimaann/LangHire/discussions/new";
+  const NEW_ISSUE = "https://github.com/BurakKurt06/LanghireV2/issues/new";
 
   const form = document.getElementById('feedback-form');
   const categoryInput = form.querySelector('input[name="category"]');
@@ -132,8 +132,8 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 
     let body = description;
     if (email) body += `\n\n---\n*Contact: ${email}*`;
-    const url = `${NEW_DISCUSSION}?category=${encodeURIComponent(category)}`
-      + `&title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}`;
+    const url = `${NEW_ISSUE}?title=${encodeURIComponent(`[${category}] ${title}`)}`
+      + `&body=${encodeURIComponent(body)}`;
     window.open(url, '_blank', 'noopener');
     discussionLink.href = url;
     successMsg.classList.remove('hidden');

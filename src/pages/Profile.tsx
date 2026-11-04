@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useId } from "react";
 import { Save } from "lucide-react";
-import { getProfile, saveProfile, getCountries } from "../lib/api";
+import { getProfile, patchProfile, getCountries } from "../lib/api";
 import type { CandidateProfile, CountryConfig } from "../lib/types";
 import { PageHeader, LoadingSpinner, Section } from "../components/ui";
 import TagInputShared from "../components/ui/TagInput";
@@ -138,12 +138,11 @@ export default function Profile() {
     try {
       setSaveError(null);
       // Only this page's fields: job-search preferences and the AI instructions are edited in
-      // Settings, so re-read the profile and keep what is saved there.
-      const current = await getProfile();
+      // Settings. The backend updates just these, atomically, on the profile as saved now.
       const own = Object.fromEntries(
         Object.entries(profile).filter(([key]) => !(PROFILE_SETTINGS_FIELDS as readonly string[]).includes(key)),
       );
-      await saveProfile({ ...current, ...own } as CandidateProfile);
+      await patchProfile(own as Partial<CandidateProfile>);
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (e) {

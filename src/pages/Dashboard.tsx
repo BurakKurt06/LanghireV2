@@ -33,6 +33,9 @@ export default function Dashboard() {
 
   useEffect(() => {
     let cancelled = false;
+    // The data has been loaded (or a load is under way): a backend that starts late is loaded
+    // once its health check succeeds (review R13).
+    let dataRequested = false;
 
     async function init() {
       markStart("dashboard_load");
@@ -42,11 +45,20 @@ export default function Dashboard() {
           if (!cancelled) setBackendOk(true);
           break;
         } catch {
-          if (i === 9) { if (!cancelled) setBackendOk(false); return; }
+          if (i === 9) {
+            // Not up yet: show the "not connected" state instead of an endless spinner; the
+            // health poll below loads the data when the backend answers.
+            if (!cancelled) { setBackendOk(false); setLoading(false); }
+            return;
+          }
           await new Promise((r) => setTimeout(r, 1500));
         }
       }
+      await loadData();
+    }
 
+    async function loadData() {
+      dataRequested = true;
       try {
         const [data, setup, qaStats] = await Promise.all([
           getDashboardData(),
@@ -91,7 +103,11 @@ export default function Dashboard() {
     const healthPoll = setInterval(() => {
       if (cancelled) return;
       checkHealth()
-        .then(() => { if (!cancelled) setBackendOk(true); })
+        .then(() => {
+          if (cancelled) return;
+          setBackendOk(true);
+          if (!dataRequested) void loadData();
+        })
         .catch(() => { if (!cancelled) setBackendOk(false); });
     }, 30000);
 

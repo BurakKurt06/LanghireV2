@@ -85,10 +85,16 @@ fi
 
 # ── 1. Tooling checks ───────────────────────────────────────────────────────
 command -v uv  >/dev/null || { echo "❌ 'uv' not found — install from https://docs.astral.sh/uv/"; exit 1; }
-command -v npm >/dev/null || { echo "❌ 'npm' not found — install Node.js 20+"; exit 1; }
+command -v npm >/dev/null || { echo "❌ 'npm' not found — install Node.js 22.12+"; exit 1; }
 command -v cargo >/dev/null || { echo "❌ 'cargo' not found — install Rust from https://rustup.rs"; exit 1; }
 
-# Resolve the Tauri CLI: prefer the local npm binary, fall back to cargo-tauri.
+# ── 2. Install dependencies, exactly as locked (never upgraded by a build) ──
+echo "📦 Installing JS dependencies..."
+npm ci
+echo "📦 Syncing Python dependencies..."
+uv sync --locked
+
+# Resolve the Tauri CLI after the install, which provides the local one.
 if [ -x "node_modules/.bin/tauri" ]; then
   TAURI="node_modules/.bin/tauri"
 elif cargo tauri --version >/dev/null 2>&1; then
@@ -97,15 +103,9 @@ else
   TAURI=""
 fi
 
-# ── 2. Install dependencies ─────────────────────────────────────────────────
-echo "📦 Installing JS dependencies..."
-npm install
-echo "📦 Syncing Python dependencies..."
-uv sync
-
 if [ -z "$TAURI" ]; then
   echo "❌ Tauri CLI not found. Install with one of:"
-  echo "     npm install            # provides node_modules/.bin/tauri"
+  echo "     npm ci                 # provides node_modules/.bin/tauri"
   echo "     cargo install tauri-cli --version '^2'"
   exit 1
 fi

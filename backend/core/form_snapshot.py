@@ -84,18 +84,20 @@ def changed_fields(before: dict[str, tuple[str, str]], after: dict[str, tuple[st
     """(label, old value, new value) for each field that was on the page before and whose value changed.
 
     A field that only appeared during the wait isn't counted: the page could
-    have added it, and these become the user's saved answers.
+    have added it, and these become the user's saved answers. A field the user
+    cleared counts too (new value ""): the agent must leave it empty (review R07).
     """
     changes = []
     for key, (label, value) in after.items():
         if key not in before:
             continue
         old = before[key][1]
-        if value != old and value.strip():
-            changes.append((label, old, value))
+        if value.strip() != old.strip() and (value.strip() or old.strip()):
+            changes.append((label, old, value if value.strip() else ""))
     return changes
 
 
 def describe_changes(changes: list[tuple[str, str, str]]) -> str:
     """Prompt text for the fields the user set by hand."""
-    return "\n".join(f'- "{label}" = "{new}"' for label, _old, new in changes)
+    return "\n".join(f'- "{label}" = "{new}"' if new else f'- "{label}": leave it empty (the user cleared it)'
+                     for label, _old, new in changes)

@@ -933,16 +933,36 @@ class MemoryStore:
     def qa_merge(self, source_id: int, target_id: int, allow_conflict: bool = False) -> bool:
         """Merge one question into another. Refused (False) for a self-merge, a missing or
         already-merged question, a loop, or differing answers (unless allow_conflict)."""
-        if self.qa_merge_problem(source_id, target_id, allow_conflict):
-            return False
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-        source = conn.execute("SELECT times_seen FROM qa_repository WHERE id = ?", (source_id,)).fetchone()
+        if not conn.in_transaction:
+            # Take the write lock first, so the checks below and the merge see the same rows.
+            conn.execute("BEGIN IMMEDIATE")
         with conn:
-            conn.execute("UPDATE qa_repository SET merged_into_id = ?, updated_at = ? WHERE id = ?", (target_id, now, source_id))
-            conn.execute("UPDATE qa_repository SET times_seen = times_seen + ?, updated_at = ? WHERE id = ?",
-                         (source["times_seen"], now, target_id))
+            if self.qa_merge_problem(source_id, target_id, allow_conflict):
+                return False
+            self._fold_into(conn, source_id, target_id, now)
         return True
+
+    @staticmethod
+    def _fold_into(conn, source_id: int, target_id: int, now: str) -> None:
+        """Point `source_id` at `target_id` and add its count. When the target has no answer, it
+        takes the source's answer with its provenance (who gave it, where) and its choices, so a
+        merge never drops the only answer. Each step is one statement, so a concurrent write
+        can't slip in between the check and the copy."""
+        conn.execute(
+            "UPDATE qa_repository SET answer = s.answer, source = s.source, source_domain = s.source_domain"
+            " FROM (SELECT answer, source, source_domain FROM qa_repository WHERE id = ?) AS s"
+            " WHERE qa_repository.id = ? AND TRIM(COALESCE(qa_repository.answer, '')) = ''"
+            " AND TRIM(COALESCE(s.answer, '')) != ''",
+            (source_id, target_id))
+        conn.execute(
+            "UPDATE qa_repository SET options = (SELECT options FROM qa_repository WHERE id = ?)"
+            " WHERE id = ? AND TRIM(COALESCE(options, '')) = ''", (source_id, target_id))
+        conn.execute("UPDATE qa_repository SET merged_into_id = ?, updated_at = ? WHERE id = ?", (target_id, now, source_id))
+        conn.execute(
+            "UPDATE qa_repository SET times_seen = times_seen + (SELECT times_seen FROM qa_repository WHERE id = ?),"
+            " updated_at = ? WHERE id = ?", (source_id, now, target_id))
 
     def qa_auto_squash(self) -> int:
         """Run fuzzy dedup across all unmerged questions. Returns number of merges."""
@@ -959,8 +979,10 @@ class MemoryStore:
                 if b["id"] in merged_ids:
                     continue
                 if self.same_meaning(a["normalized"], b["normalized"], 0.85) and not self._answers_conflict(a, b):
-                    conn.execute("UPDATE qa_repository SET merged_into_id = ?, updated_at = ? WHERE id = ?", (a["id"], now, b["id"]))
-                    conn.execute("UPDATE qa_repository SET times_seen = times_seen + ?, updated_at = ? WHERE id = ?", (b["times_seen"], now, a["id"]))
+                    self._fold_into(conn, b["id"], a["id"], now)
+                    # `a` may just have taken b's answer; later conflict checks must see it.
+                    a = conn.execute("SELECT id, normalized, times_seen, answer FROM qa_repository WHERE id = ?",
+                                     (a["id"],)).fetchone()
                     merged_ids.add(b["id"])
                     merged_count += 1
 
