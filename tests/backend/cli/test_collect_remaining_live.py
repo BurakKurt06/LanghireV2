@@ -238,7 +238,7 @@ async def test_production_collector_loads_runtime_third_party_reads_without_writ
     import httpx
     from browser_use import BrowserSession
     from core import job_page, shared_config
-    from core.browsers import find_browser
+    import conftest
     from sources.registry import PluginRegistry
     from tests.backend.core.test_request_gate_live import wait_for
 
@@ -259,7 +259,7 @@ async def test_production_collector_loads_runtime_third_party_reads_without_writ
         """),
         '/jobs/api': (200, {}, b'<a style="display:block;width:200px;height:40px" href="https://www.linkedin.com/jobs/view/1234567890/">Local Analyst</a><a hidden href="https://www.linkedin.com/jobs/view/9999999999/">Hidden trap</a>'),
     }
-    monkeypatch.setattr(shared_config, 'selected_browser', lambda settings: (find_browser('brave') or find_browser('chrome'), data_dir/'browser'))
+    monkeypatch.setattr(shared_config, 'selected_browser', lambda settings: (conftest.live_browser(), data_dir/'browser'))
     monkeypatch.setattr(shared_config, 'load_runtime_settings', lambda: {})
     def headless(**kwargs):
         kwargs['args'] = [arg for arg in kwargs.get('args', []) if not arg.startswith('--host-resolver-rules=')] + ['--host-resolver-rules=MAP * ~NOTFOUND']
