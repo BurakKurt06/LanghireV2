@@ -7,20 +7,23 @@ backend) that collects job listings and fills in applications in a real browser.
 
 - **This repo (private)** is the working base. All work happens here.
 - **Public repo** `https://github.com/BurakKurt06/LanghireV2` gets updates only when the
-  user says "publish". Before publishing: run the checks below and scan for personal data.
+  user explicitly requests publication or pushing/synchronizing both repositories.
+  Before publishing: run the checks below and scan for personal data.
   Leave out internal review files (`REMEDIATION.md`, `CODEX_RESPONSE.md`,
   `CODEX_RESUME_CHECKPOINT.md`, `SETTINGS_REORG_PLAN.md`, `security/`).
 
 ## Hard rules
 
-- Pushing (user's rule, 2026-10-31): Claude may commit and push to this private repo
-  (`langhireV2old`) without asking, on one working branch with a pull request into `main` that the
-  user merges. Never push to the public repo except when the user says "publish", and never
-  force-push it. Other agents: commit or push only when the user asks.
+- Pushing (user's rule, 2026-10-31, clarified 2026-11-04): Claude may commit and push to this
+  private repo (`langhireV2old`) without asking. Other agents: commit or push only when the
+  user asks. Public pushes still require the explicit request above. Never force-push public.
 - For Codex-authored work in either LangHireV2 repository, use the commit author
   `Codex <codex@openai.com>` (for example, `git commit --author="Codex <codex@openai.com>"`).
-  When commits/pushes are authorized, use a separate branch and open a PR into `main`;
-  the user merges it. Preserve the original commit author when merging. This standing
+  When commits/pushes are authorized, finish the requested synchronization on `main` with
+  a clean working tree and no pending PRs (user's instruction, 2026-11-04). Do not create a
+  PR unless the user asks or repository protection requires one; finish required checks
+  and authorized merges rather than leaving a manual merge waiting. Never bypass required
+  checks. Preserve the original commit author when merging. This standing
   attribution instruction does not authorize a commit, push, merge, or public publication.
 - Tests and probes must not sign in to the user's accounts, read their Gmail, submit real
   applications, make production POST requests, call paid AI providers, or overwrite personal
