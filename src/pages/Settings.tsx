@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
+import type { SiteAccount } from "../lib/api";
 import { Save, FolderOpen, X, Upload, Trash2, Sun, Moon, Monitor } from "lucide-react";
 import {
   getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin, getBrowsers,
-  getEmployerPasswordSites, revealEmployerPassword, getProfile, patchProfile, getInbox, setInboxSchedule, revealSecret,
+  getEmployerPasswordSites, revealEmployerPassword, forgetSiteAccount, getProfile, patchProfile, getInbox, setInboxSchedule, revealSecret,
 } from "../lib/api";
 import { setTelemetryEnabled as setAnalyticsTelemetry } from "../lib/analytics";
 import { getStoredTheme, setTheme, type ThemeMode } from "../lib/theme";
@@ -889,14 +890,20 @@ function SettingSwitch({ label, description, checked, onChange, disabled = false
 
 
 /** Sites whose account uses another password than the one above: names listed, each shown only when asked. */
+/** Settings → Accounts & email: the job sites where the app has an account (its memory of them),
+ *  and the sites whose password got characters added for their rules. One list, one row per site. */
 function EmployerPasswords() {
-  const [entries, setEntries] = useState<{ site: string; kind: "changed" | "generated" }[]>([]);
+  const [passwords, setPasswords] = useState<{ site: string; kind: "changed" | "generated" }[]>([]);
+  const [accounts, setAccounts] = useState<SiteAccount[]>([]);
   const [shown, setShown] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
 
   useEffect(() => {
     getEmployerPasswordSites()
-      .then((r) => setEntries(r.entries ?? (r.sites || []).map((site) => ({ site, kind: "generated" as const }))))
+      .then((r) => {
+        setPasswords(r.entries ?? (r.sites || []).map((site) => ({ site, kind: "generated" as const })));
+        setAccounts(r.accounts ?? []);
+      })
       .catch(() => {});
   }, []);
 
@@ -918,29 +925,58 @@ function EmployerPasswords() {
     }
   };
 
-  if (entries.length === 0) return null;
+  const forget = async (site: string) => {
+    setError("");
+    try {
+      await forgetSiteAccount(site);
+      setAccounts((prev) => prev.filter((a) => a.site !== site));
+    } catch {
+      setError(`Couldn't forget the account on ${site}.`);
+    }
+  };
+
+  // One row per site: an account the app remembers, a lengthened password, or both.
+  const passwordFor = (site: string) => passwords.find((p) => p.site === site || site.startsWith(`${p.site}/`));
+  const rows = [
+    ...accounts.map((a) => ({ site: a.site, account: a, password: passwordFor(a.site) })),
+    ...passwords.filter((p) => !accounts.some((a) => a.site === p.site || a.site.startsWith(`${p.site}/`)))
+      .map((p) => ({ site: p.site, account: undefined as SiteAccount | undefined, password: p })),
+  ];
+  if (rows.length === 0) return null;
   return (
     <div className="mt-5">
-      <h3 className="text-sm font-semibold text-foreground mb-1">Sites with a different password</h3>
+      <h3 className="text-sm font-semibold text-foreground mb-1">Accounts on job sites</h3>
       <p className="text-[13px] text-muted-foreground mb-2">
-        Use the password shown here to sign in to these sites yourself.
+        Sites where the app has an account for your application email. It signs in there instead of registering
+        again. Where a site needed characters added to your password, Show gives the version it uses there.
       </p>
       {error && <p role="alert" className="text-[13px] text-destructive mb-2">{error}</p>}
       <ul className="space-y-1.5">
-        {entries.map(({ site, kind }) => (
+        {rows.map(({ site, account, password }) => (
           <li key={site} className="flex items-center justify-between gap-3 text-[13px]">
             <span className="min-w-0">
               <span className="font-mono truncate">{site}</span>
               <span className="ml-2 text-muted-foreground">
-                {kind === "changed" ? "your password with characters added for this site's rules" : "made by an earlier version of the app"}
+                {[account?.description,
+                  password && (password.kind === "changed" ? "password with characters added for this site's rules"
+                    : "password made by an earlier version of the app")].filter(Boolean).join(" · ")}
               </span>
             </span>
             <span className="flex items-center gap-2">
-              {shown[site] && <code className="font-mono select-all">{shown[site]}</code>}
-              <button type="button" className="btn-secondary" onClick={() => toggle(site)}
-                aria-label={`${shown[site] ? "Hide" : "Show"} the password for ${site}`}>
-                {shown[site] ? "Hide" : "Show"}
-              </button>
+              {password && shown[password.site] && <code className="font-mono select-all">{shown[password.site]}</code>}
+              {password && (
+                <button type="button" className="btn-secondary" onClick={() => toggle(password.site)}
+                  aria-label={`${shown[password.site] ? "Hide" : "Show"} the password for ${password.site}`}>
+                  {shown[password.site] ? "Hide" : "Show"}
+                </button>
+              )}
+              {account && (
+                <button type="button" className="btn-secondary" onClick={() => forget(account.site)}
+                  title="The app forgets this account (for example, you deleted it): next time it registers again"
+                  aria-label={`Forget the account on ${account.site}`}>
+                  Forget
+                </button>
+              )}
             </span>
           </li>
         ))}

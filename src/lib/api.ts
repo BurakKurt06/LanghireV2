@@ -204,8 +204,19 @@ export async function fetchProviderModels(provider: string, apiKey = "", baseUrl
 }
 
 /** Sites whose account uses another password than the one saved in Settings (names only). */
+export interface SiteAccount { site: string; email: string; since: string; description: string }
+
 export async function getEmployerPasswordSites() {
-  return request<{ sites: string[]; entries?: { site: string; kind: "changed" | "generated"; saved_at: string }[] }>("/credentials/sites");
+  return request<{
+    sites: string[];
+    entries?: { site: string; kind: "changed" | "generated"; saved_at: string }[];
+    accounts?: SiteAccount[];
+  }>("/credentials/sites");
+}
+
+/** The app forgets its account on one site (the user deleted it, or the memory is wrong). */
+export async function forgetSiteAccount(site: string) {
+  return request<{ success: boolean }>(`/credentials/accounts?site=${encodeURIComponent(site)}`, { method: "DELETE" });
 }
 
 /** A saved secret in full (the page otherwise only has a row of dots for it): for a field's eye button. */

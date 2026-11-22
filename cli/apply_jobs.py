@@ -52,6 +52,7 @@ try:
     from memory.metrics import MetricsStore
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import core.captcha as _captcha
+    from core import site_accounts
     from core import (ai_extras, browser_policy, click_patch, default_answers, form_check, form_snapshot, geo, inbox,
                       job_page, run_watch, secret_store, site_access, submit_guard)
 except ImportError:
@@ -68,6 +69,7 @@ except ImportError:
     from backend.memory.metrics import MetricsStore
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import backend.core.captcha as _captcha
+    from backend.core import site_accounts
     from backend.core import (ai_extras, browser_policy, click_patch, default_answers, form_check, form_snapshot, geo,
                               inbox, job_page, run_watch, secret_store, site_access, submit_guard)
 
@@ -969,6 +971,11 @@ class PasswordRejection(BaseModel):
     forbidden_characters: str = Field(default="", description="Characters the site says are not allowed")
 
 
+class AccountResult(BaseModel):
+    result: Literal["created", "signed_in"] = Field(
+        description="'created' right after a new account was made on this site; 'signed_in' once signing in worked")
+
+
 class InstructionConflict(BaseModel):
     instruction: str = Field(description="The user's instruction, in a few words")
     rule: str = Field(description="The built-in rule it conflicts with, in a few words")
@@ -1048,6 +1055,33 @@ def guard_next_clicks(tools: Tools, agent_ref: dict, worker_id: int) -> None:
     tools._click_by_index = guarded
 
 
+_HAS_PASSWORD_FIELD_JS = "() => !!document.querySelector('input[type=password]')"
+
+
+async def account_memory_note(agent) -> str:
+    """What the app remembers about an account on the site the agent is on (no AI request spent).
+
+    A known account: sign in, never register again. None known, on a sign-in or sign-up page: the
+    app hasn't made one there, so register (a site that says the email is taken: sign in)."""
+    agent_ref = getattr(agent, "_langhire_ref", None) or {}
+    trail = agent_ref.get("trail")
+    secrets = agent_ref.get("secrets") or {}
+    email = secrets.get("account_email") or secrets.get("email") or ""
+    url = await agent.browser_session.get_current_page_url()
+    if not email or trail is None or not trail.led_to(url) or credential_refusal(url):
+        return ""
+    entry = await asyncio.to_thread(site_accounts.known, url, email)
+    if entry:
+        return (f"ACCOUNT MEMORY: the app already has an account on this site ({entry['site']}: "
+                f"{site_accounts.describe(entry)}). SIGN IN with the account email and password; never create "
+                "another account here.")
+    if not await browser_policy.evaluate(agent.browser_session, _HAS_PASSWORD_FIELD_JS):
+        return ""
+    return (f"ACCOUNT MEMORY: the app has no account on this site ({site_accounts.account_key(url)}) yet. "
+            "Create one (Create account / Register / Sign up / New user). If the site says the email is already "
+            "registered, sign in instead. Then call account_result.")
+
+
 def add_form_check_each_step(agent, profile: dict | None = None) -> None:
     """Put the page's FORM CHECK note into every step's prompt (after the page; cheap, cache-friendly)."""
     from browser_use.llm.messages import UserMessage
@@ -1059,6 +1093,12 @@ def add_form_check_each_step(agent, profile: dict | None = None) -> None:
         await original(step_info)
         try:
             note = form_check.checklist_text(await form_check.scan(agent.browser_session), profile)
+            if note:
+                agent._message_manager._add_context_message(UserMessage(content=note))
+        except Exception:
+            pass
+        try:
+            note = await account_memory_note(agent)
             if note:
                 agent._message_manager._add_context_message(UserMessage(content=note))
         except Exception:
@@ -1312,7 +1352,8 @@ def enforce_submit_policy(tools: Tools, guard: "submit_guard.SubmitGuard", worke
 # doesn't concern them.
 _APP_ONLY_ACTIONS = {"done", "ask_for_answers", "ask_user_for_help", "record_guesses", "set_job_details",
                      "write_cover_letter", "request_submit_review", "password_rejected", "note_conflict",
-                     "get_email_verification", "wait", "screenshot", "extract", "search_page", "find_elements"}
+                     "get_email_verification", "wait", "screenshot", "extract", "search_page", "find_elements",
+                     "account_result"}
 _FIELD_ACTIONS = {"input", "select_dropdown", "click", "upload_file", "dropdown_options"}
 
 
@@ -1538,6 +1579,8 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         if _host_of(await browser_session.get_current_page_url()) != _host_of(page_url):
             return ActionResult(error="The page changed while the verification email was being read. Look at the "
                                       "page again and request the verification once more if it is still needed.")
+        if result.get("code") or result.get("link"):
+            await asyncio.to_thread(site_accounts.record, page_url, recipient, "verified")
         if result.get("code"):
             print(f"  📧 [W{worker_id}] Verification code read from the email for {_host_of(page_url)}")
             return ActionResult(extracted_content=f"The verification code is {result['code']}. Type it into the code field.")
@@ -1608,6 +1651,23 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         return ActionResult(extracted_content=(
             "Saved a version of the password that meets those rules for this site. Clear the password field(s) and "
             "type <secret>password</secret> again; it now holds that version here."))
+
+    @tools.action(
+        "Tell the app that an account on this site now exists for the application email: 'created' right after "
+        "you created one, 'signed_in' once signing in worked. The app remembers it, so later applications on this "
+        "site sign in instead of registering again. Call it in the same step as your next action.",
+        param_model=AccountResult,
+    )
+    async def account_result(params: AccountResult, browser_session: _BrowserSessionType):
+        page_url = await browser_session.get_current_page_url()
+        trail.saw(page_url)
+        if credential_refusal(page_url) or not trail.led_to(page_url):
+            return ActionResult(extracted_content="Noted.")
+        secrets = agent_ref.get("secrets") or {}
+        email = secrets.get("account_email") or secrets.get("email") or ""
+        if await asyncio.to_thread(site_accounts.record, page_url, email, params.result):
+            print(f"  🔑 [W{worker_id}] Remembered: an account on {site_accounts.account_key(page_url)} ({params.result.replace('_', ' ')})")
+        return ActionResult(extracted_content="Noted: the app remembers this account.")
 
     @tools.action(
         "Say that one of the user's own instructions conflicted with a built-in rule and what you did. Call it "
@@ -2464,12 +2524,15 @@ def accounts_instructions(has_password: bool) -> str:
         "\n\nACCOUNTS: when this job leads to a hiring site that wants an account (the employer's own pages, Workday, "
         "SuccessFactors, iCIMS, Taleo, Greenhouse or any other), use one. It is part of applying.\n"
         "- If the site lets you apply as a guest, do that instead.\n"
-        "- SIGN IN with <secret>account_email</secret> and <secret>password</secret> when the page offers it. If the "
-        "site answers that the email or password is wrong, or that there is no such account, there is most likely NO "
-        "ACCOUNT YET: use the page's 'Create account' / 'Register' / 'Sign up' / 'New user' link and CREATE one with "
-        "the same two (type <secret>password</secret> again in the confirm field). The button that finishes it "
-        "('Create Account', 'Register', 'Submit Registration') creates the account; it does not send the "
-        "application. If Create Account says the email is already registered, sign in instead.\n"
+        "- On a sign-in or sign-up page, each step's ACCOUNT MEMORY note says whether the app already has an "
+        "account on this site. Known account: SIGN IN with <secret>account_email</secret> and "
+        "<secret>password</secret>. No account known: CREATE one with the same two (type <secret>password</secret> "
+        "again in the confirm field); if the site says the email is already registered, sign in instead. Without a "
+        "note, sign in, and if the site says the email or password is wrong or there is no such account, create "
+        "one. The button that finishes it ('Create Account', 'Register', 'Submit Registration') creates the "
+        "account; it does not send the application.\n"
+        "- Right after you create an account, or once signing in worked, call account_result ('created' or "
+        "'signed_in'): the app remembers it for this site's later applications.\n"
         "- If the site REJECTS the password for its rules (too short, needs a symbol, ...): call password_rejected "
         "with the rules the page shows, then type <secret>password</secret> again. Never invent, shorten or change a "
         "password yourself.\n"

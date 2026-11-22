@@ -13,6 +13,7 @@ import {
   getBrowsers,
   getEmployerPasswordSites,
   revealEmployerPassword,
+  forgetSiteAccount,
   getProfile,
   patchProfile,
   getInbox,
@@ -59,6 +60,7 @@ vi.mock("../lib/api", () => ({
   getBrowsers: vi.fn(),
   getEmployerPasswordSites: vi.fn(async () => ({ sites: [] })),
   revealEmployerPassword: vi.fn(),
+  forgetSiteAccount: vi.fn(),
   getProfile: vi.fn(),
   patchProfile: vi.fn(),
   getInbox: vi.fn(),
@@ -612,6 +614,28 @@ describe("SettingsPage", () => {
     mockGetPlugins.mockRejectedValueOnce(new Error("boom"));
     renderSettings();
     expect(await screen.findByRole("button", { name: /Save Settings/ })).toBeInTheDocument();
+  });
+
+  it("lists the job sites where the app has an account, merged with their lengthened passwords, and can forget one", async () => {
+    const user = userEvent.setup();
+    vi.mocked(getEmployerPasswordSites).mockResolvedValue({
+      sites: ["campus.example.net"],
+      entries: [{ site: "campus.example.net", kind: "changed", saved_at: "2026-11-14T23:40:00Z" }],
+      accounts: [
+        { site: "campus.example.net", email: "ada@example.com", since: "2026-11-14T23:40:00Z", description: "created Nov 14, 2026" },
+        { site: "acme.wd1.myworkdayjobs.com", email: "ada@example.com", since: "2026-11-13T10:00:00Z", description: "email verified Nov 13, 2026" },
+      ],
+    } as never);
+    vi.mocked(forgetSiteAccount).mockResolvedValue({ success: true } as never);
+    renderSettings("accounts");
+    expect(await screen.findByText("Accounts on job sites")).toBeInTheDocument();
+    expect(screen.getAllByText("campus.example.net")).toHaveLength(1);         // one row: account and password together
+    expect(screen.getByText(/created Nov 14, 2026 · password with characters added/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show the password for campus.example.net" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show the password for acme.wd1.myworkdayjobs.com" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Forget the account on acme.wd1.myworkdayjobs.com" }));
+    expect(forgetSiteAccount).toHaveBeenCalledWith("acme.wd1.myworkdayjobs.com");
+    await waitFor(() => expect(screen.queryByText("acme.wd1.myworkdayjobs.com")).not.toBeInTheDocument());
   });
 
   it("lists the employer passwords the app made, each shown only on request", async () => {

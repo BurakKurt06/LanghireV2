@@ -130,7 +130,7 @@ def _stop_operations_and_browsers():
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHireV2 Backend", version="1.3.1", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.3.2", lifespan=lifespan)
 
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
@@ -628,7 +628,7 @@ async def health():
     all_ok = db_ok and chromium_ok and llm_configured
     return {
         "status": "ok" if all_ok else "degraded",
-        "version": "1.3.1",
+        "version": "1.3.2",
         "frozen": getattr(sys, 'frozen', False),
         "checks": {
             "database": db_ok,
@@ -838,9 +838,20 @@ async def employer_password_sites():
     """Sites whose account uses another password than the one saved in Settings (names only):
     kind "changed" is the user's password with characters added to meet that site's rules,
     "generated" one an earlier version of the app made for that site."""
-    from core import secret_store
+    from core import secret_store, site_accounts
     entries = secret_store.site_password_entries()
-    return {"sites": [e["site"] for e in entries], "entries": entries}
+    email = ((load_settings().get("sensitive_data") or {}).get("email") or "")
+    return {"sites": [e["site"] for e in entries], "entries": entries,
+            "accounts": [{**a, "description": site_accounts.describe(a)} for a in site_accounts.entries(email)]}
+
+
+@app.delete("/credentials/accounts")
+async def forget_site_account(site: str = Query(...)):
+    """The user says the app has no account on this site (it was deleted, or the memory is wrong)."""
+    from core import site_accounts
+    if not site_accounts.forget(site):
+        return _api_error("not_found", "No remembered account for that site", 404)
+    return {"success": True}
 
 
 @app.get("/default-answers")
