@@ -149,6 +149,17 @@ describe("QA page", () => {
     expect(await screen.findByRole("status")).toHaveTextContent('toCheckBanner:{"count":2}');
   });
 
+  it("a guess says what it was worked out from; the user's own answer and other answers don't", async () => {
+    mockGetQAList.mockResolvedValue([
+      makeEntry({ id: 4, question: "Graduation date", answer: "05/15/2028", source: "guess", basis: "profile: May 2028" }),
+      makeEntry({ id: 5, question: "Plain guess?", answer: "No", source: "guess" }),
+      makeEntry({ id: 6, question: "Mine?", answer: "Yes", source: "user", basis: "left over" }),
+    ] as never);
+    render(<QA />);
+    expect(await screen.findByText("guessed from profile: May 2028")).toBeInTheDocument();
+    expect(screen.getAllByText(/^guessed from /)).toHaveLength(1);
+  });
+
   it("an option chip fills in the answer", async () => {
     mockGetQAList.mockResolvedValue([
       makeEntry({ id: 7, question: "Clearance?", answer: "", options: "Yes\nNo" }),

@@ -105,6 +105,11 @@ def _compact_memory_db() -> dict | None:
     if not metrics:
         return None
     try:
+        # Log lines beyond the newest 200,000 go first (the user agreed, 2026-11: one run's error
+        # traces had grown the file to 451 MB again); their space is then given back.
+        trimmed = metrics.trim_logs()
+        if trimmed:
+            _log.info(f"Trimmed {trimmed} old log lines")
         result = metrics.compact()
         if result["compacted"]:
             _log.info(f"Compacted the memory database: {result['before'] / 1e6:.0f} MB -> {result['after'] / 1e6:.0f} MB")
@@ -130,7 +135,7 @@ def _stop_operations_and_browsers():
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHireV2 Backend", version="1.3.2", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.3.3", lifespan=lifespan)
 
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
@@ -628,7 +633,7 @@ async def health():
     all_ok = db_ok and chromium_ok and llm_configured
     return {
         "status": "ok" if all_ok else "degraded",
-        "version": "1.3.2",
+        "version": "1.3.3",
         "frozen": getattr(sys, 'frozen', False),
         "checks": {
             "database": db_ok,
@@ -1598,6 +1603,12 @@ async def start_applying(body: ApplyRequest):
     problem = _start_problem(apply=True)
     if problem:
         return {"success": False, "message": problem}
+    from core import usage_meter
+    no_room = usage_meter.stop_reason()
+    if no_room is not None and not usage_meter.resets_soon(no_room):
+        # Every job would be cut off (or never start): say so instead of starting. (A limit that
+        # resets within minutes doesn't stop a start: the run waits for it.)
+        return {"success": False, "message": f"Not started: {no_room['message']}."}
     requested = ([body.job_url] if body.job_url else body.job_urls or [])
     jobs_before_start = _load_jobs()
     if not body.acknowledge_unknown and any((jobs_before_start.get(url) or {}).get("submit_attempted_at") for url in requested):
@@ -1784,6 +1795,99 @@ def _current_jobs() -> list[dict]:
         return []
 
 
+def _run_notice() -> dict:
+    """Why the run is waiting or stopped starting jobs ("Stopped: ChatGPT limit, resets in ..."); kept
+    after the run ends, until the next one starts."""
+    try:
+        from cli import apply_jobs as _aj
+        return _aj.run_notice()
+    except Exception:
+        return {"text": "", "kind": ""}
+
+
+@app.post("/apply/check")
+async def check_before_start(body: dict):
+    """What Start checks and asks before the first job (core/run_checks). Nothing starts here, and
+    no AI request is made: the usage meter is the one the last replies reported."""
+    from core import run_checks
+    from core.shared_config import load_runtime_settings, read_jobs
+    urls = [u for u in (body.get("job_urls") or []) if isinstance(u, str)][:5000]
+    jobs = read_jobs()
+    queued = ([dict(jobs[u], url=u) for u in urls if u in jobs] if urls
+              else [dict(j, url=u) for u, j in jobs.items() if j.get("status") == "pending"])
+    llm = load_llm_settings()
+    profile = load_profile()
+    resume = (load_settings().get("resume_path") or "").strip()
+    auth = await auth_status()
+    problems = await asyncio.to_thread(lambda: run_checks.start_problems(
+        llm_ready=_llm_ready(llm), provider=str(llm.get("provider") or ""), settings=load_runtime_settings(),
+        profile=profile, resume_ok=bool(resume and Path(resume).is_file()),
+        gmail_signed_in=bool((auth.get("gmail") or {}).get("logged_in"))))
+    questions = run_checks.start_questions(queued, jobs, _get_memory_store(), profile)
+    return {"ok": not problems, "problems": problems, "questions": questions, "jobs": len(queued)}
+
+
+@app.get("/jobs/questions")
+async def waiting_questions():
+    """The questions jobs are waiting on, each once, with the jobs that wait on it."""
+    from core import run_checks
+    from core.shared_config import read_jobs
+    return {"questions": run_checks.group_questions(read_jobs(), _get_memory_store())}
+
+
+@app.post("/jobs/questions/answer")
+async def answer_question_everywhere(body: dict):
+    """One answer for a question, wherever it is waited on.
+
+    Saved as the user's own answer (used on every site, in every later run: never asked again).
+    Every job waiting on that question gets it; a job with nothing else to wait for goes back to
+    ready. A run waiting for it right now continues at once. Jobs that may already have been
+    sent are left as they are.
+    """
+    from cli import apply_jobs
+    from core import run_checks
+    from core.shared_config import mutate_jobs
+    question, answer = _text(body, "question", 600), _text(body, "answer", 2000)
+    if not question or not answer:
+        return _api_error("invalid_field", "Type an answer first", 400)
+    store = _get_memory_store()
+    if store is not None:
+        store.qa_set_answer(question, answer, source="user")
+    continued = 0
+    for waiting in apply_jobs.pending_help():
+        asked = next((q.get("question", "") for q in waiting.get("questions") or []
+                      if run_checks._same_question(q.get("question", ""), question, store)), "")
+        if asked and apply_jobs.answer_help(waiting["url"], "", False, {asked: answer}):
+            continued += 1
+
+    def apply(jobs):
+        ready = waiting = 0
+        for url, left in run_checks.answer_everywhere(jobs, question, store).items():
+            if left is None:
+                jobs[url].update(status="pending", error=None, pending_questions=None)
+                ready += 1
+            else:
+                jobs[url]["pending_questions"] = left
+                waiting += 1
+        return ready, waiting
+
+    ready, still_waiting = mutate_jobs(apply)
+    return {"success": True, "ready": ready, "still_waiting": still_waiting, "continued": continued}
+
+
+@app.get("/jobs/screenshot")
+async def job_screenshot(url: str = Query(...)):
+    """The picture of a job's last page (kept when it failed, needs you or wasn't confirmed)."""
+    from fastapi.responses import FileResponse
+    from core import job_screenshots
+    if url not in _load_jobs():
+        return _api_error("not_found", "Job not found", 404)
+    path = job_screenshots.path_for(url)
+    if not path.is_file():
+        return _api_error("not_found", "No picture of this job's last page is kept", 404)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
 @app.post("/apply/skip")
 async def skip_current_job(body: dict):
     """Stop the application to one job and move on to the next (the job stays pending)."""
@@ -1889,6 +1993,8 @@ async def apply_status():
             "error": _apply_status.get("error"),
             "finished_at": _apply_status.get("finished_at"),
             "run_id": _apply_status.get("run_id"),
+            # "Stopped: ChatGPT limit ..., resets in about N minutes" / "Waiting: ..." (also after the run).
+            "notice": _run_notice(),
         }
 
 
@@ -2049,6 +2155,11 @@ async def update_job_status(body: dict):
     update_job(url, status=new_status, error=None, submission_evidence=(
         {"kind": "user_confirmed", "confirmed_at": datetime.now(timezone.utc).isoformat()}
         if new_status == "applied" else None))
+    if new_status == "applied":
+        # The picture of its last page was for a job that didn't finish.
+        from core import job_screenshots
+        job_screenshots.remove(url)
+        update_job(url, screenshot_at=None)
     return {"success": True, "url": url, "status": new_status}
 
 
@@ -2360,9 +2471,13 @@ async def delete_jobs(body: dict):
         gone = [url for url in dict.fromkeys(u for u in urls if isinstance(u, str)) if url in jobs]  # each once
         for url in gone:
             del jobs[url]
-        return len(gone)
+        return gone
 
-    return {"success": True, "deleted": mutate_jobs(delete)}
+    gone = mutate_jobs(delete)
+    from core import job_screenshots
+    for url in gone:
+        job_screenshots.remove(url)         # a removed job's last-page picture goes with it
+    return {"success": True, "deleted": len(gone)}
 
 
 # ── Collection: what was left out, and saved searches ─────────────────────

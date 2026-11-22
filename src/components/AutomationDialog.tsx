@@ -27,25 +27,27 @@ export default function AutomationDialog({ open, title, onConfirm, onCancel, chi
         </div>
 
         <div className="px-6 py-5 space-y-4">
-          <div className="flex gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl">
-            <Clock className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-            <div className="text-sm text-amber-900">
+          {/* Each card's surface, text and icon follow the theme (the third one had a fixed near-white
+              surface under theme-colored text: unreadable in dark mode). */}
+          <div className="flex gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl dark:bg-amber-500/10 dark:border-amber-500/30">
+            <Clock className="w-5 h-5 text-amber-600 dark:text-amber-400 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-amber-900 dark:text-amber-100">
               <strong className="block mb-1">This may take a while</strong>
               The automation needs time to launch a browser, load pages, and interact with websites.
               Please be patient and <strong>do not close the app</strong> while it's running.
             </div>
           </div>
 
-          <div className="flex gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl">
-            <Globe className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-            <div className="text-sm text-blue-900">
+          <div className="flex gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl dark:bg-blue-500/10 dark:border-blue-500/30">
+            <Globe className="w-5 h-5 text-blue-600 dark:text-blue-400 flex-shrink-0 mt-0.5" />
+            <div className="text-sm text-blue-900 dark:text-blue-100">
               <strong className="block mb-1">Log in first</strong>
               Sign in to the boards you use from the app before you start. Collection reuses those
               sessions. If a session expires, sign in again from the app and retry that board.
             </div>
           </div>
 
-          <div className="flex gap-3 p-4 bg-[#F7F7F7] border border-border rounded-xl">
+          <div className="flex gap-3 p-4 bg-secondary border border-border rounded-xl">
             <AlertTriangle className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
             <div className="text-sm text-foreground">
               <strong className="block mb-1">Keep the browser window open</strong>

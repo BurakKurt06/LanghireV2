@@ -154,7 +154,14 @@ def prepare(monkeypatch, data_dir, site: Site, script: Script, *, settings: dict
 
     import conftest
     from cli import apply_jobs
-    from core import job_page, shared_config
+    from core import inbox, job_page, shared_config
+
+    # No test opens Gmail: the reader of "we received your application" emails finds none here
+    # (a test of that email gives its own stand-in).
+    async def no_confirmation_email(*args, **kwargs):
+        return {"error": "No confirmation email in this local test."}
+
+    monkeypatch.setattr(inbox, "find_confirmation", no_confirmation_email)
 
     resume = data_dir / "resume.pdf"
     pdf = fitz.open()

@@ -91,6 +91,11 @@ def _safety_net(request, tmp_path, monkeypatch):
     monkeypatch.setattr(_mem_metrics, "DB_PATH", db)
     monkeypatch.setattr(shared_config, "_memory_store", None)
 
+    # What one test read from the usage meter (or was told about a limit) is not the next test's.
+    from core import usage_meter
+    usage_meter.reset()
+    usage_meter._state["loaded"] = True     # nothing measured by an earlier test's saved file either
+
     import socket
     real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
 

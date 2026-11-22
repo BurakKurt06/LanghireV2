@@ -52,7 +52,7 @@ export default function QA() {
       return false;
     }
     // Saved answers are the user's own: the label and the "to check" count follow at once.
-    setQuestions(prev => prev.map(q => q.id === id ? { ...q, answer, source: "user" } : q));
+    setQuestions(prev => prev.map(q => q.id === id ? { ...q, answer, source: "user", basis: "" } : q));
     getQAStats().then(setStats).catch(() => {});
     trackEvent("qa_answer_updated");
     return true;
@@ -307,6 +307,8 @@ function QACard({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
           <span className={origin === "needsAnswer" || origin === "guess" || origin === "observed" ? "font-semibold text-primary" : ""}>{t(`card.origin.${origin}`)}</span>
+          {/* What a guess was worked out from ("resume: May 2028"), so it can be checked at a glance. */}
+          {origin === "guess" && entry.basis && <span>guessed from {entry.basis}</span>}
           {entry.source_domain && <span>{entry.source_domain}</span>}
           {saving && <span className="text-primary">{t("card.saving")}</span>}
           {!saving && answer !== entry.answer && <span className="text-primary">{t("card.unsaved")}</span>}

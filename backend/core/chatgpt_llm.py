@@ -6,7 +6,7 @@ import uuid
 
 import httpx
 
-from . import chatgpt_auth
+from . import chatgpt_auth, usage_meter
 
 # The Codex backend always streams; these events carry the text and the end state.
 _TEXT_DELTA = "response.output_text.delta"
@@ -105,8 +105,14 @@ class ChatChatGPT:
             async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout, connect=20)) as client:
                 async with client.stream("POST", f"{chatgpt_auth.CODEX_BASE_URL}/responses",
                                          json=body, headers=headers) as response:
+                    # Every reply reports how much of the plan's limits is used: read here, so a run
+                    # can stop before the limit without spending a request on asking.
+                    usage_meter.note_reply(response.headers, self.session_id)
                     if response.status_code != 200:
-                        detail = _error_message(await response.aread(), response.status_code)
+                        raw = await response.aread()
+                        detail = _error_message(raw, response.status_code)
+                        if response.status_code == 429 or usage_meter.is_limit_error(detail):
+                            usage_meter.limit_reached(_resets_in_seconds(raw))
                         if response.status_code == 429:
                             raise ModelRateLimitError(message=detail, model=self.name)
                         raise ModelProviderError(message=detail, status_code=response.status_code, model=self.name)
@@ -142,14 +148,25 @@ class ChatChatGPT:
         return "".join(parts), usage
 
 
-def _error_message(raw: bytes, status: int) -> str:
-    """The backend's error text, with the reset time for plan usage limits."""
+def _error_fields(raw: bytes) -> dict:
     try:
         err = json.loads(raw).get("error") or json.loads(raw).get("detail") or {}
     except (ValueError, AttributeError):
         err = {}
     if isinstance(err, str):
         err = {"message": err}
+    return err if isinstance(err, dict) else {}
+
+
+def _resets_in_seconds(raw: bytes):
+    """When a refused request says the plan's limit resets (seconds from now), else None."""
+    resets = _error_fields(raw).get("resets_in_seconds")
+    return resets if isinstance(resets, (int, float)) and not isinstance(resets, bool) else None
+
+
+def _error_message(raw: bytes, status: int) -> str:
+    """The backend's error text, with the reset time for plan usage limits."""
+    err = _error_fields(raw)
     message = err.get("message") or raw.decode("utf-8", "replace")[:300] or f"HTTP {status}"
     if status == 429 or err.get("type") == "usage_limit_reached":
         resets = err.get("resets_in_seconds")

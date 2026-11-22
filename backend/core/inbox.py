@@ -451,6 +451,95 @@ async def find_verification(kind: str, allowed_domains: set[str], since: datetim
 
 MAX_VERIFICATION_EMAILS = 8
 
+
+# ── "We received your application" emails ────────────────────────────────────
+# When Submit was pressed and the site's last page didn't say the application was received, the
+# employer's confirmation email settles it. Read the same way as a verification email: by the
+# app's own code in the separate mail browser (the agent never opens Gmail), only emails that
+# arrived since this application began, each opened once, addressed to the address the
+# application used, and tied to this employer.
+CONFIRM_TERMS = ('("application" OR "applying" OR "applied" OR "candidacy" OR "submission" OR "thank you for your '
+                 'interest")')
+_CONFIRMATION_EMAIL = re.compile(
+    r"thank(s| you) for (applying|your application|your interest|submitting)"
+    r"|(we('ve| have)|we) (have )?(successfully )?received your (application|submission|resume|candidacy)"
+    r"|your application (has been|was|is) (successfully )?(received|submitted|sent|complete)"
+    r"|application (received|submitted|confirmation)|successfully (applied|submitted)"
+    r"|(received|reviewing) your application", re.I)
+_NOT_A_CONFIRMATION = re.compile(
+    r"\b(finish|complete|continue|resume) your application\b|\bapplication is (incomplete|not complete)\b"
+    r"|\bnot (yet )?(been )?submitted\b|\b(haven't|have not) (finished|completed|submitted)\b|\bdraft\b", re.I)
+
+
+def is_confirmation(subject: str, text: str) -> bool:
+    """The email says the application was received (and isn't a reminder to finish one)."""
+    both = f"{subject or ''}\n{text or ''}"
+    return bool(_CONFIRMATION_EMAIL.search(both)) and not _NOT_A_CONFIRMATION.search(both)
+
+
+async def find_confirmation(allowed_domains: set[str], since: datetime, browser_kwargs: dict,
+                            wait_seconds: float = 180, *, employer_domains: set[str] | None = None,
+                            employer_names=(), recipients=()) -> dict:
+    """{"confirmed": True, "subject": ...} when an email since `since` says this employer received the
+    application; {"error": ...} when none arrived within `wait_seconds`.
+
+    The same ties as find_verification: new, addressed to one of `recipients`, and either from one
+    of `allowed_domains` or naming the employer (always naming it when the sender is a shared
+    application system that isn't the employer's own domain).
+    """
+    recipients = [r for r in recipients or () if r]
+    if not recipients:
+        return {"error": "No application email is configured."}
+    own = {d.lower() for d in employer_domains or set() if d}
+    from browser_use import BrowserSession
+    allowed = {d.lower() for d in allowed_domains if d}
+    names = [n for n in employer_names or () if n]
+    since = max(since, datetime.now(timezone.utc) - VERIFICATION_MAX_AGE)
+    checked: set[str] = set()       # emails already opened: never opened again
+    query = f"after:{int(since.timestamp())} {CONFIRM_TERMS}"
+    url = GMAIL + "#search/" + quote(query, safe="")
+    browser = BrowserSession(**browser_kwargs)
+    deadline = time.monotonic() + wait_seconds
+    try:
+        await browser.start()
+        while True:
+            await browser.navigate_to(url)
+            listing = await _poll(await browser.get_current_page(), _LIST_JS, f"after:{int(since.timestamp())}")
+            if listing.get("signedOut"):
+                return {"error": "Gmail isn't signed in (Settings -> Accounts & email)."}
+            for row in listing.get("rows", [])[:MAX_VERIFICATION_EMAILS]:
+                sender = (row.get("sender_email") or "").split("@")[-1]
+                if not row.get("id") or row["id"] in checked:
+                    continue
+                arrived = _row_time(row.get("date", ""))
+                if arrived is not None and arrived < since - timedelta(minutes=1):
+                    checked.add(row["id"])      # older than this application: not opened at all
+                    continue
+                await browser.navigate_to(f"{GMAIL}#all/{row['id']}")
+                message = await _poll(await browser.get_current_page(), _VERIFY_JS, row.get("subject", ""), wait=12)
+                if not message.get("ready"):
+                    continue
+                checked.add(row["id"])
+                if not any(addressed_to(message.get("to"), recipient) for recipient in recipients):
+                    continue
+                named = about_employer(message.get("subject", ""), message.get("text", ""), names)
+                shared = _shared_sender(sender) and not _domain_ok(sender, own)
+                if (shared or not _domain_ok(sender, allowed)) and not named:
+                    continue
+                if is_confirmation(message.get("subject", ""), message.get("text", "")):
+                    return {"confirmed": True, "subject": str(message.get("subject") or "")[:200]}
+            if time.monotonic() >= deadline:
+                return {"error": f"No confirmation email from this employer arrived within {int(wait_seconds)} seconds."}
+            await asyncio.sleep(10)  # confirmation emails often take a minute
+    except Exception as e:
+        return {"error": f"Couldn't read the confirmation email: {type(e).__name__}"}
+    finally:
+        try:
+            await browser.kill()
+        except Exception:
+            pass
+
+
 # Mail domains that send for many employers: an email from one says nothing about which employer.
 SHARED_SENDERS = ("myworkday.com", "workday.com", "oracle.com", "oraclecloud.com", "taleo.net", "icims.com",
                   "greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "successfactors.com",

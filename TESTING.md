@@ -15,6 +15,20 @@ What the new tests cover (all with fake pages, fake accounts, fake AI):
   (lengthened to the site's rules), the emailed code is fetched by the app's own reader, the form is
   filled and submitted; a page that stays blank is retried up to "Max failures per job" and given up
   as "The page didn't load" without AI requests.
+- `tests/backend/cli/test_second_run_live.py` (real browser, 1.3.3): a posting whose Apply is a
+  form's submit button is applied to (and Trial starts it) without a "possibly sent" mark; Print
+  Application is never opened; a confirmation the site showed counts after the agent left it;
+  "already applied" on the site is Applied; Create Account followed by the sign-in page fetches the
+  emailed link instead of registering again; an invisible hCaptcha passes by itself, gets the
+  solver's answer on a second send, or has its open puzzle solved and handed to the page; the AI
+  plan's limit puts the job back to ready. Unit side: `test_second_supervised_run.py`,
+  `test_usage_meter.py`, `test_dates.py`, `test_run_checks.py`, `test_last_page_and_solver.py`,
+  `test_posting_apply_and_print.py`, `test_start_check_api.py`. The same file covers a progress
+  tracker whose unfinished section is reached through the PROGRESS TRACKER note, with Print refused.
+- `tests/backend/cli/test_collect_stall_live.py` (real browser): a board whose results page never
+  answers ends in seconds with the phase named, and the next board is collected; a results page
+  with a privacy wall, or with job links in an unknown shape, logs what the reader saw. Unit side:
+  `tests/backend/core/test_collection_never_hangs.py` (gate commands that never get an answer).
 - `tests/backend/cli/test_user_steps_in_live.py` (real browser): the user clicks or types in the
   agent's browser; the agent stops, waits, continues from the user's page and keeps the user's fields.
 - `tests/backend/core/test_posting_reader_live.py` (real browser): a posting built in the browser

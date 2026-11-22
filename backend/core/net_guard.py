@@ -224,6 +224,46 @@ def limit_webrtc(profile_dir) -> bool:
             temp.unlink(missing_ok=True)
 
 
+ENGLISH = "en-US,en"
+ENGLISH_ARGS = ("--lang=en-US", f"--accept-lang={ENGLISH}")
+
+
+def prefer_english(profile_dir) -> bool:
+    """Make the application browser ask sites for English, before it starts (best effort).
+
+    A browser asks for pages in the computer's language; on a computer set to another language,
+    hiring sites then show their forms in it, and the agent, the form checks and the confirmation
+    texts all work in English (the user's rule, 2026-11). Only the language preference of the
+    automation profile is changed. Never refuses a launch: False only says nothing was changed.
+    """
+    path = Path(profile_dir) / "Default" / "Preferences"
+    temp = None
+    try:
+        prefs = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        if not isinstance(prefs, dict):
+            return False
+        intl = prefs.get("intl")
+        if not isinstance(intl, dict):
+            intl = prefs["intl"] = {}
+        if intl.get("accept_languages") == ENGLISH and intl.get("selected_languages") == ENGLISH:
+            return False
+        if _profile_in_use(profile_dir):
+            return False
+        intl["accept_languages"] = intl["selected_languages"] = ENGLISH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix="Preferences.langhire-", delete=False) as output:
+            temp = Path(output.name)
+            json.dump(prefs, output)
+        os.replace(temp, path)
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+
+
 def restore_webrtc(profile_dir) -> bool:
     """Undo limit_webrtc in a profile whose browser now connects by itself (best effort).
 

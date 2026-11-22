@@ -63,10 +63,25 @@ correctly and submits the application."). These are the current ones:
   questions get the editable **Default answers** (Q&A page; core/default_answers.py) and are never
   asked; every inferred answer is saved on the Q&A page; the user's own answers always win.
   Required consent/certifications are agreed to, optional marketing declined. Ask only for a long
-  essay with nothing usable or a required salary when none is set. Never invent skills,
-  experience, certifications or dates.
-- **CAPTCHAs**: 2Captcha by default once a key is saved; on failure or without a key, the user
-  solves it in the open browser (within the 5-minute wait).
+  essay with nothing usable, a required salary when none is set, or a fact with no basis at all
+  (e.g. the school before university); Start asks such known questions once, before the run, and
+  an answer is never asked again (user, 2026-11-16). Smart guesses fill in whatever follows from
+  the resume/profile/saved answers (formats, years of experience, list names), each saved on the
+  Q&A page with what it was worked out from. Dates may be completed from known ones (missing day
+  -> the 15th; only a year -> June 15, May 15 for a graduation); never invent experience, skills,
+  credentials, or dates with no basis.
+- **CAPTCHAs**: every CAPTCHA goes to 2Captcha once a key is saved, including invisible ones and
+  ones after Submit (an invisible one is first left to pass by itself; the solver takes over when
+  the form is refused or a puzzle opens); on failure or without a key, the user solves it in the
+  open browser (within the 5-minute wait).
+- **Runs** (user, 2026-11-16): "already applied" / "application received" on the site itself =
+  Applied, never retried. Only problems that might go away (page didn't load, timeout, crash) are
+  retried. Two jobs on one site ending the same way skip that site's other jobs for the run
+  (they stay ready). The ChatGPT usage meters in each reply decide whether the next job fits; jobs
+  the limit cuts off go back to ready, never Failed; no reserve setting. A failed/Needs-you job
+  keeps one picture of its last page (at most 500). Not wanted: one job per site at a time as a new
+  rule (the existing one stays), stopping a job that repeats itself, skipping a link because it
+  looks like an earlier application, a Windows notification, fewer screenshots per step.
 - **Accounts**: wherever the job's link leads, sign in or create the account with the ONE
   "Password for job sites" from Settings; a site that rejects it for its rules gets characters
   added to the END (that version is saved for the site and listed in Settings). Verification
@@ -103,7 +118,7 @@ npm ci
 
 ```bash
 .venv/Scripts/python -B -m pytest tests/backend -p no:cacheprovider   # Linux: .venv/bin/python
-LANGHIRE_REAL_BROWSER=1 .venv/Scripts/python -B -m pytest tests/backend -k "collect or trial_action_mode or user_steps_in or whole_application or posting_reader"
+LANGHIRE_REAL_BROWSER=1 .venv/Scripts/python -B -m pytest tests/backend -k "collect or trial_action_mode or user_steps_in or whole_application or second_run or posting_reader"
 npx vitest run && npx tsc -b --noEmit && npx eslint .
 ```
 

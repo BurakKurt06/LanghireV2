@@ -267,4 +267,40 @@ describe("RunPanel", () => {
     await user.click(screen.getByRole("button", { name: "Skip Risk Intern" }));
     expect(skipJob).toHaveBeenCalledWith("https://jobs.example/2");
   });
+
+  // The AI plan's limit: the run says why it waits or stopped starting jobs, and keeps saying
+  // why it ended after it is over (the user walked away).
+  const LIMIT = "Stopped: ChatGPT limit: 98% of the 5-hour limit is used and the next job needs about 5%, resets in about 2 hours";
+
+  it("says while running why no further job is starting", async () => {
+    mockStatus.mockResolvedValue(running({ notice: { text: LIMIT, kind: "limit_stop" } }) as never);
+    render(<RunPanel />);
+    expect(await screen.findByText(`${LIMIT}. Jobs already running finish; the rest stay ready.`)).toBeInTheDocument();
+    expect(screen.getByText("Data Intern")).toBeInTheDocument();
+  });
+
+  it("says while running that it is waiting for a limit that resets within minutes", async () => {
+    mockStatus.mockResolvedValue(running({ notice: { text: "Waiting: ChatGPT limit reached, resets in about 6 minutes", kind: "limit_wait" } }) as never);
+    render(<RunPanel />);
+    expect(await screen.findByText("Waiting: ChatGPT limit reached, resets in about 6 minutes")).toBeInTheDocument();
+  });
+
+  it("keeps the reason on screen after a run the limit stopped", async () => {
+    mockStatus.mockResolvedValue({ running: false, mode: null, workers: 0, log: [], error: null, finished_at: null,
+      notice: { text: LIMIT, kind: "limit_stop" } } as never);
+    render(<RunPanel />);
+    const section = await screen.findByRole("region", { name: "Why the last run stopped" });
+    expect(within(section).getByText(`${LIMIT}. The jobs that weren't started are still ready.`)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+  });
+
+  it("control: after an ordinary run, or one that only waited, nothing is shown", async () => {
+    for (const notice of [{ text: "", kind: "" }, { text: "Waiting: ChatGPT limit reached", kind: "limit_wait" }, undefined]) {
+      mockStatus.mockResolvedValue({ running: false, mode: null, workers: 0, log: [], error: null, finished_at: null, notice } as never);
+      const { container, unmount } = render(<RunPanel />);
+      await waitFor(() => expect(mockStatus).toHaveBeenCalled());
+      expect(container).toBeEmptyDOMElement();
+      unmount();
+    }
+  });
 });

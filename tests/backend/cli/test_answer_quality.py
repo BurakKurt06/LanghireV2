@@ -32,9 +32,11 @@ class FakeStore:
     def __init__(self):
         self.answers = []
 
-    def qa_set_answer(self, question, answer, source="user", question_type="text", source_domain="", options=None):
+    def qa_set_answer(self, question, answer, source="user", question_type="text", source_domain="", options=None,
+                      basis=""):
         self.answers.append((question, answer, source, source_domain))
         self.options = options
+        self.basis = basis
 
 
 @pytest.fixture
@@ -343,8 +345,12 @@ def test_success_is_never_sent_back(tmp_path):
 def test_resume_rules_cover_every_job_and_education():
     text = apply_jobs.resume_instructions("WORK EXPERIENCE\nACME | Intern\nEDUCATION\nState University")
     assert "Add EVERY entry under the job sections" in text
-    assert "never delete the education section" in text and "Never estimate a date" in text
-    assert "ask_for_answers" in text and "four years before graduation" not in text
+    assert "never delete the education section" in text
+    # The user's rule since 2026-11: a date the resume gives in part is completed (the 15th for a
+    # missing day), not asked for; only one with nothing at all behind it goes to the user.
+    assert "the 15th for a missing day" in text and "Never estimate a date" not in text
+    assert "Only a REQUIRED date with nothing at all behind it goes to ask_for_answers" in text
+    assert "four years before graduation" not in text
 
 
 def test_markers_are_stripped_from_what_the_user_sees():

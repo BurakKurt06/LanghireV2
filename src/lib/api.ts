@@ -27,6 +27,8 @@ import type {
   FilteredJob,
   JobSearchPrefs,
   SavedSearch,
+  StartCheck,
+  WaitingQuestion,
 } from "./types";
 
 const DEFAULT_PORT = 8743;
@@ -477,6 +479,36 @@ export async function answerJobQuestions(url: string, answers: Record<string, st
   return request<{ success: boolean; continued: boolean; ready: boolean; remaining?: number; may_have_been_sent?: boolean }>("/jobs/answers", {
     method: "POST", body: JSON.stringify({ url, answers }),
   });
+}
+
+/** What Start checks and asks before the first job (nothing starts, and no AI request is made). */
+export async function checkBeforeStart(jobUrls: string[]) {
+  return request<StartCheck>("/apply/check", { method: "POST", body: JSON.stringify({ job_urls: jobUrls }) });
+}
+
+/** The questions jobs are waiting on, each once, with the jobs that wait on it. */
+export async function getWaitingQuestions() {
+  return request<{ questions: WaitingQuestion[] }>("/jobs/questions");
+}
+
+/** One answer for a question, wherever it is waited on (saved as the user's own: never asked again). */
+export async function answerQuestionEverywhere(question: string, answer: string) {
+  return request<{ success: boolean; ready: number; still_waiting: number; continued: number }>("/jobs/questions/answer", {
+    method: "POST",
+    body: JSON.stringify({ question, answer }),
+  });
+}
+
+/** The picture of a job's last page (kept when it failed, needs you or wasn't confirmed); null when none is kept. */
+export async function getJobScreenshot(url: string): Promise<Blob | null> {
+  const token = await getToken();
+  const res = await fetch(`${getBaseUrl()}/jobs/screenshot?url=${encodeURIComponent(url)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`API Error ${res.status}`);
+  return res.blob();
 }
 
 export async function saveJobNote(url: string, note: string) {

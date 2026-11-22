@@ -28,6 +28,38 @@ MAX_SOLVE_ATTEMPTS = 2
 SOLVE_SECONDS = 120
 
 
+class SolverRejected(ValueError):
+    """2Captcha answered with one of its error codes (ERROR_ZERO_BALANCE, ERROR_CAPTCHA_UNSOLVABLE, ...)."""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__("CAPTCHA provider rejected the request")
+
+
+# 2Captcha's error codes, in the user's words. (The code is the provider's own fixed word, never
+# the request or the key.)
+_SOLVER_ERRORS = {
+    "ERROR_ZERO_BALANCE": "your 2Captcha balance is empty: add funds at 2captcha.com",
+    "ERROR_WRONG_USER_KEY": "2Captcha doesn't accept the saved API key: check it in Settings → Applications",
+    "ERROR_KEY_DOES_NOT_EXIST": "2Captcha doesn't accept the saved API key: check it in Settings → Applications",
+    "ERROR_CAPTCHA_UNSOLVABLE": "2Captcha's workers couldn't solve this one",
+    "ERROR_NO_SLOT_AVAILABLE": "2Captcha is too busy right now",
+    "ERROR_IP_NOT_ALLOWED": "2Captcha refuses requests from this computer's address (check your 2Captcha account)",
+    "IP_BANNED": "2Captcha has blocked this computer's address for a while",
+    "ERROR_METHOD_CALL": "2Captcha doesn't solve this kind of CAPTCHA",
+    "ERROR_BAD_PARAMETERS": "2Captcha doesn't solve this kind of CAPTCHA",
+    "ERROR_SITEKEY": "2Captcha doesn't accept this site's CAPTCHA key",
+    "ERROR_PAGEURL": "2Captcha doesn't accept this page's address",
+}
+# Worth a second request: the same challenge can go through the next time.
+_RETRYABLE_SOLVER_ERRORS = {"ERROR_CAPTCHA_UNSOLVABLE", "ERROR_NO_SLOT_AVAILABLE"}
+
+
+def _solver_error_code(answer: str) -> str:
+    found = re.search(r"\b(ERROR_[A-Z0-9_]{3,40}|IP_BANNED)\b", answer or "")
+    return found.group(1) if found else "ERROR"
+
+
 class _SolverAPI:
     """Bound every provider connection and the whole polling lifetime.
 
@@ -50,8 +82,8 @@ class _SolverAPI:
             response = client.request(method, "https://2captcha.com/" + path, **kwargs)
             response.raise_for_status()
             answer = response.text
-            if "ERROR" in answer:
-                raise ValueError("CAPTCHA provider rejected the request")
+            if "ERROR" in answer or "IP_BANNED" in answer:
+                raise SolverRejected(_solver_error_code(answer))
             return answer
 
     def in_(self, files=None, **kwargs):
@@ -115,6 +147,10 @@ class Challenge:
     action: str = ""
     page_url: str = ""
     image_b64: str = ""
+    # Its puzzle is showing right now: the page asked for the check (Submit was pressed, or the
+    # box was ticked) and waits for the answer.
+    open: bool = False
+    user_agent: str = ""
 
     @property
     def is_image(self) -> bool:
@@ -152,26 +188,24 @@ _DETECT_JS = r"""
     }
   }
 
-  // hCaptcha
+  // hCaptcha: the widget element and its iframes. The site key may be on the element or in any
+  // frame (the first frame is often the hidden "checkbox-invisible" one, which has none). An
+  // invisible hCaptcha runs by itself when the form is sent and usually passes without a puzzle;
+  // it only blocks once its puzzle frame is actually showing ("open"). A widget element whose
+  // frames show no tick box is an invisible one too (Lever renders it that way), whatever its
+  // markup says.
   const hc = document.querySelector('.h-captcha[data-sitekey], [data-hcaptcha-sitekey]');
-  if (hc) {
-    return {
-      type: 'hcaptcha',
-      sitekey: hc.getAttribute('data-sitekey') || hc.getAttribute('data-hcaptcha-sitekey') || '',
-      action: '',
-    };
-  }
-  // hCaptcha iframes: the site key may be in any of them (the first one is
-  // often the hidden "checkbox-invisible" frame, which has none). An
-  // invisible hCaptcha runs by itself on submit and usually passes without a
-  // puzzle; it only blocks once its challenge frame is actually showing.
   const hcFrames = Array.from(document.querySelectorAll('iframe[src*="hcaptcha.com"]'));
-  if (hcFrames.length) {
-    const key = hcFrames.map((f) => (f.src.match(/[?&#]sitekey=([^&#]+)/) || [])[1]).find(Boolean) || '';
-    const checkbox = hcFrames.some((f) => /frame=checkbox(?!-invisible)/.test(f.src) && visible(f));
+  if (hc || hcFrames.length) {
+    const key = (hc && (hc.getAttribute('data-sitekey') || hc.getAttribute('data-hcaptcha-sitekey')))
+      || hcFrames.map((f) => (f.src.match(/[?&#]sitekey=([^&#]+)/) || [])[1]).find(Boolean) || '';
+    const checkbox = hcFrames.some((f) => /frame=checkbox(?!-invisible)/.test(f.src) && visible(f) && !hiddenByAncestor(f));
     const challenge = hcFrames.some((f) => /frame=challenge/.test(f.src) && visible(f) && !hiddenByAncestor(f));
-    if (!checkbox && !challenge) return { type: 'hcaptcha_invisible', sitekey: key, action: '' };
-    return { type: 'hcaptcha', sitekey: key, action: '' };
+    if (challenge) return { type: 'hcaptcha', sitekey: key, action: '', open: true };
+    if (checkbox) return { type: 'hcaptcha', sitekey: key, action: '' };
+    const saysInvisible = !!hc && (hc.getAttribute('data-size') || '').toLowerCase() === 'invisible';
+    if (hcFrames.length || saysInvisible) return { type: 'hcaptcha_invisible', sitekey: key, action: '' };
+    return { type: 'hcaptcha', sitekey: key, action: '' };   // the widget hasn't drawn yet: a visible one until it shows otherwise
   }
 
   // reCAPTCHA v3 / Enterprise — no visible checkbox, script carries render=<key>
@@ -329,11 +363,17 @@ async def detect(browser_session) -> Challenge | None:
     if not found or not isinstance(found, dict):
         return None
 
-    page_url = ""
+    page_url, user_agent = "", ""
     try:
         page_url = await _evaluate(browser_session, "window.location.href") or ""
     except Exception:
         pass
+    if found.get("type") in (HCAPTCHA, HCAPTCHA_INVISIBLE):
+        try:
+            agent = await _evaluate(browser_session, "navigator.userAgent")
+            user_agent = agent if isinstance(agent, str) else ""
+        except Exception:
+            pass
 
     return Challenge(
         type=found.get("type", ""),
@@ -341,7 +381,45 @@ async def detect(browser_session) -> Challenge | None:
         action=found.get("action", "") or "",
         page_url=page_url,
         image_b64=found.get("imgSrc", "") or "",
+        open=found.get("open") is True,
+        user_agent=user_agent[:400],
     )
+
+
+# Installed in every page before its own scripts run (cli/apply_jobs gives it to the run's
+# watcher). hCaptcha hands its answer to a function the page passes to hcaptcha.render(); that
+# function is the only way to complete a check the page is waiting on (an invisible hCaptcha
+# after Submit), and the page keeps it to itself. This records it. Nothing else changes: the
+# page's own calls go through untouched.
+HOOK_JS = r"""(() => {
+  if (window.__lhCaptcha) return;
+  const st = { callbacks: [] };
+  try { Object.defineProperty(window, '__lhCaptcha', { value: st }); } catch (e) { return; }
+  const wrap = (hc) => {
+    try {
+      if (!hc || hc.__lhWrapped || typeof hc.render !== 'function') return hc;
+      const render = hc.render;
+      hc.render = function (container, params) {
+        try {
+          const given = params && params.callback;
+          const fn = typeof given === 'string' ? window[given] : given;
+          if (typeof fn === 'function' && !st.callbacks.includes(fn)) st.callbacks.push(fn);
+        } catch (e) {}
+        return render.apply(this, arguments);
+      };
+      Object.defineProperty(hc, '__lhWrapped', { value: true });
+    } catch (e) {}
+    return hc;
+  };
+  let current = wrap(window.hcaptcha);
+  try {
+    Object.defineProperty(window, 'hcaptcha', {
+      configurable: true, enumerable: true,
+      get() { return current; },
+      set(value) { current = wrap(value); },
+    });
+  } catch (e) {}
+})();"""
 
 
 # Whether the page already holds an answer for its CAPTCHA: the response field the widget (or
@@ -379,7 +457,7 @@ def _inject_js(challenge: Challenge, token: str) -> str:
     safe = token.replace("\\", "\\\\").replace("'", "\\'")
     if challenge.type in (RECAPTCHA_V2, RECAPTCHA_V3):
         field = "g-recaptcha-response"
-    elif challenge.type == HCAPTCHA:
+    elif challenge.type in (HCAPTCHA, HCAPTCHA_INVISIBLE):
         field = "h-captcha-response"
     elif challenge.type == TURNSTILE:
         field = "cf-turnstile-response"
@@ -443,6 +521,8 @@ def _inject_js(challenge: Challenge, token: str) -> str:
     if not field:
         return ""
 
+    hcaptcha = _HCAPTCHA_HANDOVER_JS.replace("__DELIVER_NOW__", "true" if challenge.open else "false") \
+        if field == "h-captcha-response" else ""
     return f"""
 (() => {{
   const token = '{safe}';
@@ -478,8 +558,40 @@ def _inject_js(challenge: Challenge, token: str) -> str:
       }});
     }}
   }} catch (e) {{}}
+  {hcaptcha}
   return wrote;
 }})();
+"""
+
+
+# hCaptcha gives its answer to the page through the function the page handed to
+# hcaptcha.render() (recorded by HOOK_JS) or named in data-callback. Writing the answer into the
+# response field is enough for a page that reads the field when the form is sent (Lever does);
+# a page that waits for that function gets it called:
+# - its puzzle is showing (the page asked for the check and waits): now;
+# - otherwise: the next time the page asks for the check (hcaptcha.execute), once.
+_HCAPTCHA_HANDOVER_JS = r"""
+  try {
+    const st = window.__lhCaptcha;
+    const named = Array.from(document.querySelectorAll('.h-captcha[data-callback], [data-hcaptcha-sitekey][data-callback]'))
+      .map((el) => window[el.getAttribute('data-callback')]).filter((fn) => typeof fn === 'function');
+    const callbacks = Array.from(new Set([...(st ? st.callbacks : []), ...named]));
+    const hand = () => callbacks.forEach((fn) => { try { fn(token); } catch (e) {} });
+    const hc = window.hcaptcha;
+    if (hc) { try { hc.getResponse = function () { return token; }; } catch (e) {} }
+    if (__DELIVER_NOW__) {
+      hand();
+      try { if (hc && typeof hc.close === 'function') hc.close(); } catch (e) {}
+    } else if (hc && typeof hc.execute === 'function' && callbacks.length) {
+      const execute = hc.execute;
+      hc.execute = function () {
+        hc.execute = execute;
+        hand();
+        const last = arguments.length ? arguments[arguments.length - 1] : null;
+        if (last && typeof last === 'object' && last.async) return Promise.resolve({ response: token, key: '' });
+      };
+    }
+  } catch (e) {}
 """
 
 
@@ -512,8 +624,15 @@ def _solve_sync(api_key: str, challenge: Challenge) -> str:
             version="v3",
             action=challenge.action or "verify",
         )
-    elif challenge.type == HCAPTCHA:
-        res = solver.hcaptcha(sitekey=challenge.sitekey, url=challenge.page_url)
+    elif challenge.type in (HCAPTCHA, HCAPTCHA_INVISIBLE):
+        # The answer is checked against the browser that hands it in: 2Captcha's worker is told
+        # this browser's user agent, and that the widget is an invisible one when it is.
+        extra = {}
+        if challenge.user_agent:
+            extra["userAgent"] = challenge.user_agent
+        if challenge.type == HCAPTCHA_INVISIBLE:
+            extra["invisible"] = 1
+        res = solver.hcaptcha(sitekey=challenge.sitekey, url=challenge.page_url, **extra)
     elif challenge.type == TURNSTILE:
         res = solver.turnstile(sitekey=challenge.sitekey, url=challenge.page_url)
     elif challenge.type == IMAGE_CAPTCHA:
@@ -556,30 +675,61 @@ async def solve(challenge: Challenge, api_key: str) -> str:
         # some SDK errors embed the request URL (and key) into.
         if isinstance(e, TimeoutError) or type(e).__name__ in {"TimeoutException", "ReadTimeout", "ConnectTimeout"}:
             raise CaptchaUnsolved(challenge.type, "2Captcha gave no answer within its time limit") from e
+        if isinstance(e, SolverRejected):
+            # Its own fixed error word, in plain words (it used to read "2Captcha error (ValueError)").
+            unsolved = CaptchaUnsolved(challenge.type, _SOLVER_ERRORS.get(e.code, f"2Captcha refused it ({e.code})"))
+            unsolved.retry = e.code in _RETRYABLE_SOLVER_ERRORS
+            raise unsolved from e
         raise CaptchaUnsolved(challenge.type, f"2Captcha error ({type(e).__name__})") from e
     if not token:
         raise CaptchaUnsolved(challenge.type, "2Captcha returned an empty token")
     return token
 
 
-async def handle(browser_session, settings: dict) -> bool:
+def balance(api_key: str, seconds: float = 8) -> float | None:
+    """The 2Captcha account's balance (a free request to its API), or None when it can't be read
+    within `seconds`.
+
+    Raises SolverRejected when 2Captcha refuses the key itself.
+    """
+    if not (api_key or "").strip():
+        return None
+    try:
+        api = _SolverAPI()
+        api.deadline = time.monotonic() + seconds
+        answer = api.res(key=api_key.strip(), action="getbalance")
+    except SolverRejected:
+        raise
+    except Exception:
+        return None
+    try:
+        return float(str(answer).strip())
+    except ValueError:
+        return None
+
+
+async def handle(browser_session, settings: dict, include_invisible: bool = False) -> bool:
     """Detect and, if enabled, solve a CAPTCHA on the current page.
 
     Returns False when no CAPTCHA is present. Returns True when 2Captcha's answer
     was written into the page (whether the site accepts it shows on the page). Raises CaptchaUnsolved when a CAPTCHA is present
     but cannot be solved — including when the solver switch is off.
+
+    An invisible hCaptcha runs by itself when the form is sent and usually passes; it is left to
+    do so unless `include_invisible` (it didn't get the form through the first time), and then
+    never ends the application by itself.
     """
     challenge = await detect(browser_session)
     if challenge is None or not challenge.type:
         return False
-    if challenge.type == HCAPTCHA_INVISIBLE:
+    if challenge.type == HCAPTCHA_INVISIBLE and (not include_invisible or not solver_enabled(settings)):
         return False
     if challenge.type == HUMAN_CHECK:
         if await solve_human_check(browser_session):
             return True
         raise HumanCheckNeeded(challenge.page_url)
 
-    if challenge.type in (RECAPTCHA_V2, HCAPTCHA, TURNSTILE) and await answered(browser_session):
+    if challenge.type in (RECAPTCHA_V2, HCAPTCHA, TURNSTILE) and not challenge.open and await answered(browser_session):
         return False    # already answered: nothing blocks, and no second answer is bought
 
     # A step callback runs repeatedly. Successful token injection is not proof
@@ -611,8 +761,9 @@ async def handle(browser_session, settings: dict) -> bool:
             token = await solve(challenge, api_key)
         except CaptchaUnsolved as e:
             last_reason = e.reason
-            # A missing key or an unsupported type will not improve on retry.
-            if any(reason in e.reason for reason in ("API key", "site key", "not installed", "time limit")):
+            # A missing key, an empty balance or an unsupported type will not improve on retry.
+            if getattr(e, "retry", True) is False or any(
+                    reason in e.reason for reason in ("API key", "site key", "not installed", "time limit")):
                 break
             continue
         if await inject_token(browser_session, challenge, token):

@@ -323,6 +323,12 @@ class MemoryStore:
             if self._migrate_qa_json():
                 conn.execute("INSERT OR REPLACE INTO schema_version VALUES (4)")
 
+        # basis: what a guessed answer was worked out from ("resume: May 2028"), shown on the Q&A
+        # page as "guessed from ...". Added whatever the version says (the version row above can
+        # stay at 3 while the legacy import keeps failing).
+        if "basis" not in {r[1] for r in conn.execute("PRAGMA table_info(qa_repository)").fetchall()}:
+            conn.execute("ALTER TABLE qa_repository ADD COLUMN basis TEXT DEFAULT ''")
+
         conn.commit()
 
     # ── Domain / ATS helpers ──────────────────────────────────────────────
@@ -864,38 +870,52 @@ class MemoryStore:
         return None
 
     def qa_set_answer(self, question: str, answer: str, source: str = "user",
-                      question_type: str = "text", source_domain: str = "", options: list[str] | None = None) -> None:
+                      question_type: str = "text", source_domain: str = "", options: list[str] | None = None,
+                      basis: str = "") -> None:
         """Insert or overwrite a question's answer (qa_add never overwrites).
 
         Used for answers the user gave: typed in the app or fixed by hand in the
-        browser. An agent answer never replaces a user one.
+        browser. An agent answer never replaces a user one. `basis`: what a guess was
+        worked out from ("resume: May 2028"); the user's own answer has none.
         """
         normalized = self._normalize_qa(question)
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
         row = self._find_qa(conn, normalized)
         opts = "\n".join(o for o in (options or []) if o)
+        basis = "" if source == "user" else (basis or "").strip()[:200]
         if row:
             if source != "user" and (row["source"] or "agent") == "user" and row["answer"]:
                 return
             conn.execute(
                 "UPDATE qa_repository SET answer = ?, source = ?, options = CASE WHEN ? != '' THEN ? ELSE options END, "
-                "updated_at = ? WHERE id = ?",
-                (answer, source, opts, opts, now, row["id"]),
+                "basis = ?, updated_at = ? WHERE id = ?",
+                (answer, source, opts, opts, basis, now, row["id"]),
             )
         else:
             conn.execute(
                 "INSERT INTO qa_repository (question, normalized, answer, question_type, source_domain, source, options, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (question, normalized, answer, question_type, source_domain, source, opts, now, now),
+                "basis, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (question, normalized, answer, question_type, source_domain, source, opts, basis, now, now),
             )
         conn.commit()
+
+    def qa_user_answer(self, question: str) -> str:
+        """The answer the user gave to this question (or to one that means the same); "" when none.
+
+        A question the user answered once is never asked again: on any site, in any run.
+        """
+        row = self._find_qa(self._get_conn(), self._normalize_qa(question))
+        if row is not None and (row["source"] or "agent") == "user" and (row["answer"] or "").strip():
+            return row["answer"]
+        return ""
 
     def qa_update(self, qa_id: int, answer: str) -> bool:
         """An answer edited in the app: it counts as the user's."""
         conn = self._get_conn()
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute("UPDATE qa_repository SET answer = ?, source = 'user', updated_at = ? WHERE id = ?", (answer, now, qa_id))
+        conn.execute("UPDATE qa_repository SET answer = ?, source = 'user', basis = '', updated_at = ? WHERE id = ?",
+                     (answer, now, qa_id))
         conn.commit()
         return conn.total_changes > 0
 

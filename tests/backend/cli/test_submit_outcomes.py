@@ -8,7 +8,7 @@ import asyncio
 import pytest
 
 from cli import apply_jobs
-from tests.backend.cli.test_apply_jobs import FakeHistory, GREENHOUSE, _run_fake_agent, run  # noqa: F401 (fixture)
+from tests.backend.cli.test_apply_jobs import FakeHistory, GREENHOUSE, _page_shows, _run_fake_agent, run  # noqa: F401 (fixture)
 
 
 @pytest.fixture
@@ -31,8 +31,43 @@ def test_a_captcha_after_submit_reports_an_unknown_outcome(run, submitted, monke
         raise error
     monkeypatch.setattr(apply_jobs._captcha, "handle", blocked)
     monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *args: None)
+    _page_shows(monkeypatch, error.challenge_type)       # the check is really on the page, and nobody passes it
     _run_fake_agent[0].call_step = True
-    status, _, saved = run(history=FakeHistory(success=False, done_text="Stopped at a check."))
+    # The page after Submit shows the check, not a confirmation (the fixture's default page is one).
+    run.browser.page_text = "Please confirm you are a real person to continue."
+    try:
+        status, _, saved = run(history=FakeHistory(success=False, done_text="Stopped at a check."))
+    finally:
+        run.browser.page_text = "Thank you for applying! Your application has been received."
+    assert status == "needs_you" and saved[-1][1].startswith("Submission outcome unknown")
+    assert "a CAPTCHA appeared after it" in saved[-1][1]
+
+
+def test_a_confirmation_the_site_showed_after_submit_counts_even_when_the_agent_then_fails(run, submitted, monkeypatch):
+    """Seen 2026-11: the site said "Application Submitted", the agent went on to another page and the
+    app, looking only at the last page, called it unconfirmed. Applied on the employer's word."""
+    monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *args: None)
+    _run_fake_agent[0].call_step = True          # a step saw the confirmation page (the fixture's default)
+
+    async def then_another_page(agent):
+        run.browser.page_text = "Candidate Home. My tasks: none."
+
+    _run_fake_agent[0].during_run = then_another_page
+    try:
+        status, _, saved = run(history=FakeHistory(success=False, done_text="Couldn't find the confirmation again."))
+    finally:
+        run.browser.page_text = "Thank you for applying! Your application has been received."
+    assert status == "applied" and saved[-1] == ("applied", None)
+
+
+def test_control_no_confirmation_seen_after_submit_stays_unknown(run, submitted, monkeypatch):
+    monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *args: None)
+    _run_fake_agent[0].call_step = True
+    run.browser.page_text = "Candidate Home. My tasks: none."
+    try:
+        status, _, saved = run(history=FakeHistory(success=False, done_text="Couldn't find the confirmation."))
+    finally:
+        run.browser.page_text = "Thank you for applying! Your application has been received."
     assert status == "needs_you" and saved[-1][1].startswith("Submission outcome unknown")
 
 

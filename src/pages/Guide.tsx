@@ -340,6 +340,9 @@ export default function Guide() {
               {t("sections.applying.introEnd")}
             </p>
             <p>
+              <strong>{t("sections.applying.startCheck")}</strong> {t("sections.applying.startCheckDesc")}
+            </p>
+            <p>
               <strong>{t("sections.applying.modes")}</strong> {t("sections.applying.modesDesc")}
             </p>
             <p>
@@ -352,7 +355,28 @@ export default function Guide() {
               <strong>{t("sections.applying.defaults")}</strong> {t("sections.applying.defaultsDesc")}
             </p>
             <p>
+              <strong>{t("sections.applying.dates")}</strong> {t("sections.applying.datesDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.alreadyApplied")}</strong> {t("sections.applying.alreadyAppliedDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.captcha")}</strong> {t("sections.applying.captchaDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.aiLimit")}</strong> {t("sections.applying.aiLimitDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.sameSite")}</strong> {t("sections.applying.sameSiteDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.retries")}</strong> {t("sections.applying.retriesDesc")}
+            </p>
+            <p>
               <strong>{t("sections.applying.logs")}</strong> {t("sections.applying.logsDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.lastPage")}</strong> {t("sections.applying.lastPageDesc")}
             </p>
             <p>
               <strong>{t("sections.applying.easyApply")}</strong> {t("sections.applying.easyApplyDesc")}

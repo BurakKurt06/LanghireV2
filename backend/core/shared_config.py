@@ -207,6 +207,10 @@ def build_browser_kwargs(worker: int = 1, purpose: str = "agent") -> dict:
     }
     if executable:
         kwargs["executable_path"] = executable
+    if purpose in ("agent", "application"):
+        # Sites are asked for English, whatever language the computer is set to.
+        net_guard.prefer_english(profile_dir)
+        kwargs["args"] += list(net_guard.ENGLISH_ARGS)
     if purpose == "collection":
         # Its browser must not connect anywhere by itself: no extensions (they make their own
         # requests) and no name lookups ahead of a request.
@@ -1005,7 +1009,12 @@ def build_memory_context(
         parts.append("COUNTRY-SPECIFIC INSTRUCTIONS:\n" + "\n".join(country_instructions))
 
     if applied_labels:
-        parts.append("Already applied — SKIP:\n" + "\n".join(f"- {j}" for j in applied_labels))
+        # For reference only. It used to read "Already applied — SKIP", and the agent skipped a second
+        # listing of the same title (2026-11); an employer can list one job twice, and each link the
+        # user pasted gets its own application. Only the site can say this posting was applied to.
+        parts.append("EARLIER APPLICATIONS AT THIS EMPLOYER (for reference; the posting you are on is a separate "
+                     "listing, so apply to it even when a title below matches. Only the site itself can say you "
+                     "already applied to this posting):\n" + "\n".join(f"- {j}" for j in applied_labels))
 
     # Try SQLite Q&A first, fall back to passed-in dict. The answers ride along
     # on every LLM step, so only the most relevant QA_PROMPT_LIMIT are sent.

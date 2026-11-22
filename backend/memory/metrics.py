@@ -38,6 +38,8 @@ DELETE_CHUNK = 20_000
 # 28 MB of data; deleted log lines leave their space inside the file until it is compacted.
 COMPACT_MIN_FREE_BYTES = 64 * 1024 * 1024
 COMPACT_MIN_FREE_SHARE = 0.25
+# At most this many log lines are kept (the newest): about twenty ordinary runs.
+MAX_LOG_LINES = 200_000
 
 
 class MetricsStore:
@@ -336,6 +338,27 @@ class MetricsStore:
                 "DELETE FROM run_logs WHERE id IN (SELECT id FROM run_logs "
                 "WHERE julianday('now') - julianday(created_at) > ? LIMIT ?)",
                 (days, DELETE_CHUNK),
+            ).rowcount
+            conn.commit()
+            total += max(affected, 0)
+            if affected < DELETE_CHUNK:
+                return total
+
+    def trim_logs(self, keep: int = MAX_LOG_LINES) -> int:
+        """Delete the oldest log lines beyond the newest `keep`, DELETE_CHUNK at a time. Returns how many.
+
+        The 30-day rule alone doesn't bound the file: one run that logs an error trace per line
+        (2026-11: 791,000 lines in two hours) fills it within the month.
+        """
+        conn = self._get_conn()
+        cutoff = conn.execute("SELECT id FROM run_logs ORDER BY id DESC LIMIT 1 OFFSET ?", (max(0, keep),)).fetchone()
+        if cutoff is None:
+            return 0
+        total = 0
+        while True:
+            affected = conn.execute(
+                "DELETE FROM run_logs WHERE id IN (SELECT id FROM run_logs WHERE id <= ? LIMIT ?)",
+                (cutoff[0], DELETE_CHUNK),
             ).rowcount
             conn.commit()
             total += max(affected, 0)

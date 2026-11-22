@@ -64,6 +64,11 @@ vi.mock("../../lib/api", () => ({
   getTailoredResumeContent: vi.fn(),
   answerJobQuestions: vi.fn(),
   getJobLogs: vi.fn(),
+  // Start's check: by default everything is in place and nothing is asked.
+  checkBeforeStart: vi.fn(async () => ({ ok: true, problems: [], questions: [], jobs: 0 })),
+  getWaitingQuestions: vi.fn(async () => ({ questions: [] })),
+  answerQuestionEverywhere: vi.fn(async () => ({ success: true, ready: 0, still_waiting: 0, continued: 0 })),
+  getJobScreenshot: vi.fn(async () => null),
 }));
 
 const mockGetJobs = vi.mocked(getJobs);

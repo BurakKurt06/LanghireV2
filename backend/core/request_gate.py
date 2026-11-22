@@ -43,6 +43,16 @@ MAX_PENDING = 64
 MAX_INFLIGHT_BYTES = 40_000_000
 MAX_INFLIGHT_REQUESTS = 256  # a page load can ask for many resources at once
 WAIT_SECONDS = 1500
+# The gate's own commands to the browser (its CDP library waits for an answer forever by itself).
+# Seen 2026-11: one "Network.enable" on a frame the browser never answered held a collection for
+# four and a half hours, and the lock it held kept every later frame paused.
+COMMAND_SECONDS = 20
+# Collection never waits for anybody's approval: a browser command or an action that takes longer
+# than this is stuck (the long limits are for the request-approval protocol tests).
+COLLECTION_CDP_SECONDS = 45
+COLLECTION_EVENT_SECONDS = 75
+# Closing: a browser that doesn't close in this time is left to the app's process sweep.
+KILL_SECONDS = 20
 _console = False
 _console_lock = asyncio.Lock()
 # browser-use events whose time limit this gate raises while it runs (see RequestGate.start).
@@ -262,24 +272,31 @@ class RequestGate:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
 
+    @staticmethod
+    async def _cmd(command, seconds: float | None = None):
+        """One of the gate's own browser commands, answered within `seconds` (else TimeoutError)."""
+        return await asyncio.wait_for(command, COMMAND_SECONDS if seconds is None else seconds)
+
     async def start(self):
         from cdp_use import CDPClient
         self.client = CDPClient(self.browser.cdp_url)
-        self.browser.cdp_client._cdp_request_timeout_s = WAIT_SECONDS + 60
+        limit = (COLLECTION_CDP_SECONDS, COLLECTION_EVENT_SECONDS) if self.collection_policy is not None \
+            else (WAIT_SECONDS + 60, WAIT_SECONDS + 60)
+        self.browser.cdp_client._cdp_request_timeout_s = limit[0]
         # browser-use reads these for every event of every browser in this process. They are
         # put back when this gate closes: left in place, an application run after a collection
         # waited 26 minutes on each stuck page (one blank tab held a run for 8 hours).
         for event in _SLOW_EVENTS:
             self._event_timeouts.setdefault(event, os.environ.get("TIMEOUT_" + event))
-            os.environ["TIMEOUT_" + event] = str(WAIT_SECONDS + 60)
-        await self.client.start()
+            os.environ["TIMEOUT_" + event] = str(limit[1])
+        await self._cmd(self.client.start())
         # Callbacks must return immediately: cdp-use reads command replies on
         # the same task which dispatches events.
         self.client.register.Target.attachedToTarget(lambda e, s: self._spawn(self._attached(e)))
         self.client.register.Fetch.requestPaused(lambda e, s: self._spawn(self._request(e, s)))
-        await self.client.send.Target.setAutoAttach(params={"autoAttach": True, "flatten": True,
-                                                            "waitForDebuggerOnStart": True})
-        targets = (await self.client.send.Target.getTargets())["targetInfos"]
+        await self._cmd(self.client.send.Target.setAutoAttach(params={"autoAttach": True, "flatten": True,
+                                                                      "waitForDebuggerOnStart": True}))
+        targets = (await self._cmd(self.client.send.Target.getTargets()))["targetInfos"]
         for target in targets:
             if target["type"] == "page":
                 if target.get("url") not in ("", "about:blank", "chrome://newtab/"):
@@ -295,7 +312,7 @@ class RequestGate:
                 else:
                     raise RuntimeError("The browser did not attach its initial page")
         if self.collection_policy is not None:
-            cookies = await self.client.send.Storage.getCookies()
+            cookies = await self._cmd(self.client.send.Storage.getCookies())
             self.collection_policy.snapshot_cookies(cookies["cookies"])
         self.ready = True
         if not self.healthy():
@@ -310,25 +327,31 @@ class RequestGate:
                 # Keep them paused with all network blocked; do not kill the
                 # usable page merely because the optional worker can't close.
                 # The independent deny-all proxy is still in force as well.
-                await self.client.send.Network.enable(session_id=sid)
-                await self.client.send.Network.setBlockedURLs(params={"urls": ["*"]}, session_id=sid)
                 try:
-                    await self.client.send.Target.closeTarget(params={"targetId": info["targetId"]})
+                    await self._cmd(self.client.send.Network.enable(session_id=sid))
+                    await self._cmd(self.client.send.Network.setBlockedURLs(params={"urls": ["*"]}, session_id=sid))
+                    await self._cmd(self.client.send.Target.closeTarget(params={"targetId": info["targetId"]}))
+                except asyncio.TimeoutError:
+                    # A paused worker that doesn't answer stays paused: it never runs, so it sends
+                    # nothing (and the deny-all proxy stands). Not a reason to end the page.
+                    self.held_workers.add(sid)
                 except RuntimeError as error:
                     if "Specified target doesn't support closing" not in str(error):
                         raise
                     self.held_workers.add(sid)
                 return  # never resume or detach an unbrokered worker
             if info["type"] not in ("page", "iframe"):
-                await self.client.send.Target.closeTarget(params={"targetId": info["targetId"]})
+                await self._cmd(self.client.send.Target.closeTarget(params={"targetId": info["targetId"]}))
                 return
             if info["targetId"] in self.targets:
-                await self.client.send.Runtime.runIfWaitingForDebugger(session_id=sid)
+                await self._cmd(self.client.send.Runtime.runIfWaitingForDebugger(session_id=sid))
                 return
             await self._configure(sid)
             self.targets.add(info["targetId"])
-            await self.client.send.Runtime.runIfWaitingForDebugger(session_id=sid)
+            await self._cmd(self.client.send.Runtime.runIfWaitingForDebugger(session_id=sid))
         except Exception:
+            # Unguarded browsing is never the fallback: a page or frame whose interception
+            # couldn't be installed in time ends this browser.
             await self._fatal()
 
     async def _configure(self, sid):
@@ -340,14 +363,16 @@ class RequestGate:
             return
         self.sessions.add(sid)
         try:
-            await self.client.send.Network.enable(session_id=sid)
-            await self.client.send.Network.setBypassServiceWorker(params={"bypass": True}, session_id=sid)
-            await self.client.send.Network.setCacheDisabled(params={"cacheDisabled": True}, session_id=sid)
-            await self.client.send.Network.setBlockedURLs(params={"urls": ["ws://*", "wss://*"]}, session_id=sid)
-            await self.client.send.Fetch.enable(
-                params={"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}, session_id=sid)
-            await self.client.send.Target.setAutoAttach(
-                params={"autoAttach": True, "flatten": True, "waitForDebuggerOnStart": True}, session_id=sid)
+            # Each within COMMAND_SECONDS: this runs under _configure_lock, and every later frame
+            # waits for it (paused) until it is done.
+            await self._cmd(self.client.send.Network.enable(session_id=sid))
+            await self._cmd(self.client.send.Network.setBypassServiceWorker(params={"bypass": True}, session_id=sid))
+            await self._cmd(self.client.send.Network.setCacheDisabled(params={"cacheDisabled": True}, session_id=sid))
+            await self._cmd(self.client.send.Network.setBlockedURLs(params={"urls": ["ws://*", "wss://*"]}, session_id=sid))
+            await self._cmd(self.client.send.Fetch.enable(
+                params={"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}, session_id=sid))
+            await self._cmd(self.client.send.Target.setAutoAttach(
+                params={"autoAttach": True, "flatten": True, "waitForDebuggerOnStart": True}, session_id=sid))
         except Exception:
             self.failed = True
             raise
@@ -359,7 +384,7 @@ class RequestGate:
         # Leave interception installed until the browser exits. Detaching a
         # debugger first would release paused requests.
         try:
-            await self.browser.kill()
+            await asyncio.wait_for(self.browser.kill(), KILL_SECONDS)
         except Exception:
             pass
 
@@ -395,7 +420,7 @@ class RequestGate:
                 return
             if self.active_requests >= MAX_INFLIGHT_REQUESTS or self.active_bytes + reserved > MAX_INFLIGHT_BYTES:
                 self.blocked += 1
-                await self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "BlockedByClient"}, session_id=sid)
+                await self._cmd(self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "BlockedByClient"}, session_id=sid))
                 return
             self.active_requests += 1
             self.active_bytes += reserved
@@ -434,7 +459,7 @@ class RequestGate:
             # These protections apply equally to Full Auto and normal Trial.
             if not (dest and self.healthy() and not mail):
                 self.blocked += 1
-                await self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "BlockedByClient"}, session_id=sid)
+                await self._cmd(self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "BlockedByClient"}, session_id=sid))
                 return
             if self.strict_trial:
                 verdict = self.trial_policy.check(req)
@@ -596,19 +621,19 @@ class RequestGate:
         """
         try:
             if response is None:
-                await self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "Failed"},
-                                                         session_id=sid)
+                await self._cmd(self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "Failed"},
+                                                         session_id=sid))
                 return
             code, headers, body = response
-            await self.client.send.Fetch.fulfillRequest(params={"requestId": ident, "responseCode": code,
-                "responseHeaders": headers, "body": base64.b64encode(body).decode()}, session_id=sid)
+            await self._cmd(self.client.send.Fetch.fulfillRequest(params={"requestId": ident, "responseCode": code,
+                "responseHeaders": headers, "body": base64.b64encode(body).decode()}, session_id=sid))
         except Exception:
             if not self.healthy():
                 raise
             if response is not None:
                 try:
-                    await self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "Failed"},
-                                                             session_id=sid)
+                    await self._cmd(self.client.send.Fetch.failRequest(params={"requestId": ident, "errorReason": "Failed"},
+                                                             session_id=sid))
                 except Exception:
                     pass
 
@@ -633,9 +658,12 @@ class RequestGate:
         for task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.wait(tasks, timeout=KILL_SECONDS)
         if self.client:
-            await self.client.stop()
+            try:
+                await asyncio.wait_for(self.client.stop(), KILL_SECONDS)
+            except Exception:
+                pass
         with _lock:
             transports, self._transports = list(self._transports.values()), {}
         for transport in transports:

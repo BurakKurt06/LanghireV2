@@ -39,6 +39,10 @@ ACTION_GRACE_MS = 600         # events arriving just after an agent action still
 # page, is the user's.
 NAVIGATION_GRACE_MS = 3000
 NAVIGATING_ACTIONS = ("click", "send_keys")
+# A page that calls window.print() opens the browser's print window, and the tab stops answering
+# until somebody closes it (seen 2026-11: an application's "printable version" tab froze five
+# runs). Printing is never part of applying: in the agent's browser the call does nothing.
+NO_PRINT_JS = "(() => { try { window.print = function () {}; } catch (e) {} })();"
 WAITING_NOTE = "You stepped in, so the agent is waiting."
 NOTE_SECONDS = 30             # how long "Continuing from your page ..." stays in the run panel
 WORLD = "langhire-watch"
@@ -213,11 +217,15 @@ class RunWatch:
     """One application's watcher (see the module docstring). Start with run(); stop by cancelling it."""
 
     def __init__(self, browser_session, *, stall_seconds: float | None = None,
-                 idle_seconds: float | None = None, init_scripts: tuple[str, ...] = ()):
+                 idle_seconds: float | None = None, init_scripts: tuple[str, ...] = (),
+                 page_scripts: tuple[str, ...] = ()):
         self.browser = browser_session
         self.stall_seconds = STALL_SECONDS if stall_seconds is None else stall_seconds
         self.idle_seconds = USER_IDLE_SECONDS if idle_seconds is None else idle_seconds
         self.init_scripts = tuple(init_scripts)     # also installed in every new tab (stealth)
+        # The app's own page helpers, in every tab including the first (NO_PRINT_JS, the CAPTCHA hook).
+        self.page_scripts = tuple(page_scripts)
+        self._page_scripted: set[str] = set()
         self._windows: list[tuple[float, float]] = []   # (start ms, end ms) of the agent's own actions
         self._open: list[float] = []                    # start ms of the agent actions running now
         self._may_navigate: list[float] = []            # end ms of agent clicks that haven't moved the page yet
@@ -442,6 +450,16 @@ class RunWatch:
         if target_id:
             self._scripted.add(target_id)
 
+    async def prime(self) -> None:
+        """Install the watcher and the page helpers in the tabs that exist now (the first tab, before
+        the job's page opens in it), instead of at the first poll."""
+        try:
+            await asyncio.wait_for(self._poll_user(), 10)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
     async def _read(self, cdp, target_id: str):
         """The watcher's record for one tab (installing the watcher in the page when it isn't there)."""
         send, sid = cdp.cdp_client.send, cdp.session_id
@@ -536,6 +554,11 @@ class RunWatch:
                 if target_id not in self._scripted:
                     self._scripted.add(target_id)
                     for script in self.init_scripts:
+                        await asyncio.wait_for(send.Page.addScriptToEvaluateOnNewDocument(
+                            params={"source": script, "runImmediately": True}, session_id=sid), 5)
+                if target_id not in self._page_scripted:
+                    self._page_scripted.add(target_id)
+                    for script in self.page_scripts:
                         await asyncio.wait_for(send.Page.addScriptToEvaluateOnNewDocument(
                             params={"source": script, "runImmediately": True}, session_id=sid), 5)
                 raw = await self._read(cdp, target_id)

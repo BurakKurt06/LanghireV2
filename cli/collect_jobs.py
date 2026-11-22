@@ -433,6 +433,29 @@ SCROLL_ROUNDS = 25
 MAX_CARDS_PER_PAGE = 60
 SIGN_IN_WAIT_SECONDS = 120
 
+# Every phase of reading a board has its own time limit, and a board as a whole has one: seen
+# 2026-11, a board sat for four and a half hours after its browser started, with nothing in the
+# log and the collection still "running". A board that runs out of time ends with a plain message
+# (the listings saved so far stay) and the run goes on with the next board.
+BROWSER_START_SECONDS = 60
+OPEN_PAGE_SECONDS = 90
+READ_PAGE_SECONDS = 120
+CLOSE_SECONDS = 25
+QUICK_BOARD_SECONDS = 45 * 60
+DETAILED_BOARD_SECONDS = 90 * 60
+
+
+class BoardStalled(RuntimeError):
+    """A board didn't respond within a phase's time limit: the run moves on to the next one."""
+
+
+async def _phase(board: str, what: str, work, seconds: float):
+    """`work` (a coroutine) within `seconds`, else BoardStalled naming the phase."""
+    try:
+        return await asyncio.wait_for(work, seconds)
+    except asyncio.TimeoutError as stalled:
+        raise BoardStalled(f"{board} didn't respond while {what} (no answer in {int(seconds)} seconds)") from stalled
+
 # Runs in an isolated world (core.browser_policy): page scripts can't change these functions.
 # A link counts only while a person could see and click it: on screen, not hidden by any
 # ancestor, not zero-sized, and not covered by something else (hidden links are bot traps).
@@ -515,7 +538,31 @@ LISTING_JS = r"""
   const password=[...document.querySelectorAll("input[type=password]")].some(shown);
   const blocker = !cards.length && (document.querySelector('#challenge-running, #challenge-stage, .cf-turnstile, iframe[src*="hcaptcha.com"], iframe[src*="recaptcha"]') ||
     /verify you are human|security service to protect|checking your browser|please enable javascript and cookies|access denied/i.test((document.body?.innerText || '').slice(0,4000)));
-  return {url:location.href,title:(document.title || "").slice(0,200),cards,covered,hidden,password,blocker:!!blocker};
+  // When nothing could be read, what the reader saw (for the log): how many links there were, how
+  // many looked like jobs, whether the first job link was on screen at all (a link below the fold
+  // or in an unscrolled panel counts as "covered" too) and, if it was, what lay on top of it. Paths
+  // only, never a query string.
+  let seen=null;
+  if (!cards.length) {
+    const describe=e=>{
+      if (!e || e.nodeType!==1) return "";
+      for (;e.parentElement && e.parentElement!==document.body && e.getBoundingClientRect().width<innerWidth*.3;e=e.parentElement);
+      const cls=typeof e.className==="string" ? e.className.trim().split(/\s+/).filter(Boolean).slice(0,2).join(".") : "";
+      return e.tagName.toLowerCase()+(e.id?"#"+e.id.slice(0,40):"")+(e.getAttribute("role")?"[role="+e.getAttribute("role")+"]":"")+
+        (cls?"."+cls.slice(0,60):"")+' "'+(e.innerText || e.getAttribute("aria-label") || "").replace(/\s+/g," ").trim().slice(0,90)+'"';
+    };
+    const inView=a=>{const r=a.getBoundingClientRect();return r.width>1 && r.height>1 && r.bottom>0 && r.right>0 && r.top<innerHeight && r.left<innerWidth;};
+    const first=[...byId.values()].flat().filter(styled).find(inView);
+    let onScreen=!!first,cover="";
+    if (first) {
+      const r=first.getBoundingClientRect();
+      const hit=hitAt(Math.min(Math.max(1,r.left+r.width/2),innerWidth-1),Math.min(Math.max(1,r.top+r.height/2),innerHeight-1));
+      if (hit && !first.contains(hit)) cover=describe(hit);
+    }
+    const paths=[...new Set(anchors.map(a=>{try{const u=new URL(a.href);return /job/i.test(u.pathname)?u.hostname+u.pathname.replace(/\d{5,}/g,"#").slice(0,60):"";}catch(e){return "";}}).filter(Boolean))].slice(0,3);
+    seen={links:anchors.length,jobLinks:byId.size,onScreen,cover,jobPaths:paths,page:(()=>{try{const u=new URL(location.href);return u.hostname+u.pathname.slice(0,80);}catch(e){return "";}})()};
+  }
+  return {url:location.href,title:(document.title || "").slice(0,200),cards,covered,hidden,password,blocker:!!blocker,seen};
 }
 """
 
@@ -751,7 +798,7 @@ async def _go(browser, url: str, network=None) -> bool:
         print("  Collection refused an address outside the search and job reader")
         return False
     try:
-        await browser.navigate_to(url)
+        await asyncio.wait_for(browser.navigate_to(url), OPEN_PAGE_SECONDS)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -801,11 +848,11 @@ async def _inert_results(browser, network, plugin, search_url, done_ids):
         return [], {}
     try:
         session = await browser.get_or_create_cdp_session()
-        await session.cdp_client.send.Emulation.setScriptExecutionDisabled(
-            params={"value": True}, session_id=session.session_id)
-        await browser.navigate_to(search_url)
+        await asyncio.wait_for(session.cdp_client.send.Emulation.setScriptExecutionDisabled(
+            params={"value": True}, session_id=session.session_id), 20)
+        await asyncio.wait_for(browser.navigate_to(search_url), OPEN_PAGE_SECONDS)
         await asyncio.sleep(2.5)
-        return await _read_page(browser, network, plugin, done_ids)
+        return await asyncio.wait_for(_read_page(browser, network, plugin, done_ids), READ_PAGE_SECONDS)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -821,8 +868,26 @@ def _blocked_reason(plugin, state: dict) -> str:
             key.startswith("__cf_chl") for key, _ in parse_qsl(urlparse(url).query)):
         return f"{plugin.display_name} is blocking this browser with a robot/security check; no listings were available."
     if state.get("covered"):
-        return "Something covers the results (a sign-in or cookie prompt?). Close it in the browser window."
+        seen = state.get("seen") or {}
+        if seen and not seen.get("onScreen"):
+            return ("The job links are on the page but none came into view (the results list didn't scroll, or the "
+                    "page laid them out off screen): the board's reader may need an update.")
+        cover = (seen.get("cover") or "").strip()
+        return ("Something covers the results" + (f": {cover}" if cover else " (a sign-in or cookie prompt?)")
+                + ". Close it in the browser window.")
     return ""
+
+
+def what_the_reader_saw(state: dict) -> str:
+    """One log line on a results page that gave no listings (counts, the page, what links looked like)."""
+    seen = state.get("seen") or {}
+    if not seen:
+        return ""
+    paths = ", ".join(seen.get("jobPaths") or []) or "none"
+    return (f"  What the reader saw on {seen.get('page') or 'the page'}: {seen.get('links', 0)} links, "
+            f"{seen.get('jobLinks', 0)} matching this board's job-link pattern"
+            + (", some of them in view" if seen.get("onScreen") else ", none of them in view")
+            + f"; links with 'job' in their address look like: {paths}.")
 
 
 async def quick_collect(title: str, plugin, profile: dict, prefs: dict, intake: Intake, search_url: str,
@@ -830,17 +895,23 @@ async def quick_collect(title: str, plugin, profile: dict, prefs: dict, intake: 
     """Read the board's results pages: links and listing text from the page, one AI request
     per page for labels and match scores, every listing through the intake."""
     wants = wants_text(title, prefs, profile)
+    board = plugin.display_name
     browser, network = _open_browser(plugin, search_url, title)
     done_ids: set = set()
     applied = 0
     try:
-        await config.maybe_apply_stealth(browser)
-        await browser.start()
-        await asyncio.wait_for(network.start(), 30)
-        await browser.navigate_to(search_url)
+        # Each phase is said in the log as it starts, so a board that stops answering shows where.
+        print(f"  🌐 Starting the browser for {board}")
+        await _phase(board, "starting the browser", config.maybe_apply_stealth(browser), BROWSER_START_SECONDS)
+        await _phase(board, "starting the browser", browser.start(), BROWSER_START_SECONDS)
+        await _phase(board, "starting its network guard", network.start(), 30)
+        print(f"  🔎 Opening {board}'s results page")
+        await _phase(board, "opening the results page", browser.navigate_to(search_url), OPEN_PAGE_SECONDS)
         await asyncio.sleep(2.5)
         for page_no in range(QUICK_MAX_PAGES):
-            cards, state = await _read_page(browser, network, plugin, done_ids)
+            print(f"  📖 Reading results page {page_no + 1}")
+            cards, state = await _phase(board, f"reading results page {page_no + 1}",
+                                        _read_page(browser, network, plugin, done_ids), READ_PAGE_SECONDS)
             if not cards and page_no == 0:
                 if (state.get("hidden") or getattr(network.collection_policy, "read_hosts", None)) and not state.get("password"):
                     inert_cards, inert_state = await _inert_results(browser, network, plugin, search_url, done_ids)
@@ -849,6 +920,9 @@ async def quick_collect(title: str, plugin, profile: dict, prefs: dict, intake: 
                         print("  Reading server-rendered results after the site's scripts could not display them.")
             if not cards and page_no == 0:
                 reason = _blocked_reason(plugin, state)
+                saw = what_the_reader_saw(state)
+                if saw:
+                    print(saw)
                 # Collection cannot perform sign-in or send challenge answers.
                 # Waiting here cannot grant that authority; finish this board
                 # promptly so an unattended multi-board run can keep going.
@@ -884,7 +958,7 @@ async def quick_collect(title: str, plugin, profile: dict, prefs: dict, intake: 
                 if not await _go(browser, page_url, network):
                     break
                 continue
-            step = await _page_eval(browser, NEXT_JS) or {}
+            step = await _phase(board, "looking for the next results page", _page_eval(browser, NEXT_JS), 60) or {}
             if step.get("href") and board_host(plugin, urlparse(step["href"]).hostname or "") \
                     and urlparse(step["href"]).scheme == "https":
                 if not await _go(browser, step["href"], network):
@@ -900,10 +974,15 @@ async def quick_collect(title: str, plugin, profile: dict, prefs: dict, intake: 
         if policy is not None and policy.refused:
             print(f"  Collection blocked {policy.refused} writes or unlisted page requests. "
                   "Some dynamic results may need a board reader update; saved listings are kept.")
-        await network.close()
+        # Closing is bounded too: a browser that doesn't close in time is ended by the app's sweep
+        # of its own browser processes (the next board starts with a fresh one).
         try:
-            await browser.kill()
-        except Exception:
+            await asyncio.wait_for(network.close(), CLOSE_SECONDS)
+        except (asyncio.TimeoutError, Exception):
+            pass
+        try:
+            await asyncio.wait_for(browser.kill(), CLOSE_SECONDS)
+        except (asyncio.TimeoutError, Exception):
             pass
 
 
@@ -951,7 +1030,8 @@ async def collect_for_title(title: str, existing_jobs: dict, profile: dict, max_
     if prefs["mode"] == "quick" and getattr(plugin, "listing", None) is not None:
         print(f"  ⚡ Quick: reading whole results pages (about one AI request per page)")
         try:
-            await quick_collect(title, plugin, profile, prefs, intake, search_url, filters)
+            await _whole_board(plugin.display_name, quick_collect(title, plugin, profile, prefs, intake, search_url, filters),
+                               QUICK_BOARD_SECONDS)
         finally:
             intake.report()
         return intake.saved
@@ -959,10 +1039,21 @@ async def collect_for_title(title: str, existing_jobs: dict, profile: dict, max_
         print(f"  {plugin.display_name} can't be read a page at a time (its results have no job links), "
               "so it is collected one job at a time.")
     try:
-        await _detailed_collect(title, existing_jobs, profile, prefs, intake, max_jobs, filters, plugin, search_url)
+        await _whole_board(plugin.display_name, _detailed_collect(
+            title, existing_jobs, profile, prefs, intake, max_jobs, filters, plugin, search_url), DETAILED_BOARD_SECONDS)
     finally:
         intake.report()
     return intake.saved
+
+
+async def _whole_board(board: str, work, seconds: float) -> None:
+    """One board's collection within its time limit. A board that stops answering ends here with a
+    plain message (what was saved stays) instead of holding the whole collection; the caller goes
+    on with the next board. A Stop still ends everything at once (CancelledError passes)."""
+    try:
+        await _phase(board, "collecting", work, seconds)
+    except BoardStalled as stalled:
+        print(f"  ⏱️  {stalled}: moving on. Listings saved before this are kept.")
 
 
 async def _detailed_collect(title, existing_jobs, profile, prefs, intake, max_jobs, filters, plugin, search_url):
@@ -1150,19 +1241,26 @@ async def _detailed_collect(title, existing_jobs, profile, prefs, intake, max_jo
         if policy is not None and getattr(plugin, "listing", None):
             state = await browser_policy.collection_evaluate(browser, LISTING_JS, [plugin.listing.job_link], MAX_CARDS_PER_PAGE)
             policy.observe_jobs(card["href"] for card in state.get("cards", []))
+    board = plugin.display_name
     try:
-        await config.maybe_apply_stealth(browser)
-        await browser.start()
-        await asyncio.wait_for(network.start(), 30)
+        print(f"  🌐 Starting the browser for {board}")
+        await _phase(board, "starting the browser", config.maybe_apply_stealth(browser), BROWSER_START_SECONDS)
+        await _phase(board, "starting the browser", browser.start(), BROWSER_START_SECONDS)
+        await _phase(board, "starting its network guard", network.start(), 30)
+        print(f"  🔎 Reading {board} one job at a time")
         result = await agent.run(on_step_start=wait_for_approval)
-        last_source = await _page_eval(browser, "() => ({url:location.href,text:(document.body?.innerText || '').slice(0,16000)})") or last_source
+        last_source = await asyncio.wait_for(_page_eval(browser, "() => ({url:location.href,text:(document.body?.innerText || '').slice(0,16000)})"), 30) or last_source
         if getattr(plugin, "listing", None):
             try:
-                last_cards = (await browser_policy.collection_evaluate(browser, LISTING_JS, [plugin.listing.job_link], MAX_CARDS_PER_PAGE)).get("cards", [])
+                last_cards = (await asyncio.wait_for(browser_policy.collection_evaluate(
+                    browser, LISTING_JS, [plugin.listing.job_link], MAX_CARDS_PER_PAGE), READ_PAGE_SECONDS)).get("cards", [])
             except Exception:
                 pass  # the final tab may have closed; retain earlier source evidence and saved jobs
     finally:
-        await network.close()
+        try:
+            await asyncio.wait_for(network.close(), CLOSE_SECONDS)
+        except (asyncio.TimeoutError, Exception):
+            pass
 
     # Extract jobs from the full history (agent may put @@JOB_FOUND in memory or done text)
     if result and result.history:

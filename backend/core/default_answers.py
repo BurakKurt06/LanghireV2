@@ -53,12 +53,14 @@ DEFAULTS: tuple[tuple[str, str, str], ...] = (
     ("start_date", "When can you start? / Available start date",
      "From the posting when it names a period (\"Summer 2027\" → June 2027); otherwise Profile → Start date."),
     ("history_dates", "Dates, titles, employers, schools and skills in work or education history",
-     "From my resume and profile, exactly as they are written there."),
+     "From my resume and profile. A form that wants a whole date where they give only the month and year gets the "
+     "15th (May 2028 → 05/15/2028). A job that is still going on: 'I currently work here', or today's date when "
+     "an end date is required."),
     ("cover_letter", "Cover letter", "Optional: skip it. Required: write one from my resume, profile and notes."),
     ("gpa", "GPA", "Optional: leave it blank. Required: the GPA in my profile or resume."),
     ("anything_else", "Anything else that nothing above, my profile, my resume or my saved answers tells you",
-     "The most sensible conservative answer, logged as a guess for me to check. Never invent skills, experience, "
-     "certifications or dates."),
+     "The most sensible answer worked out from what they do say, logged as a guess (with what it was worked out "
+     "from) for me to check. Never invent skills, experience, certifications, or a date with nothing behind it."),
 )
 IDS = tuple(d[0] for d in DEFAULTS)
 MAX_ANSWER_LENGTH = 600

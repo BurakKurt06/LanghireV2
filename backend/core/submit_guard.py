@@ -67,6 +67,54 @@ def is_account_step(control) -> bool:
     return any(_ACCOUNT_STEP.search(t) for t in texts)
 
 
+_ACCOUNT_CREATION = re.compile(
+    r"\b(sign\s*-?\s*up|register|registration|create\s+(?:an?\s+|my\s+|your\s+|new\s+)?account)\b", re.I)
+
+
+def is_account_creation(control) -> bool:
+    """An account step that registers ("Create Account", "Register", "Submit Registration"), not one that signs in."""
+    if not is_account_step(control):
+        return False
+    return any(_ACCOUNT_CREATION.search(t) for t in (*control.labels, control.submitter_text) if t)
+
+
+# "Print Application", "Download PDF", "Save as PDF": a copy of the form for the candidate. It is never
+# part of applying, and it opens the browser's print dialog, which stops the page from answering at all
+# (seen 2026-11: tal.net's "Print Application" froze five applications until they timed out).
+_PRINT_OR_PDF = re.compile(
+    r"\bprint(?:able|er)?\b|\b(?:download|export|save)\s+(?:as\s+|a\s+|the\s+|my\s+|your\s+)?pdf\b"
+    r"|\b(?:download|export)\s+(?:the\s+|my\s+|your\s+)?(?:application|copy|form|summary)\b"
+    r"|\bpdf\s+(?:version|copy)\b", re.I)
+PRINT_REFUSAL = ("Not clicked: printing or downloading the application isn't part of applying, and the print "
+                 "window stops this browser from responding. Check the answers on the page itself, then go on "
+                 "to the next step.")
+
+
+# A print or PDF view of the application, by its address (a tal.net site's ".../eform/<id>/print").
+_PRINT_ADDRESS = re.compile(r"/(?:print|printable|print[-_]?application|printview|print[-_]?preview)(?:[/?#.]|$)"
+                            r"|[?&](?:print|printable)=(?:1|true|yes)\b", re.I)
+
+
+def is_print_address(url: str) -> bool:
+    """The address opens a print or PDF copy of the application, never a page of the form."""
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(url or "")
+        return bool(_PRINT_ADDRESS.search(parts.path + ("?" + parts.query if parts.query else "")))
+    except ValueError:
+        return False
+
+
+def is_print_control(control) -> bool:
+    """A button or link that prints the application or saves it as a PDF (never an answer option)."""
+    if control is None or not control.activatable or control.role in ("option", "checkbox", "radio"):
+        return False
+    texts = [t for t in control.labels if t]
+    if any(is_submit_label(t) or re.search(r"\b(upload|attach|resume|cv|cover\s+letter)\b", t, re.I) for t in texts):
+        return False        # "Submit application", "Upload resume (PDF)": not a print control
+    return any(_PRINT_OR_PDF.search(t) for t in texts)
+
+
 RUN_MODES = ("auto", "trial", "training")
 # The fingerprint of a form the app couldn't read (or of a control in a frame it couldn't include in the
 # review): no approval ever matches it.
@@ -103,6 +151,9 @@ class Control:
     submitter_alternative: str = ""
     text_pseudo: str = ""  # rendered CSS text remains evidence even when ARIA/title says Next
     submitter_pseudo: str = ""
+    # How many fields a person could fill in the control's form (None when the page wasn't asked).
+    # 0 on a job posting's own "Apply" button, whose form only carries hidden values.
+    form_fields: int | None = None
 
     def __post_init__(self):
         self.tag, self.type = (self.tag or "").lower(), (self.type or "").lower()
@@ -174,6 +225,9 @@ class SubmitGuard:
     attempts: int = 0
     live_steps: bool = False  # enabled only by the canonical network-guarded application runner
     strict_network: bool = False  # explicit protocol diagnostics, not normal Trial
+    # Form work done so far in this run: a field filled in, a sign-in or sign-up pressed, a form's own
+    # Next / Save / Submit pressed. Zero means the agent is still on the way to the application.
+    form_steps: int = 0
 
     def __post_init__(self):
         if self.mode not in RUN_MODES:
@@ -214,6 +268,30 @@ class SubmitGuard:
         # the label nor the form tells it apart from an upload step. Attaching the file needs no button,
         # and upload buttons ("Upload resume") stay allowed. (Codex review R01 and its re-check.)
         labels = control.labels if control is not None else ()
+        if is_print_control(control) and (action == "click" or (
+                action == "send_keys" and (_has_enter(text) or _has_space(text)))):
+            return Decision(False, PRINT_REFUSAL)       # in every mode: it sends nothing and freezes the page
+
+        def apply_label(label: str) -> bool:
+            return bool(re.fullmatch(r"\s*(?:" + _APPLY_WORD + r")[.!\s]*", label, re.I))
+
+        # A posting's own "Apply" button: its form holds nothing a person could fill in, and nothing has
+        # been filled in, signed in to or sent on in this run yet. It opens the application (the sign-in
+        # page, the first form page); it can't be the application's final submit. Seen 2026-11: tal.net's
+        # posting pages have it as <input type=submit value="Apply"> in a form of hidden values, and every
+        # application there was marked "may have been sent" from its first click. It stays a possible
+        # submit in Full auto (the mark comes off when the application visibly goes on) and is a live
+        # step in Trial, like Next.
+        opens_application = bool(
+            control is not None and control.form_fields == 0 and not self.form_steps
+            and not control.final_context and not control.application_review
+            and any(apply_label(label) for label in labels)
+            and not any(is_submit_label(label) for label in labels))
+        if control is not None and (
+                (action in ("input", "select_dropdown") and not control.activatable)
+                or (action == "click" and not opens_application
+                    and (control.native_submit or is_account_step(control)))):
+            self.form_steps += 1
         if not self.strict_network and (self.mode == "auto" or self.live_steps) and is_account_step(control):
             return Decision(True)        # an account step, in every mode: not a submit, not even a possible one
 
@@ -224,13 +302,10 @@ class SubmitGuard:
                 and re.search(r"\b(?:profile|account|password|verification|code|otp|resume|document|upload)\b", label, re.I)
                 and not (is_submit_label(label) and re.search(r"\b(?:resume|cv|documents?)\b", label, re.I)))
 
-        def apply_label(label: str) -> bool:
-            return bool(re.fullmatch(r"\s*(?:" + _APPLY_WORD + r")[.!\s]*", label, re.I))
-
         label_final = any(is_submit_label(label) and not intermediate(label) for label in labels)
         final_apply = bool((self.mode == "auto" or (self.mode == "trial" and self.live_steps and not self.strict_network))
             and control is not None and (control.in_form is True or control.final_context or control.application_review)
-            and any(apply_label(label) for label in labels))
+            and any(apply_label(label) for label in labels) and not opens_application)
         context_final = bool(control is not None and control.final_context and (
             control.native_submit or (control.activatable and not control.combo and control.role != "combobox"
                 and any(re.fullmatch(r"\s*(?:next|continue)[.!\s]*", label, re.I)
@@ -436,8 +511,17 @@ _FORM_CONTEXT_JS = r"""
     const buttons = root ? Array.from(root.querySelectorAll('button,input')) : [];
     const submitter = buttons.find(n => n.form === form && (n.type === 'submit' || n.type === 'image'));
     const submitter_pseudo = submitter ? generatedControlName(submitter) : '';
+    // Fields a person could fill in this form (shown on the page; hidden values and buttons don't count).
+    const fillable = n => {
+      const type = String(n.type || '').toLowerCase();
+      if (n.form !== form || ['hidden','submit','button','image','reset'].includes(type) || n.disabled) return false;
+      const r = n.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    };
+    const form_fields = root ? Array.from(root.querySelectorAll('input,select,textarea,[contenteditable=""],[contenteditable="true"]'))
+      .filter(n => n.isContentEditable ? form.contains(n) : fillable(n)).length : null;
     return {final_context: final, application_review, submitter_text: submitter ? controlName(submitter, submitter_pseudo) : '',
-      submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo};
+      submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo, form_fields};
   }
 """
 

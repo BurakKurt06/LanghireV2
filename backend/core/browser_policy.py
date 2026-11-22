@@ -182,7 +182,7 @@ async def collection_evaluate(session, function, *args, scroll=False):
                         return True
                     continue
                 if frame_id == top_id:
-                    merged.update({key: value.get(key) for key in ("url", "title", "password", "blocker")})
+                    merged.update({key: value.get(key) for key in ("url", "title", "password", "blocker", "seen")})
                 merged["covered"] += value.get("covered", 0)
                 merged["hidden"] += value.get("hidden", 0)
                 for card in value.get("cards", []):

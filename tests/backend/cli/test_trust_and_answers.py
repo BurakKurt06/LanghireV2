@@ -73,13 +73,33 @@ def test_unknown_consequential_questions_end_the_job_for_the_user(tmp_path, monk
     ask = tools.registry.registry.actions["ask_for_answers"].function
     params = apply_jobs.UnansweredQuestions(questions=[
         apply_jobs.UnansweredQuestion(question="Do you consent to a background check?", options=["Yes", "No"]),
-        apply_jobs.UnansweredQuestion(question="Education start date"),
+        apply_jobs.UnansweredQuestion(question="Name of the school you attended before university"),
     ])
     result = asyncio.run(ask(params=params, browser_session=object()))
     assert result.is_done and result.success is False
     assert result.extracted_content.startswith(apply_jobs.NEEDS_YOU_PREFIX)
     unanswered = {q["question"] for q in store.qa_list(unanswered_only=True)}
-    assert {"Do you consent to a background check?", "Education start date"} <= unanswered
+    assert {"Do you consent to a background check?", "Name of the school you attended before university"} <= unanswered
+
+
+def test_a_date_from_the_work_or_education_history_is_never_put_to_the_user(tmp_path, monkeypatch):
+    """The user's rule (2026-11): what the resume gives in part is completed, not asked for. (This
+    question used to end the job for the user, after a five-minute wait.)"""
+    store = MemoryStore(tmp_path / "m.db")
+    monkeypatch.setattr(apply_jobs, "get_memory_store", lambda: store)
+    waited = []
+
+    async def no_wait(*args, **kwargs):
+        waited.append(args)
+
+    monkeypatch.setattr(apply_jobs, "wait_for_user_reply", no_wait)
+    tools = apply_jobs.build_tools({"url": ACME, "title": "Intern", "company": "Acme"}, "acme.example", False, {}, 1)
+    ask = tools.registry.registry.actions["ask_for_answers"].function
+    params = apply_jobs.UnansweredQuestions(questions=[apply_jobs.UnansweredQuestion(question="Education start date")])
+    result = asyncio.run(ask(params=params, browser_session=object()))
+    assert not result.is_done and not waited
+    assert "Not asked" in result.extracted_content and "use the 15th" in result.extracted_content
+    assert store.qa_list(unanswered_only=True) == []          # nothing is left for the user to answer
 
 
 @pytest.mark.parametrize("trial", [True, False])

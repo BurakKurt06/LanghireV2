@@ -33,6 +33,24 @@ describe("AutomationDialog", () => {
     expect(screen.getByText("Keep the browser window open")).toBeInTheDocument();
   });
 
+  // Dark mode (Codex's note, 2026-11-17): the third card had a fixed near-white surface under
+  // theme-colored (near-white) text. Each card's surface, text and icon now follow the theme;
+  // measured in a browser: text 12:1 or better in dark mode, unchanged in light mode.
+  it("gives every notice card colors that follow the theme", () => {
+    renderDialog();
+    for (const title of ["This may take a while", "Log in first", "Keep the browser window open"]) {
+      const card = screen.getByText(title).closest("div.flex") as HTMLElement;
+      const classes = [card, ...Array.from(card.querySelectorAll("*"))].map((el) => el.getAttribute("class") || "").join(" ");
+      expect(classes).not.toMatch(/bg-\[#/);                                   // no fixed color surface
+      const themed = /\bbg-secondary\b/.test(card.className) || /\bdark:bg-/.test(card.className);
+      expect(themed, `${title}: surface follows the theme`).toBe(true);
+      if (!/\bbg-secondary\b/.test(card.className)) {
+        expect(classes, `${title}: text and icon have dark-mode colors`).toMatch(/dark:text-\w+-100/);
+        expect(classes).toMatch(/dark:text-\w+-400/);
+      }
+    }
+  });
+
   it("calls onConfirm when the start button is clicked", async () => {
     const user = userEvent.setup();
     const { onConfirm, onCancel } = renderDialog();

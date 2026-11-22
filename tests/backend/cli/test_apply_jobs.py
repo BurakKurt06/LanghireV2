@@ -801,9 +801,33 @@ def _apply_once(history):
     return status, job
 
 
-def test_a_fixable_failure_is_marked_for_one_retry_with_its_report(run):
-    status, job = _apply_once(FakeHistory(success=False, done_text="Stopped at Review: Field of Study\nNo Statistics option."))
+def test_a_failure_that_might_go_away_is_marked_for_one_retry_with_its_report(run):
+    """The user's rule (2026-11): one more try only for what might go away by itself."""
+    status, job = _apply_once(FakeHistory(success=False, done_text="Stopped at Review\nThe page didn't load after Next."))
     assert status == "failed" and job["_retry_with"].startswith("Stopped at Review")
+
+
+@pytest.mark.parametrize("report", [
+    "Stopped at Review: Field of Study\nNo Statistics option.",                      # nothing a second try changes
+    "Already applied\nThe site says you have already applied to this job.",
+    "Phone number rejected\nThe site keeps rejecting the phone number format.",
+    "Date of birth\nThe form does not accept the value; validation error on the page.",
+    "Position filled\nThis position has been filled and is no longer accepting applications.",
+    "Timed out\nThe page timed out, and the site does not accept the resume file.",    # the site's decision wins
+])
+def test_what_the_site_decided_is_final_and_never_retried(run, report):
+    status, job = _apply_once(FakeHistory(success=False, done_text=report))
+    assert status == "failed" and "_retry_with" not in job
+
+
+@pytest.mark.parametrize("report,again", [
+    ("The page did not load.", True), ("The request timed out twice.", True), ("The browser window crashed.", True),
+    ("A server error (503) appeared after Save.", True), ("The page stayed blank after Continue.", True),
+    ("The connection dropped during upload.", True), ("The dropdown has no matching option.", False),
+    ("The posting is closed.", False), ("", False),
+])
+def test_which_failure_reports_might_go_away(report, again):
+    assert apply_jobs.may_go_away(report) is again
 
 
 def test_hard_stops_are_not_retried(run):

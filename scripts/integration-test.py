@@ -312,7 +312,9 @@ def main():
     print(f"Isolated data folder: {data_dir(TEST_HOME)}")
 
     if args.binary:
-        cmd = [args.binary, str(TEST_PORT)]
+        # Absolute: on Windows the isolated environment made a relative path (as test.yml passes it)
+        # fail to start with "The system cannot find the file specified".
+        cmd = [os.path.abspath(args.binary), str(TEST_PORT)]
         print(f"Testing BUILT BINARY: {args.binary}")
     else:
         cmd = [sys.executable, "backend/main.py", str(TEST_PORT)]

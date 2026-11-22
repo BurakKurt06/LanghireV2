@@ -379,10 +379,22 @@ def test_build_memory_context_includes_qa(base_profile, no_op_store):
 
 
 def test_build_memory_context_applied_labels(base_profile, no_op_store):
-    """applied_labels produce a SKIP section."""
+    """Earlier applications at the employer are listed for reference, never as an order to skip.
+
+    It used to read "Already applied — SKIP", and the agent skipped a second listing with the same
+    title (2026-11). The user's rule: an employer can list one job twice; every link gets its own
+    application, and only the site can say this posting was already applied to.
+    """
     ctx = sc.build_memory_context(base_profile, qa={}, applied_labels=["Job A", "Job B"])
-    assert "Already applied — SKIP:" in ctx
+    assert "SKIP" not in ctx
+    assert "EARLIER APPLICATIONS AT THIS EMPLOYER (for reference" in ctx
+    assert "apply to it even when a title below matches" in ctx
+    assert "Only the site itself can say you already applied" in ctx
     assert "- Job A" in ctx
+
+
+def test_control_without_earlier_applications_nothing_is_listed(base_profile, no_op_store):
+    assert "EARLIER APPLICATIONS" not in sc.build_memory_context(base_profile, qa={}, applied_labels=[])
 
 
 def test_build_memory_context_no_salary(base_profile, no_op_store):

@@ -200,7 +200,15 @@ export interface Job {
   collected_at?: string;
   applied_at?: string;
   submit_attempted_at?: string | null;
-  submission_evidence?: { kind: "user_confirmed" | "unverified_page"; confirmed_at?: string; observed_at?: string } | null;
+  /** Why a job counts as applied: the site's confirmation page or email, the site saying it was
+   *  already applied to, or the user marking it. */
+  submission_evidence?: {
+    kind: "user_confirmed" | "unverified_page" | "confirmation_page" | "confirmation_email" | "site_says_already_applied";
+    confirmed_at?: string;
+    observed_at?: string;
+  } | null;
+  /** When the picture of this job's last page was taken (kept while it is failed or needs you). */
+  screenshot_at?: string | null;
   error?: string;
   description?: string;
   tailored_resume_path?: string;
@@ -512,6 +520,35 @@ export interface ApplyStatus {
   log: string[];
   error: string | null;
   finished_at: string | null;
+  /** Why the run is waiting or stopped starting jobs ("Stopped: ChatGPT limit ..., resets in about
+   *  2 hours"). It stays after the run ends, until the next one starts. */
+  notice?: { text: string; kind: "" | "limit_wait" | "limit_stop" };
+}
+
+/** What Start found missing ("required": a run can't work at all without it). */
+export interface StartProblem {
+  id: string;
+  message: string;
+  required: boolean;
+}
+
+/** A question the queued jobs' sites are known to ask that nothing answers yet. */
+export interface StartQuestion extends PendingQuestion {
+  /** How many of the jobs about to run are on sites that ask it. */
+  jobs: number;
+  why: string;
+}
+
+export interface StartCheck {
+  ok: boolean;
+  problems: StartProblem[];
+  questions: StartQuestion[];
+  jobs: number;
+}
+
+/** A question jobs are waiting on, with the jobs that wait on it. */
+export interface WaitingQuestion extends PendingQuestion {
+  jobs: { url: string; title: string; company: string }[];
 }
 
 export interface BrowserRequestReview {
@@ -617,6 +654,8 @@ export interface QAEntry {
   source?: string;
   /** The choices of a dropdown/radio question, one per line. */
   options?: string;
+  /** For a guessed answer: what it was worked out from ("resume: May 2028"). */
+  basis?: string;
   times_seen: number;
   merged_into_id: number | null;
   created_at: string;

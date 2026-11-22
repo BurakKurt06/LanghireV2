@@ -26,6 +26,7 @@ import {
   Hand,
   SkipForward,
   ScrollText,
+  Image as ImageIcon,
 } from "lucide-react";
 import {
   getJobs,
@@ -47,6 +48,9 @@ import ApplyModeToggle from "../../components/ApplyModeToggle";
 import InboxBadge from "../../components/InboxBadge";
 import JobLogDialog from "../../components/JobLogDialog";
 import JobQuestions from "../../components/JobQuestions";
+import LastPageDialog from "../../components/LastPageDialog";
+import { useStartCheck } from "../../hooks/useStartCheck";
+import WaitingQuestions from "../../components/WaitingQuestions";
 import { loadApplyMode, saveApplyMode, type ApplyMode } from "../../lib/applyMode";
 import { TAILOR_OPTION_LABELS, loadAutoTailor, loadTailorOptions } from "../../lib/tailoring";
 import { settingsHref } from "../../lib/settingsSections";
@@ -152,6 +156,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   // The job whose own log is open ("View log" on its card)
   const [logJob, setLogJob] = useState<Job | null>(null);
+  // The job whose last-page picture is open ("Last page" on a job that didn't finish)
+  const [pictureJob, setPictureJob] = useState<Job | null>(null);
+  // Before any run starts: what is missing, and what these jobs' sites will ask (see StartCheck).
+  const startCheck = useStartCheck();
   // What happened to the answers given on a card: kept here because the card itself usually
   // leaves "Needs you" (and a "Needs you" filter) as soon as they are saved.
   const [answerNotice, setAnswerNotice] = useState<string | null>(null);
@@ -340,6 +348,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         if (!result.success) throw new Error("The note could not be saved. Please retry.");
         setJobs((previous) => previous.map((item) => item.url === pendingApplyUrl ? { ...item, user_note: applyNote } : item));
       }
+      if (!(await startCheck.confirmStart([pendingApplyUrl]))) return;
       await tailorBeforeApplying([pendingApplyUrl]);
       const res = await startApplying({
         job_url: pendingApplyUrl,
@@ -456,6 +465,8 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
     if (urls.length === 0) return;
     const acknowledgeUnknown = jobs.some(j => urls.includes(j.url) && j.submit_attempted_at);
     if (acknowledgeUnknown && !confirm("Some selected jobs may already have been submitted. Have you checked their employer sites or emails and confirmed you want to retry despite the duplicate risk?")) return;
+    // Said once, before the first job: what is missing, and what these jobs' sites will ask.
+    if (!(await startCheck.confirmStart(urls))) return;
     setBatchApplying(true);
     try {
       await tailorBeforeApplying(urls);
@@ -670,6 +681,12 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
         </div>
       )}
 
+      <WaitingQuestions refreshKey={statsKey} onAnswered={(message) => {
+        setAnswerNotice(message);
+        fetchJobs(true);
+        onJobsChanged();
+      }} />
+
       {answerNotice && (
         <div role="status" className="mb-3 flex items-start justify-between gap-3 rounded-xl border border-border bg-secondary/60 px-4 py-2.5 text-[13px] text-foreground">
           <span>{answerNotice}</span>
@@ -855,6 +872,16 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                       >
                         <ScrollText className="w-3 h-3" /> View log
                       </button>
+                      {job.screenshot_at && (job.status === "failed" || job.status === "needs_you") && (
+                        <button
+                          onClick={() => setPictureJob(job)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border border-border hover:bg-secondary"
+                          aria-label={`Last page of ${job.title || "this job"}`}
+                          title="What the page looked like when this job stopped"
+                        >
+                          <ImageIcon className="w-3 h-3" /> Last page
+                        </button>
+                      )}
                       {/* Three-dot status menu */}
                       <div className="relative">
                         <button
@@ -1210,6 +1237,10 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
       {logJob && (
         <JobLogDialog url={logJob.url} title={logJob.title || logJob.url} onClose={() => setLogJob(null)} />
       )}
+      {pictureJob && (
+        <LastPageDialog url={pictureJob.url} title={pictureJob.title || pictureJob.url} onClose={() => setPictureJob(null)} />
+      )}
+      {startCheck.dialog}
     </div>
   );
 }

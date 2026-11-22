@@ -134,7 +134,21 @@ export default function RunPanel() {
   }, [running]);
 
   // Only application runs show here; collection has its own progress and Stop on the Jobs page.
-  if (!status || !status.running) return null;
+  // After a run that the AI plan's limit stopped, the reason stays here (with when the limit
+  // resets) until the next run starts: the user who walked away sees why it ended.
+  const notice = status?.notice?.text ? status.notice : null;
+  if (!status) return null;
+  if (!status.running) {
+    if (notice?.kind !== "limit_stop") return null;
+    return (
+      <section aria-label="Why the last run stopped" className="mx-3 mb-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-[12px]">
+        <p role="status" className="flex items-start gap-1.5 text-foreground">
+          <CircleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-600" />
+          <span>{notice.text}. The jobs that weren't started are still ready.</span>
+        </p>
+      </section>
+    );
+  }
 
   const jobs = status.current ?? [];
   const titleOf = (url: string) => jobs.find((j) => j.url === url)?.title || "";
@@ -165,6 +179,13 @@ export default function RunPanel() {
         </span>
         <span className="rounded-full bg-background px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">{mode}</span>
       </div>
+
+      {notice && (
+        <p role="status" className="mt-2 flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-foreground">
+          <CircleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-600" />
+          <span>{notice.text}{notice.kind === "limit_stop" ? ". Jobs already running finish; the rest stay ready." : ""}</span>
+        </p>
+      )}
 
       {jobs.length ? (
         jobs.map((job) => (

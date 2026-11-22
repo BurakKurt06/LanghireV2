@@ -81,11 +81,12 @@ class TestSettingsPersistence:
 class TestStealthLaunchArgs:
     def test_no_extra_args_when_stealth_off(self, data_dir, monkeypatch):
         monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {"stealth_enabled": False})
-        # Only the always-on removal of the flag Chrome warns about, and the network guard.
+        # Only the always-on removal of the flag Chrome warns about, the network guard, and the
+        # request for English pages (2026-11: whatever language the computer is set to).
         from core import net_guard
         kwargs = shared_config.build_browser_kwargs()
         assert kwargs["ignore_default_args"] == ["--extensions-on-chrome-urls"]
-        assert kwargs["args"] == net_guard.direct_args(block_mail=True)
+        assert kwargs["args"] == net_guard.direct_args(block_mail=True) + list(net_guard.ENGLISH_ARGS)
 
     def test_launch_args_have_no_chrome_warning_flag(self, data_dir, monkeypatch):
         """Chrome shows an 'unsupported command-line flag' bar for --extensions-on-chrome-urls."""

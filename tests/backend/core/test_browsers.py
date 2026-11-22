@@ -232,7 +232,9 @@ def test_every_automation_browser_really_starts_with_the_guards(monkeypatch, ins
     session = BrowserSession(chromium_sandbox=True, **shared_config.build_browser_kwargs(purpose=purpose))
     profile = session.browser_profile
     assert profile.block_ip_addresses is True and profile.permissions == []
-    assert profile.args == net_guard.direct_args(block_mail=blocks_mail)
+    # The application browser also asks sites for English (2026-11); the app's own mail reader doesn't need to.
+    english = list(net_guard.ENGLISH_ARGS) if purpose == "agent" else []
+    assert profile.args == net_guard.direct_args(block_mail=blocks_mail) + english
     assert str(profile.user_data_dir).endswith("browser_profile_msedge" + profile_suffix)
     launch = " ".join(profile.get_args())
     # These browsers connect by themselves again (2026-11): one rule script names what is off limits,
