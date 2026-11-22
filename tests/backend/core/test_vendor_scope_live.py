@@ -22,13 +22,17 @@ pytestmark = [pytest.mark.real_browser, pytest.mark.skipif(
     ('https://recruiting.ultipro.com/ACME1003/JobBoard/123/Account/Login', [
         'https://recruiting.ultipro.com/OTHER1003/JobBoard/123/Account/Login', 'https://recruiting.ultipro.com/']),
 ])
-async def test_shared_vendor_cannot_type_another_employers_password_then_post_it(wire_site, monkeypatch, job, others):
+async def test_the_job_site_password_goes_to_the_jobs_site_and_not_to_an_address_the_agent_made_up(wire_site, monkeypatch, job, others):
+    """Was "a shared vendor cannot type another employer's password": each tenant had a password
+    the app made for it, and another tenant got none. With the user's decision 5 (2026-11) there is
+    one job-site password, typed wherever the job link leads. What still gets nothing is a site
+    the agent opened by an address no page of this application linked to."""
     local, seen, site = wire_site
     site['html'] = '<form method=post><input name=password type=password><button>Sign in</button></form>'
     browser, gate = await browser_and_gate('auto', job, transport_factory=transport(local, {}),
         trusted_site=lambda u: bool(apply_jobs.employer_site(u, job)))
     monkeypatch.setattr(apply_jobs, 'update_job', lambda *a, **k: True)
-    ref = {'request_gate': gate, 'secrets': {}, 'secret_masks': {}}
+    ref = {'request_gate': gate, 'secrets': {'password': 'Made-Up-Pass-77'}, 'secret_masks': {}}
     apply_jobs.set_run_mode('auto')
     tools = apply_jobs.build_tools({'url': job, 'title': 'Local', 'company': 'Acme'}, '', False, ref, 1)
     try:
@@ -38,13 +42,14 @@ async def test_shared_vendor_cannot_type_another_employers_password_then_post_it
             if node.tag_name == 'input' and node.attributes.get('name') == 'password')
         result = await tools.registry.execute_action('input', {'index': index, 'text': '<secret>password</secret>'}, browser_session=browser)
         assert not result.error, result
-        password = secret_store.site_password(gate.credential_key(job), create=False)
-        assert password
+        password = 'Made-Up-Pass-77'
+        assert secret_store.site_password_entries() == []
         await script(browser, 'document.querySelector("form").submit()')
         assert await wait_for(lambda: any(r[0] == 'POST' for r in seen), gate)
         assert parse_qs(next(r[2] for r in seen if r[0] == 'POST').decode())['password'] == [password]
-        for other in others:
-            await browser.navigate_to(other)
+        for other in ['https://unrelated.example.net/login']:
+            opened = await tools.registry.execute_action('navigate', {'url': other, 'new_tab': False}, browser_session=browser)
+            assert not opened.error, opened
             state = await browser.get_browser_state_summary()
             index = next(i for i, node in state.dom_state.selector_map.items()
                 if node.tag_name == 'input' and node.attributes.get('name') == 'password')

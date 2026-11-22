@@ -424,3 +424,16 @@ def test_human_check_js_has_no_stray_control_characters():
     js = captcha._HUMAN_CHECK_TARGETS_JS
     assert not any(ord(c) < 32 and c not in "\n\t" for c in js)
     assert "confirm)" + chr(92) + "b/i" in js
+
+
+def test_a_fresh_install_uses_the_solver_once_a_key_is_saved(data_dir):
+    # Decision 4: 2Captcha by default when a key is saved. The default settings used to store
+    # "captcha_solver_enabled": False, which reads as switched off: a key saved later never
+    # turned the solver on although the screen said "On as soon as a key is saved".
+    from core import config
+    fresh = config.load_settings()
+    assert "captcha_solver_enabled" not in fresh
+    assert captcha.solver_enabled(fresh) is False                                   # no key: nothing to use
+    assert captcha.solver_enabled({**fresh, "captcha_api_key": "made-up-key"}) is True
+    # Switched off by the user: stays off with a key.
+    assert captcha.solver_enabled({**fresh, "captcha_api_key": "made-up-key", "captcha_solver_enabled": False}) is False

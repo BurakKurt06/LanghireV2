@@ -110,6 +110,15 @@ def _safety_net(request, tmp_path, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
 
+    # A run waits up to five minutes for the user before it gives a job up as "Needs you". Tests
+    # of what happens after that wait don't sit through it (tests of the wait itself set their own).
+    if not request.node.get_closest_marker("real_user_wait"):
+        try:
+            from cli import apply_jobs as _apply_jobs
+            monkeypatch.setattr(_apply_jobs, "USER_WAIT_SECONDS", 0.2)
+        except ImportError:
+            pass
+
     if not request.node.get_closest_marker("real_browser"):
         import subprocess
         real_popen = subprocess.Popen
@@ -174,3 +183,4 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "real_posting_fetch: let job_page.fetch run (with a fake transport)")
     config.addinivalue_line("markers", "real_browser: allow launching a real browser (never in the default run)")
     config.addinivalue_line("markers", "real_readiness: keep main._start_problem (the start-run readiness check) real")
+    config.addinivalue_line("markers", "real_user_wait: keep the five-minute wait for the user's reply")

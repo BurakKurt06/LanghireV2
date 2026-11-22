@@ -70,7 +70,7 @@ export default function Jobs() {
   ];
 
   return (
-    <div className="max-w-5xl">
+    <div className="page-wide">
       <PageHeader
         title={t("title")}
         subtitle={t("subtitle", {

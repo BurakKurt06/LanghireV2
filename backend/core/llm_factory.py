@@ -42,7 +42,7 @@ def create_llm(settings: dict):
         )
 
     elif provider == "chatgpt":
-        from core.chatgpt_llm import ChatChatGPT
+        from .chatgpt_llm import ChatChatGPT
         cfg = settings.get("chatgpt", {})
         return ChatChatGPT(
             model=cfg.get("model") or "gpt-6-luna",

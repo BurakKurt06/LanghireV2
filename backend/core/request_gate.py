@@ -1,13 +1,16 @@
-"""The application browser's network: every request is paused here and fetched by the backend.
+"""The job collector's network: every request is paused here and fetched by the backend.
 
-The browser itself can't connect anywhere (its proxy refuses everything). The backend
-fetches each request from a checked public address (never this computer or the local
-network, never Gmail) and hands the response back to the page. Full Auto allows page
-loads and step saves and records recognized final submits. Normal Trial uses the
-same transport, with the agent's final-submit action blocked by SubmitGuard.
-Site scripts and intermediate steps can send data or submit. The stricter ATS
-contracts remain available explicitly for protocol diagnostics. Collection retains
-its separate read policy. Credentials stay scoped to recognized employer sites.
+Used by job collection only (cli/collect_jobs.py), with its read-only policy. Applications
+no longer run through it (2026-11, the user's decision): fetching every request of a real
+hiring site in the backend left new tabs blank, stopped Web Workers, WebSockets and service
+workers, and turned one stuck page into hours of waiting. The application browser connects
+by itself again (core.net_guard.direct_args); what an application may do is decided per
+action (cli/apply_jobs.py: the submit guard, where account details may be typed).
+
+The collector's browser itself can't connect anywhere (its proxy refuses everything). The
+backend fetches each request from a checked public address (never this computer or the local
+network, never Gmail) and hands the response back to the page. The Trial and Full Auto
+request modes and the stricter ATS contracts below remain for their protocol tests.
 
 Workers and WebSockets are deliberately unsupported in application browsers.
 New targets are paused before execution on a separate CDP connection. Failure
@@ -42,6 +45,8 @@ MAX_INFLIGHT_REQUESTS = 256  # a page load can ask for many resources at once
 WAIT_SECONDS = 1500
 _console = False
 _console_lock = asyncio.Lock()
+# browser-use events whose time limit this gate raises while it runs (see RequestGate.start).
+_SLOW_EVENTS = ("NavigateToUrlEvent", "ClickElementEvent", "ClickCoordinateEvent", "TypeTextEvent")
 
 
 def use_console_reviews():
@@ -133,6 +138,7 @@ class RequestGate:
         self._transports = {}
         self._site_lock = asyncio.Lock()
         self._configure_lock = asyncio.Lock()
+        self._event_timeouts = {}
         if owner:
             # The browser never connects out, including non-HTTP channels.
             # Approved HTTP is fetched by the backend, not continueRequest.
@@ -260,7 +266,11 @@ class RequestGate:
         from cdp_use import CDPClient
         self.client = CDPClient(self.browser.cdp_url)
         self.browser.cdp_client._cdp_request_timeout_s = WAIT_SECONDS + 60
-        for event in ("NavigateToUrlEvent", "ClickElementEvent", "ClickCoordinateEvent", "TypeTextEvent"):
+        # browser-use reads these for every event of every browser in this process. They are
+        # put back when this gate closes: left in place, an application run after a collection
+        # waited 26 minutes on each stuck page (one blank tab held a run for 8 hours).
+        for event in _SLOW_EVENTS:
+            self._event_timeouts.setdefault(event, os.environ.get("TIMEOUT_" + event))
             os.environ["TIMEOUT_" + event] = str(WAIT_SECONDS + 60)
         await self.client.start()
         # Callbacks must return immediately: cdp-use reads command replies on
@@ -602,8 +612,17 @@ class RequestGate:
                 except Exception:
                     pass
 
+    def _restore_event_timeouts(self):
+        for event, previous in self._event_timeouts.items():
+            if previous is None:
+                os.environ.pop("TIMEOUT_" + event, None)
+            else:
+                os.environ["TIMEOUT_" + event] = previous
+        self._event_timeouts = {}
+
     async def close(self):
         self.closed = True
+        self._restore_event_timeouts()
         with _lock:
             for ident in list(self.ids):
                 r = _pending.get(ident)

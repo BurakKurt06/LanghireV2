@@ -205,8 +205,9 @@ def _load_settings_file() -> dict:
         "human_delay_enabled": False,
         "human_delay_min": 5,
         "human_delay_max": 15,
-        # 2Captcha solver. Off by default; the key is never sent to the LLM.
-        "captcha_solver_enabled": False,
+        # 2Captcha solver: on as soon as a key is saved, unless the user switches it off
+        # (core.captcha.solver_enabled). No switch value here: a stored False would read as "off".
+        # The key is never sent to the LLM.
         "captcha_api_key": "",
         # Applications running at the same time (1-4).
         "parallel_jobs": 1,

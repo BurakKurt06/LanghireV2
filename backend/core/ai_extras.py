@@ -1,7 +1,8 @@
 """Optional AI helpers around an application: the fit check and cover-letter text.
 
-Both are small single requests to the user's own model. The fit check is off
-in performance mode; cover-letter boxes are off unless the user turns them on.
+Both are small single requests to the user's own model. The fit check never runs
+for links the user pasted or added by hand; cover-letter boxes are off unless the user
+turns them on (a required cover letter is always written).
 """
 from __future__ import annotations
 

@@ -59,7 +59,7 @@ On first launch the app downloads Chromium (~150 MB) automatically.
    of being billed per token. That backend isn't a published API and could
    change. The sign-in is stored in `chatgpt_auth.json` in the app data folder,
    separate from the Codex CLI's own login.
-2. **Resume** — Settings → Applications, a PDF path.
+2. **Resume** — Profile → Resume, a PDF path (the same file as Settings → Applications).
 3. **Profile** — name, contact details and work authorization, on the Profile page.
 4. **What to look for** — Settings → Job search: target job titles and locations, the search
    area and the default search. Collection uses the target titles as its search terms. Your
@@ -72,6 +72,12 @@ On first launch the app downloads Chromium (~150 MB) automatically.
    in Settings → Accounts & email. Sign-in and automation never use the profile at the
    same time. Imported plugins cannot launch unrestricted sign-in windows.
 
+6. **Accounts on employer sites** — Settings → Accounts & email: the account email and one
+   **Password for job sites**. The agent signs in wherever the job's link leads (Workday,
+   SuccessFactors, iCIMS, Taleo, Greenhouse, ...), or creates the account the site needs, with
+   that password. When a site's rules reject it, the app adds characters to its end and keeps
+   that version for that site; Settings → Accounts & email lists those sites.
+
 Gmail verification is read by app code in a separate browser profile. The application
 agent cannot open Gmail; it receives only a checked code or link. Optional Inbox
 checks classify job emails, but those classifications are not verified receipts.
@@ -80,7 +86,13 @@ checks classify job emails, but those classifications are not verified receipts.
 
 **Paste or upload links** — Jobs → Collect → *Paste Links*. One URL per line,
 or upload a `.txt`/`.csv`. Duplicates and invalid or internal URLs are skipped
-and counted. Pasted jobs are treated as external applications.
+and counted. Pasted jobs are treated as external applications and wait as **Ready to
+apply**: nothing starts until you press **Start**, which applies to every ready job, one after another. Their real title and employer are read in
+the background, first with a plain page read and, for pages that are built in the browser
+(Oracle's Candidate Experience sites, for example), with one read in a temporary headless
+browser profile. That second read only fills in what is still missing. A posting whose
+title says it is done ("FILLED: ...", "[Closed] ...") is marked closed. Some pages never
+name their employer; the agent names those jobs when it opens them.
 
 **Collect from job boards** — pick one or more sources and a job title. Each
 title is collected from every selected source in turn.
@@ -153,29 +165,45 @@ are appended in code, so no plugin can ship without them.
 | Job board collection | **on** | Off disables collecting from job boards, in the app and the CLI. Pasting links still works. |
 | Stealth mode | off | Hides automation signals (`navigator.webdriver`, plugin list, WebGL fingerprint) via CDP injection, and drops the automation launch flags. |
 | Human-like delays | off | Randomised pause (default 5–15s) between applications, between collection sources, and between worker launches. |
-| Solve CAPTCHAs with 2Captcha | off | Sends CAPTCHAs to 2Captcha, max 2 attempts. Needs your API key. |
-| Account email / password | empty | Used to create and log into accounts on employer sites. Passed to the agent as secret placeholders, never as prompt text. The account email is also used on forms when the Profile email isn't a valid address. |
+| Solve CAPTCHAs with 2Captcha | **on** once a key is saved | Sends CAPTCHAs to 2Captcha, at most 2 attempts per application. The key field is in Settings → Applications. When it can't solve one, or no key is saved, the run waits up to 5 minutes for you to solve it in the open browser window. |
+| Account email / Password for job sites | empty | One password for every employer site the job leads to: the agent signs in, or creates the account. A site whose rules reject it gets the password with characters added to its end, kept for that site. Passed to the agent as secret placeholders, never as prompt text, and typed only on sites the job's link led to (never Gmail, a job board or a local address). The account email is also used on forms when the Profile email isn't a valid address. |
 | Browser | Automatic (bundled Chromium) | Which Chromium browser (bundled Chromium, Chrome, Edge, Brave, Vivaldi, or a custom path) the agent drives. Login and automation use the same executable and profile; each explicit browser choice has its own automation profile. |
-| Max failures per job | 8 | Consecutive failed steps before the agent gives up on a job. |
+| Max failures per job | 8 | A page that stays blank, stops responding or doesn't change for 5 minutes counts as a failure: the app reloads it and tries again, up to this many times, then skips the job with "The page didn't load". Consecutive failed agent steps count too. |
 
-There are two application modes. **Trial run** (the default) works on the live site:
-login, assets, redirects, uploads, saves and Next run automatically like Full auto.
-The agent stops before pressing the final Submit application control, without approval.
-The site can still send data or submit during an intermediate step or its own scripts;
-Trial does not refuse a request merely because its ATS operation is unknown.
-Completed Trial leaves the job pending for the user to check. Ambiguous submit labels such as
-Done, Confirm or Submit resume can stop Trial before the last page.
-**Full auto** applies on the live site, final Submit included. Collection keeps its separate policy.
-Bare Done and Confirm also count as possible submit attempts in Full auto, including controls
-outside native forms. A later unconfirmed failure can therefore be marked possibly submitted,
-with automatic retries stopped so the user can check it.
+Settings has five categories: **AI model**, **Job search** (with the job sources),
+**Applications** (resume, instructions for the AI, CAPTCHAs, cover letters, failures),
+**Accounts & email**, and **App & browser** (browser, stealth, delays, theme, usage analytics,
+then **Logs** and **Send feedback**). Links to the earlier categories open the merged one. Each
+job card has **View log** for that job's own log. The sidebar reads Dashboard, Profile, Jobs,
+Inbox, Memory, Q&A, Guide, Settings; Ctrl+1 to Ctrl+8 open them in that order, Ctrl+L opens the
+logs, Ctrl+, opens Settings, and F11 switches real fullscreen on and off (Esc leaves it).
 
-Previously reviewed ATS contracts remain available for explicit protocol diagnostics,
-including Workday, Greenhouse, Lever, Ashby, Workable and Oracle Candidate Experience.
-Those diagnostics are stricter than normal Trial; they do not limit normal login,
-Next or saves. This is not a claim that every employer customization works.
-Within the optional strict diagnostics, recognizing an ATS name alone does not
-authorize its server writes; normal Trial has no such ATS write allowlist.
+There are two application modes. **Full auto** (the default) applies on the live site,
+final Submit included. **Trial run** works on the live site the same way (login, uploads,
+saves and Next run automatically) but the agent never presses the final Submit application
+control; the job stays ready for you to check. In either mode the site can still send data
+during an intermediate step or from its own scripts. Ambiguous submit labels such as Done,
+Confirm or Submit resume count as possible submit attempts. An attempt that didn't end on a
+confirmation page while the flow went on is cleared; one that may have gone out is kept, and
+such an application is never submitted again automatically.
+
+**When the agent needs you.** Ordinary questions (authorized to work, referred by someone,
+how did you hear about this job, ...) are answered without asking, from your profile, resume
+and saved answers, then from the **Default answers** on the Q&A page, which you can change;
+your own answers always win, and every inferred answer is saved on the Q&A page. The run asks
+only when nothing can answer (a long essay with nothing usable, a required salary when none
+is saved), a CAPTCHA can't be solved, or a verification code can't be read. The run panel
+shows the question whole (form section, full text, choices) and waits at most 5 minutes; then
+the job stays **Needs you** with that question, answerable on its card, and is tried again on
+the next run. Click or type in the agent's browser at any moment and the agent stops at once,
+waits until you've been idle for about 25 seconds (or you press Resume), then goes on from
+your page and keeps every field you changed. Your Instructions for the AI come before the
+built-in rules and default answers, except where one would clearly break the application or a
+protection below; a conflict is noted in the job's log.
+
+The per-site request contracts from the earlier request gate (Workday, Greenhouse, Lever,
+Ashby, Workable, Oracle Candidate Experience, ...) stay in the code with their tests. The gate
+now serves collection only, so normal applications don't use them.
 Candidate sign-in also supports observed iCIMS email gates and its delegated Auth0
 login/verification forms, Taleo's JSF login, and SAP SuccessFactors' candidate login.
 Candidate preparation also covers Teamtailor's signed file uploads, Breezy's uploads
@@ -187,11 +215,13 @@ and unreviewed application dispatchers do not inherit those login permissions.
 
 ### CAPTCHA behaviour
 
-Both modes use the configured CAPTCHA handling and scoped email verification. An unsolved
-challenge ends the job for later attention, without a Trial approval wait. A run
-that may already have submitted retains its uncertain outcome and is not retried
-automatically. Invisible reCAPTCHA scores alone are not treated as proof that a
-challenge is blocking the application. The live 2Captcha service remains untested.
+Both modes use the same CAPTCHA handling and email verification. With a 2Captcha key saved,
+a challenge is sent to 2Captcha (at most 2 attempts per application); a challenge that is
+already answered is left alone. When it can't be solved, or no key is saved, the run waits up
+to 5 minutes for you to solve it in the open browser window, then keeps the job as Needs you
+and moves on. A run that may already have submitted keeps that mark and is not retried
+automatically. Invisible reCAPTCHA scores alone are not treated as proof that a challenge is
+blocking the application. The live 2Captcha service remains untested.
 
 ## Building from source
 
@@ -221,6 +251,13 @@ npm run test:coverage
 uv run pytest tests/
 ```
 
+The whole Windows CI job (`.github/workflows/test.yml`, real-browser tests and the built backend
+included) also runs on your own computer, for free, step by step and in the same order:
+
+```
+uv run python scripts/run-ci-locally.py
+```
+
 ### Releasing
 
 The download link above always points to the newest release of the public repository
@@ -238,49 +275,47 @@ replaces that release's files. Pushing a `v<version>` tag publishes that release
 
 ## Safety boundaries and remaining limits
 
-- **Trial stops the agent's final-submit action.** Login, saves, Next and site requests use
-  the same transport as Full auto, without an approval prompt or an ATS write allowlist.
-  The action guard refuses recognized final controls even after an old approval, and refuses
-  arbitrary agent scripts/unreadable targets that could bypass that check. Site scripts and
-  intermediate steps may send data or submit automatically; this is deliberately allowed.
-  Strict request contracts can be explicitly enabled for protocol diagnostics, but are not
-  the normal application mode. This is not a guarantee that a website can never submit.
-- **Full auto submits on its own.** No questions during the run. A page saying the application
-  was received marks it Applied. Trial never marks an application Applied.
-- **Browser egress is denied.** Application and collection browsers use a deny-all
-  local SOCKS listener, disabled browser DNS/prefetch/QUIC and secured WebRTC
-  preferences. Every request is fetched by the backend through the checked-IP
-  transport and handed to the browser. Private destinations and Gmail stay blocked;
-  one unreachable or refused resource fails on its own. Other
-  processes and arbitrary managed/custom browser policies are outside this
-  boundary; this is not an OS-wide firewall.
-- **Unsupported features stop safely.** Workers, WebSockets and non-HTTP transports
-  are not supported for applications. Ambiguous or unreadable uploads are refused.
-  Uploads must match explicitly available local files. Limits include 25 MB uploads
-  and 15 MB responses. Some employer flows will need manual completion.
-- **Credentials go only to the employer's site.** The job's own site, or its applicant-system
-  tenant, gets account details without a question in either mode; any other site gets nothing.
-  Trial never opens a credential approval prompt.
-  New passwords are scoped to the exact origin and tenant. Reuse of an older
-  saved password remains restricted to its original site; the old vault entry is preserved.
-  Inputs and form destinations must match, and a job's credentials stay pinned to
-  its first approved origin. The earlier shared password remains restricted to
-  the original job origin/tenant.
+- **Trial never presses the final Submit.** Login, saves, Next and site requests work as in
+  Full auto, without approval prompts. The action guard refuses recognized final controls, and
+  refuses agent scripts or unreadable targets that could get around that check. Site scripts and
+  intermediate steps may send data or submit by themselves; this is deliberately allowed. This
+  is not a guarantee that a website can never submit.
+- **Full auto submits on its own.** It asks you only for what nothing else can answer, and waits
+  at most 5 minutes. A page saying the application was received marks it Applied. Trial never
+  marks an application Applied.
+- **Application browsers connect directly, with a rule script.** Applications use the browser as
+  it connected before the request gate (October 2026, when applications went through): no proxy
+  in between, so new tabs, workers, WebSockets and service workers work. A rule script in the
+  launch flags (no proxy server, no warning bar) keeps Gmail, private addresses and local names
+  unreachable, and bare IP addresses aren't opened. This computer itself (localhost) is not
+  covered by the script; account details are never typed on local addresses. Collection keeps
+  the stricter request gate: a deny-all local SOCKS listener, every request fetched by the
+  backend through the checked-IP transport. Neither is an OS-wide firewall.
+- **No page or step can hang.** A page that stays blank, stops responding or doesn't change for
+  5 minutes counts as a failure and is retried up to "Max failures per job", then skipped with
+  "The page didn't load". Uploads must match explicitly available local files; ambiguous or
+  unreadable uploads are refused. Some employer flows will need manual completion.
+- **Account details go only where the job's link led.** Your account email and job-site
+  password are typed only on HTTPS sites that the job's link led to (redirects and Apply buttons
+  included), never on Gmail, a job board, a private or local address, or a site reached some
+  other way. The agent never opens Gmail; the app's own code reads verification codes and
+  links, from emails tied to that application.
 - **Uncertain outcomes are never retried blindly.** A run that may have submitted but didn't
   end on a confirmation page keeps its mark; retrying it requires acknowledging the duplicate risk.
-- **Collection uses the same browser network.** Imported plugins get only their exact configured
-  HTTPS hosts, with no domain-wide wildcard. Description reads use anonymous public
-  HTTP rather than another signed-in browser agent. Console runs require an
-  interactive terminal for approvals; non-interactive runs refuse to proceed.
+- **Collection keeps exact limits.** Imported plugins get only their exact configured HTTPS
+  hosts, with no domain-wide wildcard. Description reads use anonymous public HTTP rather than
+  another signed-in browser agent. Console runs require an interactive terminal for
+  approvals; non-interactive runs refuse to proceed.
 - **Dependencies are checked, with explicit exceptions.** The pinned Python and
   both npm dependency trees have been remediated. Two narrow upstream Rust cases
   remain documented in `security/dependency-exceptions.json`: an unmaintained
   hashing crate and an old RNG used only while building, not at runtime. The audit
   checks active Windows features and rejects new or expired exceptions.
 - **Live services remain unvalidated.** Tests use local pages/listeners, isolated
-  profiles and fake LLM responses. Real employer compatibility, Gmail cookie-copy
-  sign-in, Handshake/Intern Insider layouts and 2Captcha have not been exercised.
-  Do not infer universal compatibility from passing local tests.
+  profiles and fake LLM responses (real-browser tests run whole applications on local fake
+  hiring sites). Real employer compatibility, Gmail cookie-copy sign-in, Handshake/Intern
+  Insider layouts and 2Captcha have not been exercised by the tests. Do not infer universal
+  compatibility from passing local tests.
 - **Review generated resumes and answers.** Tailoring is optional and creates a
   separate PDF with its own layout; original styling is not guaranteed. Preview
   the output. The app cannot guarantee an LLM's semantic correctness or that an

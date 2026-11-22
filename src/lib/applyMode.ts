@@ -12,12 +12,13 @@ export const APPLY_MODE_LABELS: Record<ApplyMode, string> = {
 
 const STORAGE_KEY = "langhire_apply_mode";
 
+/** Full auto unless the user chose Trial run (the user's decision, 2026-11: submit by default). */
 export function loadApplyMode(): ApplyMode {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    return stored === "auto" ? "auto" : "trial";
+    return stored === "trial" || stored === "training" ? "trial" : "auto";
   } catch {
-    return "trial";
+    return "auto";
   }
 }
 

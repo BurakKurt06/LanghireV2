@@ -25,6 +25,7 @@ import {
   Lock,
   Hand,
   SkipForward,
+  ScrollText,
 } from "lucide-react";
 import {
   getJobs,
@@ -44,6 +45,8 @@ import type { Job, JobStatus, JobStats, TailorOptions } from "../../lib/types";
 import AutomationDialog from "../../components/AutomationDialog";
 import ApplyModeToggle from "../../components/ApplyModeToggle";
 import InboxBadge from "../../components/InboxBadge";
+import JobLogDialog from "../../components/JobLogDialog";
+import JobQuestions from "../../components/JobQuestions";
 import { loadApplyMode, saveApplyMode, type ApplyMode } from "../../lib/applyMode";
 import { TAILOR_OPTION_LABELS, loadAutoTailor, loadTailorOptions } from "../../lib/tailoring";
 import { settingsHref } from "../../lib/settingsSections";
@@ -146,6 +149,12 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
   // Multi-select state
   const [selectedJobs, setSelectedJobs] = useState<Set<string>>(new Set());
+
+  // The job whose own log is open ("View log" on its card)
+  const [logJob, setLogJob] = useState<Job | null>(null);
+  // What happened to the answers given on a card: kept here because the card itself usually
+  // leaves "Needs you" (and a "Needs you" filter) as soon as they are saved.
+  const [answerNotice, setAnswerNotice] = useState<string | null>(null);
 
   // Status dropdown state
   const [statusMenuJob, setStatusMenuJob] = useState<string | null>(null);
@@ -438,16 +447,21 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
   };
 
   // Batch apply selected jobs
-  const handleBatchApply = async () => {
-    if (selectedJobs.size === 0) return;
-    const acknowledgeUnknown = jobs.some(j => selectedJobs.has(j.url) && j.submit_attempted_at);
+  // "Start": every job that is ready to apply, one click (paste links, press Start, walk away).
+  const readyJobs = jobs.filter((j) => j.status === "pending");
+  const handleStartAll = () => startApply(readyJobs.map((j) => j.url));
+  const handleBatchApply = () => startApply([...selectedJobs]);
+
+  const startApply = async (urls: string[]) => {
+    if (urls.length === 0) return;
+    const acknowledgeUnknown = jobs.some(j => urls.includes(j.url) && j.submit_attempted_at);
     if (acknowledgeUnknown && !confirm("Some selected jobs may already have been submitted. Have you checked their employer sites or emails and confirmed you want to retry despite the duplicate risk?")) return;
     setBatchApplying(true);
     try {
-      await tailorBeforeApplying([...selectedJobs]);
+      await tailorBeforeApplying(urls);
       // No workers: the backend uses Settings → Jobs at the same time.
       const res = await startApplying({
-        job_urls: [...selectedJobs],
+        job_urls: urls,
         mode: "all",
         run_mode: applyMode,
         acknowledge_unknown: acknowledgeUnknown,
@@ -628,7 +642,23 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
 
       {/* Select All Toggle */}
       {!loading && jobs.length > 0 && selectableJobs.length > 0 && (
-        <div className="flex items-center gap-2 mb-3">
+        <div className="flex items-center gap-4 mb-3">
+          {readyJobs.length > 0 && (
+            <>
+              <button
+                onClick={handleStartAll}
+                disabled={batchApplying || applyingUrl !== null}
+                className="btn-primary text-sm"
+                title="Apply to every job that is ready, one after another. You can walk away: it only waits for you 5 minutes at a time."
+              >
+                <Play className="w-4 h-4" /> Start ({readyJobs.length} ready)
+              </button>
+              {/* One mode switch on screen at a time: the start dialog and the selection bar have their own. */}
+              {!showConfirmDialog && selectedJobs.size === 0 && (
+                <ApplyModeToggle value={applyMode} onChange={changeApplyMode} compact />
+              )}
+            </>
+          )}
           <button
             onClick={toggleSelectAll}
             className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
@@ -636,6 +666,15 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             <CheckSquare className="w-4 h-4" />
             {allSelectableSelected ? "Deselect All" : "Select All"} (
             {selectableJobs.length})
+          </button>
+        </div>
+      )}
+
+      {answerNotice && (
+        <div role="status" className="mb-3 flex items-start justify-between gap-3 rounded-xl border border-border bg-secondary/60 px-4 py-2.5 text-[13px] text-foreground">
+          <span>{answerNotice}</span>
+          <button onClick={() => setAnswerNotice(null)} aria-label="Dismiss" className="text-muted-foreground hover:text-foreground">
+            <X className="w-4 h-4" />
           </button>
         </div>
       )}
@@ -714,6 +753,13 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                             neutral={job.status === "closed" || job.status === "needs_you" || job.status === "pending" || job.status === "skipped"}
                             prefix={t("jobItem.errorPrefix")}
                           />
+                        )}
+                        {job.status === "needs_you" && (
+                          <JobQuestions job={job} onAnswered={(message) => {
+                            setAnswerNotice(`${job.title || "Job"}: ${message}`);
+                            fetchJobs(true);
+                            onJobsChanged();
+                          }} />
                         )}
                         {job.collected_at && (
                           <p className="text-[11px] text-muted-foreground mt-1">
@@ -801,6 +847,14 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                           </button>
                         </>
                       )}
+                      <button
+                        onClick={() => setLogJob(job)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border border-border hover:bg-secondary"
+                        aria-label={`View log for ${job.title || "this job"}`}
+                        title="What the app did on this job, attempt after attempt"
+                      >
+                        <ScrollText className="w-3 h-3" /> View log
+                      </button>
                       {/* Three-dot status menu */}
                       <div className="relative">
                         <button
@@ -840,7 +894,7 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
                         target="_blank"
                         rel="noopener noreferrer"
                         className="p-1.5 text-muted-foreground hover:text-primary transition-colors"
-                        title={t("jobItem.openOnLinkedIn")}
+                        title={t("jobItem.openPosting", "Open the job posting")}
                       >
                         <ExternalLink className="w-4 h-4" />
                       </a>
@@ -1152,6 +1206,9 @@ export default function PendingTab({ onJobsChanged, stats }: PendingTabProps) {
             )}
           </div>
         </div>
+      )}
+      {logJob && (
+        <JobLogDialog url={logJob.url} title={logJob.title || logJob.url} onClose={() => setLogJob(null)} />
       )}
     </div>
   );

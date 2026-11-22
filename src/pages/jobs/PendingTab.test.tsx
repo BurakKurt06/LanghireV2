@@ -16,8 +16,11 @@ import {
   saveJobNote,
   refineTailoredResume,
   getTailoredResumeContent,
+  answerJobQuestions,
+  getJobLogs,
 } from "../../lib/api";
 import type { JobStats } from "../../lib/types";
+import jobsEn from "../../locales/en/jobs.json";
 
 // jsdom in this config does not provide a working localStorage; polyfill it.
 function installLocalStorage() {
@@ -59,6 +62,8 @@ vi.mock("../../lib/api", () => ({
   saveJobNote: vi.fn(),
   refineTailoredResume: vi.fn(),
   getTailoredResumeContent: vi.fn(),
+  answerJobQuestions: vi.fn(),
+  getJobLogs: vi.fn(),
 }));
 
 const mockGetJobs = vi.mocked(getJobs);
@@ -358,16 +363,126 @@ describe("PendingTab", () => {
     expect(screen.getByRole("button", { name: /status\.closed \(1\)/ })).toBeInTheDocument();
   });
 
-  it("trial request approval is the default", async () => {
+  it("Start applies to every ready job with one click, in Full auto, and leaves failed ones alone", async () => {
+    // "I paste my job links, press Start and walk away."
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    await user.click(screen.getByRole("button", { name: /Start \(2 ready\)/ }));
+    await waitFor(() => expect(mockStartApplying).toHaveBeenCalledTimes(1));
+    const sent = mockStartApplying.mock.calls[0][0];
+    expect(sent).toEqual(expect.objectContaining({ mode: "all", run_mode: "auto" }));
+    expect(sent.job_urls).toHaveLength(2);
+    expect(sent.job_urls).toContain(pendingJob.url);
+    expect(sent.job_urls).not.toContain(failedJob.url);     // a failed job is retried only when you choose to
+  });
+
+  it("full auto is the default run mode, with Trial run still offered", async () => {
+    // Decision 1: Full auto ("auto") is the default; Trial stays as an option (was: Trial run checked by default).
     const user = userEvent.setup();
     render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
     await screen.findByText("Backend Engineer");
     await user.click(screen.getAllByRole("button", { name: /jobItem\.apply/ })[0]);
-    expect(await screen.findByRole("radio", { name: "Trial run" })).toHaveAttribute("aria-checked", "true");
+    expect(await screen.findByRole("radio", { name: "Full auto" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: "Trial run" })).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText(/final Submit included/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Got it, Start" }));
     await waitFor(() =>
-      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "trial" })),
+      expect(mockStartApplying).toHaveBeenCalledWith(expect.objectContaining({ run_mode: "auto" })),
     );
+    expect(mockStartApplying).not.toHaveBeenCalledWith(expect.objectContaining({ run_mode: "trial" }));
+  });
+
+  it("a needs_you job shows each waiting question whole and saves the answers for that job", async () => {
+    // Decision 5: needs_you cards with pending_questions are answered inline (JobQuestions).
+    mockGetJobs.mockResolvedValue([{ ...structuredClone(pendingJob), status: "needs_you",
+      error: "The form asked something the app could not answer.",
+      pending_questions: [
+        { question: "Are you legally allowed to work in this country?", section: "Eligibility", options: ["Yes", "No", ""] },
+        { question: "Describe a project you are proud of.", section: "About you" },
+      ] }] as never);
+    vi.mocked(answerJobQuestions).mockResolvedValue({ success: true, continued: false, ready: true });
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+
+    const box = await screen.findByRole("region", { name: "Questions for Backend Engineer" });
+    expect(within(box).getByText("This application needs 2 answers from you")).toBeInTheDocument();
+    expect(within(box).getByText("Eligibility")).toBeInTheDocument();
+    expect(within(box).getByText("About you")).toBeInTheDocument();
+    const choice = within(box).getByLabelText("Are you legally allowed to work in this country?");
+    expect(choice.tagName).toBe("SELECT");
+    // The blank option is dropped; the real choices, the "Choose…" placeholder and (review 2026-11-12)
+    // a typed answer for a choice the list leaves out.
+    expect(within(choice).getAllByRole("option").map((o) => o.textContent)).toEqual(["Choose…", "Yes", "No", "Something else (type it)"]);
+    const freeText = within(box).getByLabelText("Describe a project you are proud of.");
+    expect(freeText.tagName).toBe("TEXTAREA");
+
+    const saveBtn = within(box).getByRole("button", { name: "Save answers" });
+    expect(saveBtn).toBeDisabled(); // nothing answered yet
+    await user.selectOptions(choice, "Yes");
+    expect(saveBtn).toBeEnabled();
+    mockGetJobs.mockClear();
+    await user.click(saveBtn);
+
+    await waitFor(() =>
+      expect(vi.mocked(answerJobQuestions)).toHaveBeenCalledWith(pendingJob.url, {
+        "Are you legally allowed to work in this country?": "Yes",
+      }),
+    );
+    expect(await within(box).findByRole("status")).toHaveTextContent("Saved. The job is ready to apply again");
+    // The same news stays above the list, naming the job, after its card leaves "Needs you".
+    expect(screen.getByText(/^Backend Engineer: Saved\. The job is ready to apply again/)).toBeInTheDocument();
+    expect(onJobsChanged).toHaveBeenCalled();
+    await waitFor(() => expect(mockGetJobs).toHaveBeenCalled()); // the list reloads after saving
+    expect(mockStartApplying).not.toHaveBeenCalled(); // nothing starts by itself
+  });
+
+  it("every job card has View log; a job the app hasn't worked on yet says so", async () => {
+    // Decision 5 (the user asked for "View log" on each job card).
+    vi.mocked(getJobLogs).mockResolvedValue([]);
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    expect(screen.getAllByRole("button", { name: /^View log for / })).toHaveLength(3);
+    await user.click(screen.getByRole("button", { name: "View log for Backend Engineer" }));
+    const dialog = await screen.findByRole("dialog", { name: "Log for Backend Engineer" });
+    expect(await within(dialog).findByText(/No log for this job yet/)).toBeInTheDocument();
+  });
+
+  it("View log opens the job's own log", async () => {
+    vi.mocked(getJobLogs).mockResolvedValue([
+      { id: 1, run_id: "r1", job_url: failedJob.url, timestamp: "2026-06-02T10:00:00Z", level: "INFO",
+        message: "Opened the application form", created_at: "2026-06-02T10:00:00Z" },
+      { id: 2, run_id: "r1", job_url: failedJob.url, timestamp: "2026-06-02T10:01:00Z", level: "ERROR",
+        message: "Form error on page 2", created_at: "2026-06-02T10:01:00Z" },
+    ]);
+    const user = userEvent.setup();
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+
+    await user.click(screen.getByRole("button", { name: "View log for Frontend Engineer" }));
+    const dialog = await screen.findByRole("dialog", { name: "Log for Frontend Engineer" });
+    expect(vi.mocked(getJobLogs)).toHaveBeenCalledWith(failedJob.url);
+    expect(await within(dialog).findByText("Opened the application form")).toBeInTheDocument();
+    expect(within(dialog).getByText("Form error on page 2")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("the external link is titled as the job posting and the pending tab reads as ready to apply", async () => {
+    // Decision 5: the external link title is "Open the job posting" (was the LinkedIn wording);
+    // the "Pending" label is now "Ready to apply" (locale value of status.pending).
+    render(<PendingTab onJobsChanged={onJobsChanged} stats={stats} />);
+    await screen.findByText("Backend Engineer");
+    const links = screen.getAllByTitle("jobItem.openPosting");
+    expect(links.length).toBeGreaterThan(0);
+    expect(links[0]).toHaveAttribute("href", pendingJob.url);
+    expect(screen.queryByTitle("jobItem.openOnLinkedIn")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /status\.pending \(3\)/ })).toBeInTheDocument();
+    // The identity translator shows keys; the English text behind them is the new wording.
+    expect(jobsEn.status.pending).toBe("Ready to apply");
+    expect(jobsEn.jobItem.openPosting).toBe("Open the job posting");
   });
 
   it("does not retry an uncertain submission when duplicate-risk confirmation is declined", async () => {

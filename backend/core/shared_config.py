@@ -151,14 +151,19 @@ def build_browser_kwargs(worker: int = 1, purpose: str = "agent") -> dict:
     """BrowserSession kwargs for an automation browser.
 
     purpose:
-      "agent" - an AI agent (applications, collection): no local network, no Gmail;
+      "application" / "agent" - the application agent's browser. It connects by itself, like
+                the browser that got applications through before the request gate: nothing
+                sits between it and the site. Gmail is out of reach (net_guard.direct_args);
+      "collection" - the job collector: its browser connects nowhere and the request gate
+                fetches what the collection policy allows (net_guard.browser_args);
       "inbox" - the app's own Gmail check on the main profile: no local network;
       "mail"  - the app's verification-email reader, on its own copy of the sign-in
                 cookies (so it never shares a browser with an agent): no local network.
     No site gets standing permissions (clipboard, notifications); location is
     granted per employer application site by the apply agent. Also drops
     browser-use's --extensions-on-chrome-urls default (Chrome warns about it)
-    and adds the stealth flags when stealth is on.
+    and adds the stealth flags when stealth is on. No launch passes
+    "--host-resolver-rules": Chrome shows a warning bar for it on every start.
     """
     try:
         from core import net_guard
@@ -177,13 +182,20 @@ def build_browser_kwargs(worker: int = 1, purpose: str = "agent") -> dict:
             from backend.core.browsers import find_playwright_chromium
         executable = find_playwright_chromium()
     profile_dir = mail_profile_dir(profile_dir) if purpose == "mail" else worker_profile_dir(profile_dir, worker)
-    if not net_guard.limit_webrtc(profile_dir):
-        raise RuntimeError("Could not enforce WebRTC network protection. The automation profile may already be "
-                           "open, or its preferences cannot be read or written. Close that profile's browser "
-                           "and check its permissions before retrying.")
+    allowed_local = settings.get("browser_allowed_local_hosts") or []
+    block_mail = purpose in ("agent", "application", "collection")
+    if purpose == "collection":
+        if not net_guard.limit_webrtc(profile_dir):
+            raise RuntimeError("Could not enforce WebRTC network protection. The automation profile may already be "
+                               "open, or its preferences cannot be read or written. Close that profile's browser "
+                               "and check its permissions before retrying.")
+        args = net_guard.browser_args(block_mail=True, allowed_hosts=allowed_local, owner=f"{purpose}:{worker}")
+    else:
+        # The policy the collector's proxy needs is of no use to a browser that connects by itself.
+        net_guard.restore_webrtc(profile_dir)
+        args = net_guard.direct_args(block_mail=block_mail, allowed_hosts=allowed_local)
     forget_open_tabs(profile_dir)
     _OWN_PROFILES.add(_profile_key(profile_dir))
-    allowed_local = settings.get("browser_allowed_local_hosts") or []
     kwargs: dict = {
         "ignore_default_args": list(IGNORED_CHROME_DEFAULT_ARGS),
         "user_data_dir": str(profile_dir),
@@ -191,15 +203,15 @@ def build_browser_kwargs(worker: int = 1, purpose: str = "agent") -> dict:
         # Never opens a bare IP address (job links never are one). It is a profile
         # setting: BrowserSession itself rejects block_ip_addresses as a keyword.
         "browser_profile": BrowserProfile(block_ip_addresses=True),
-        "args": net_guard.browser_args(block_mail=purpose in ("agent", "application", "collection"), allowed_hosts=allowed_local,
-                                       owner=f"{purpose}:{worker}"),
+        "args": args,
     }
     if executable:
         kwargs["executable_path"] = executable
-    if purpose in ("application", "collection"):
+    if purpose == "collection":
+        # Its browser must not connect anywhere by itself: no extensions (they make their own
+        # requests) and no name lookups ahead of a request.
         kwargs["enable_default_extensions"] = False
-        kwargs["args"] = [a for a in kwargs["args"] if not a.startswith("--host-resolver-rules=")]
-        kwargs["args"] += ["--disable-extensions", "--host-resolver-rules=MAP * ~NOTFOUND", "--dns-prefetch-disable"]
+        kwargs["args"] += ["--disable-extensions", "--dns-prefetch-disable"]
     if settings.get("stealth_enabled"):
         try:
             from core.stealth import STEALTH_ARGS
@@ -672,6 +684,47 @@ def refresh_posting_details(url: str, posting=None, mark_closed: bool = True):
     return posting
 
 
+def fill_missing_names(url: str, posting, checked_at: str | None = None):
+    """Fill in only what is still a placeholder: the job's title, its employer, its location.
+
+    For a second reading of the posting (the page as a browser shows it, posting_reader): a name
+    already read from the page, given by the agent or typed by the user is never replaced. A
+    closed posting closes a job that hasn't been sent. `checked_at` records when the names were
+    last looked for (so a page that never names its employer isn't read on every start).
+    Returns True when something changed.
+    """
+    try:
+        from core import job_page
+    except ImportError:
+        from backend.core import job_page
+    with FileLock(JOBS_LOCK):
+        jobs = load_json(JOBS_FILE, {})
+        job = jobs.get(url)
+        if job is None:
+            return False
+        changed = False
+        auto = job.get("name_source") in (None, "page")
+        typed = job.get("user_named") or []
+        if posting is not None:
+            if posting.title and not job_page.is_placeholder(posting.title) and auto and "title" not in typed \
+                    and job_page.is_placeholder(job.get("title")):
+                job["title"], job["name_source"], changed = posting.title, "page", True
+            if posting.company and not job_page.is_placeholder_company(posting.company) and auto \
+                    and "company" not in typed and job_page.is_placeholder_company(job.get("company")):
+                job["company"], job["name_source"], changed = posting.company, "page", True
+            place = _first_place(posting.locations) if posting.locations else ""
+            if place and not (job.get("location") or "").strip():
+                job["location"], changed = place, True
+            if posting.closed and job.get("status") in ("pending", "failed", "needs_you", "skipped") \
+                    and not job.get("submit_attempted_at"):
+                job["status"], job["error"], changed = "closed", posting.reason, True
+        if checked_at:
+            job["names_checked_at"], changed = checked_at, True
+        if changed:
+            save_json(JOBS_FILE, jobs)
+        return changed
+
+
 _claim_lock = threading.Lock()
 
 
@@ -877,13 +930,8 @@ def build_memory_context(
     qa: dict,
     applied_labels: list[str] | None = None,
     job_url: str | None = None,
-    learnings: bool = True,
 ) -> str:
-    """Build the system message context with candidate profile, Q&A bank, and per-website learnings.
-
-    learnings=False (performance mode): no per-step @@LEARNING notes. Saved
-    tips are still sent, and the end-of-run summary still adds new ones.
-    """
+    """Build the system message context with candidate profile, Q&A bank, and per-website learnings."""
     parts = []
     profile = _with_profile_defaults(profile)
 
@@ -929,12 +977,19 @@ def build_memory_context(
     if screening:
         parts.append("SCREENING ANSWERS (the candidate's own answers):\n" + screening)
 
-    # Profile -> "Instructions for the AI". Framed as rules, not as one more
-    # profile line, so the agent follows them.
+    # Settings -> Applications -> "Instructions for the AI". Framed as rules, not as one more
+    # profile line, so the agent follows them. The user's decision (2026-11): their instructions
+    # come before the built-in rules and default answers, except where one would clearly break the
+    # application or one of the protections; a conflict is noted in the job's log (note_conflict).
     if (profile.get('notes') or '').strip():
         parts.append(
-            "USER'S INSTRUCTIONS (the candidate wrote these; follow them unless they would "
-            "mean submitting false information):\n" + profile['notes'].strip()
+            "USER'S INSTRUCTIONS (the candidate wrote these). They come before the rules above and the "
+            "DEFAULT ANSWERS: where one of them conflicts with a rule or a default answer, do what the "
+            "instruction says. Only when following it would clearly break the application (the form could "
+            "no longer be sent) or a protection (giving the account details to a site this job didn't lead "
+            "to, opening an email site, pressing the final submit in a Trial run, submitting an application "
+            "twice, inventing facts about the candidate) follow the rule instead. Either way, call "
+            "note_conflict once for that conflict, saying what you did.\n" + profile['notes'].strip()
         )
 
     # Country-specific instructions for the agent
@@ -992,9 +1047,6 @@ def build_memory_context(
         "After each successful application: @@JOB_APPLIED: {\"title\": \"...\", \"company\": \"...\", \"location\": \"...\"}\n"
         "For each form question encountered: @@QUESTION: {\"question\": \"...\", \"answer\": \"...\", \"type\": \"text|dropdown|radio|checkbox\"}"
     )
-    if not learnings:
-        parts.append(tracking)
-        return "\n\n".join(parts)
     parts.append(
         tracking + "\n\n"
         "SELF-LEARNING — report observations about THIS WEBSITE's UI/flow as you navigate:\n"

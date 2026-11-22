@@ -47,6 +47,26 @@ _APPLY_WORD = (r"apply(?:\s+now|\s+(?:for\s+)?(?:this\s+)?(?:job|position))?"
 # unless the label also says application / apply ("Submit application verification" still counts).
 _NOT_APPLICATION = re.compile(r"\b(code|otp|verif\w*|search|filter|feedback|question|comment|rating)\b", re.I)
 
+# Buttons of the account on the way to the form: "Sign In", "Create Account", "Register", "Submit
+# Registration". They create or open the candidate's account; they never send the application. Seen
+# 2026-11: a rejected "Sign In" left the job marked "may have been sent", and a Trial run would have
+# refused "Submit Registration". A label that also says apply / application is not one of these.
+_ACCOUNT_STEP = re.compile(
+    r"\b(sign\s*-?\s*in|log\s*-?\s*in|sign\s*-?\s*up|register|registration|"
+    r"create\s+(?:an?\s+|my\s+|your\s+|new\s+)?account|forgot|reset\s+password)\b", re.I)
+
+
+def is_account_step(control) -> bool:
+    """The control (or, for Enter in a field, the button Enter presses) signs in or registers."""
+    if control is None or control.final_context or control.application_review:
+        return False
+    texts = [t for t in (*control.labels, control.submitter_text, control.submitter_alternative,
+                         control.submitter_pseudo) if t]
+    if any(re.search(r"\bappl(?:y|ication)\b", t, re.I) for t in texts):
+        return False
+    return any(_ACCOUNT_STEP.search(t) for t in texts)
+
+
 RUN_MODES = ("auto", "trial", "training")
 # The fingerprint of a form the app couldn't read (or of a control in a frame it couldn't include in the
 # review): no approval ever matches it.
@@ -138,6 +158,11 @@ class Decision:
     allowed: bool
     reason: str = ""
     submit: bool = False      # the action is a final-submit attempt
+    # The action only *might* send the application: a form's own submit button with no telling
+    # label (Next, Sign In, Save), a page script, a control that couldn't be read. Full auto
+    # records it like a submit, and takes the mark off again once the application visibly goes
+    # on (cli/apply_jobs._settle_tentative_submit). A button that says Submit is never tentative.
+    tentative: bool = False
 
 
 @dataclass
@@ -189,6 +214,8 @@ class SubmitGuard:
         # the label nor the form tells it apart from an upload step. Attaching the file needs no button,
         # and upload buttons ("Upload resume") stay allowed. (Codex review R01 and its re-check.)
         labels = control.labels if control is not None else ()
+        if not self.strict_network and (self.mode == "auto" or self.live_steps) and is_account_step(control):
+            return Decision(True)        # an account step, in every mode: not a submit, not even a possible one
 
         def intermediate(label: str) -> bool:
             return bool(self.mode == "trial" and self.live_steps and not self.strict_network
@@ -228,7 +255,8 @@ class SubmitGuard:
             if self.mode == "auto":
                 # An arbitrary model script can call submit/requestSubmit/fetch.
                 # Persist its possible effect before it runs, just like a native submit.
-                return Decision(True, submit=True)
+                # A script that only reads the page (no call that could send anything) can't.
+                return Decision(True, submit=script_may_submit(text), tentative=True)
             if self.live_steps:
                 return Decision(False, "Trial run: arbitrary agent scripts can press the final submit control. "
                     "Use indexed clicks, input and dropdown actions instead; no approval is needed.")
@@ -243,7 +271,7 @@ class SubmitGuard:
             if self.mode == "auto":
                 # Unknown controls can submit. Preserve the attempt before running
                 # them so a crash cannot make the worker retry a sent application.
-                return Decision(True, submit=True)
+                return Decision(True, submit=True, tentative=True)
             if self.live_steps:
                 return Decision(False, "Trial run: refresh the browser state and retry using a readable indexed "
                     "control so the final submit button can be checked. No approval is needed.")
@@ -297,10 +325,22 @@ class SubmitGuard:
                            "if it isn't the last page). " + why.split(": ", 1)[-1])
                 return Decision(False, why, submit=True)
             self._approval["used"] = True
-        return Decision(True, submit=True)
+        return Decision(True, submit=True, tentative=bool(self.mode == "auto" and native_only))
 
     def _mode_name(self) -> str:
         return "Training run" if self.mode == "training" else "Trial run"
+
+
+_SENDING_SCRIPT = re.compile(
+    r"submit|click\s*\(|dispatchEvent|fetch\s*\(|XMLHttpRequest|sendBeacon|\.send\s*\(|location|\.href|"
+    r"open\s*\(|WebSocket|postMessage|eval\s*\(|Function\s*\(|import\s*\(|setAttribute|\.value\s*=|\[\s*['\"`]", re.I)
+
+
+def script_may_submit(code: str) -> bool:
+    """Whether an agent script could send something or press a control. An empty or unreadable
+    script counts as one that could; one that only reads the page (text, attributes, sizes) doesn't."""
+    code = code or ""
+    return not code.strip() or bool(_SENDING_SCRIPT.search(code))
 
 
 def _has_enter(keys: str) -> bool:

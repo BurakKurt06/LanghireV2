@@ -47,17 +47,50 @@ backend) that collects job listings and fills in applications in a real browser.
 
 ## Product decisions (don't reverse without asking)
 
-- **Trial run** (default): goes through every page like Full Auto (login, uploads, saves,
-  Next, site scripts may send data) but never activates the agent's final Submit
-  application control. No approval prompts. **Full auto** submits.
-- The user's own edits during a pause or review win over the agent's answers.
+The user reversed several earlier decisions on 2026-11-10 ("I paste job links. The app opens
+each link, handles CAPTCHAs, creates any account the hiring site needs, fills in my information
+correctly and submits the application."). These are the current ones:
+
+- **Full auto** (default) submits. **Trial run** stays an option: it goes through every page
+  like Full auto (login, uploads, saves, Next, site scripts may send data) but never activates
+  the agent's final Submit application control. No approval prompts. A possibly-sent
+  application is never submitted again automatically.
+- **Waiting for the user**: at most 5 minutes (a question nothing answers, an unsolved CAPTCHA,
+  an unread verification code), then the run moves on; the job stays "Needs you" with the exact
+  question saved, answerable on its card; the answer is remembered and the job is tried again
+  on the next run.
+- **Answers**: resume/profile/saved answers/memory first, then the AI, the user last. Ordinary
+  questions get the editable **Default answers** (Q&A page; core/default_answers.py) and are never
+  asked; every inferred answer is saved on the Q&A page; the user's own answers always win.
+  Required consent/certifications are agreed to, optional marketing declined. Ask only for a long
+  essay with nothing usable or a required salary when none is set. Never invent skills,
+  experience, certifications or dates.
+- **CAPTCHAs**: 2Captcha by default once a key is saved; on failure or without a key, the user
+  solves it in the open browser (within the 5-minute wait).
+- **Accounts**: wherever the job's link leads, sign in or create the account with the ONE
+  "Password for job sites" from Settings; a site that rejects it for its rules gets characters
+  added to the END (that version is saved for the site and listed in Settings). Verification
+  codes/links come from Gmail through the app's own reader only.
+- **The user steps in**: any click/typing/page change the agent didn't make stops the agent at
+  once; it waits until the user is idle (about 25 s) or Resume, continues from the user's page and
+  keeps every field the user changed. The user's own edits always win over the agent's answers.
+- **Instructions for the AI** come before built-in rules and default answers, unless one would
+  clearly break the application or a protection; the conflict is noted in the job's log.
+- **Protections that stay**: the agent never opens Gmail; account details go only to sites the
+  job's link led to (never Gmail, job boards, private or local addresses); Trial never presses the
+  final Submit; a possibly-sent application is never submitted twice automatically; tests never
+  touch real accounts, never read Gmail and never send real applications.
+- **Application browser**: connects directly (no request gate, no proxy, no
+  "--host-resolver-rules" warning flag); a PAC rule script keeps Gmail and private addresses out.
+  The request gate serves collection only. No page or step may hang: 5 minutes blank or without
+  progress is a failure, retried up to "Max failures per job", then "The page didn't load".
 - **Collection**: Quick (default; about one AI request per results page) and Detailed (one
   per job). Built-in boards may make any public HTTPS GET; every write is refused; private
   addresses and Gmail are always blocked. Imported plugins keep exact-host limits.
 - Notes-driven AI matching. Jobs below the minimum pay aren't collected; with a minimum set,
   jobs without pay need a higher match (halfway from the bar to 10).
-- The user is cost-sensitive (Gemini free tier, about 20 requests per day per model): avoid
-  extra AI calls.
+- The user's AI provider is the ChatGPT plan (sign-in; each AI step counts toward the plan's
+  usage limits). The user is cost-sensitive: avoid extra AI calls.
 
 ## Setup
 
@@ -70,11 +103,15 @@ npm ci
 
 ```bash
 .venv/Scripts/python -B -m pytest tests/backend -p no:cacheprovider   # Linux: .venv/bin/python
-LANGHIRE_REAL_BROWSER=1 .venv/Scripts/python -B -m pytest tests/backend -k "collect or trial_action_mode"
+LANGHIRE_REAL_BROWSER=1 .venv/Scripts/python -B -m pytest tests/backend -k "collect or trial_action_mode or user_steps_in or whole_application or posting_reader"
 npx vitest run && npx tsc -b --noEmit && npx eslint .
 ```
 
 pyproject already adds `-q`; a second `-q` hides pytest's final pass/fail count.
+
+`uv run python scripts/run-ci-locally.py` runs every step of the Windows CI job (`test.yml`) on this
+computer, in order (the user doesn't pay for GitHub-hosted minutes on the private repository; its
+Actions runs don't start). Full output goes to `tmp/ci-local.log`.
 
 The Windows installer (`scripts/build-windows.ps1`) only builds on Windows. In the cloud, use
 the GitHub Actions `build.yml` workflow. Packaged checks: `scripts/smoke-backend.py` and

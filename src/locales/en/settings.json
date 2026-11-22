@@ -45,9 +45,7 @@
     "jobSearch": "Job search",
     "applications": "Applications",
     "accounts": "Accounts & email",
-    "jobSources": "Job sources",
-    "browser": "Browser & automation",
-    "appearance": "Appearance & privacy"
+    "app": "App & browser"
   },
   "aiModelHint": "The AI model saves as you change it.",
   "tailoringHint": "Saved as you change them. Review & Apply uses them when it tailors a resume.",

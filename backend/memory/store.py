@@ -232,6 +232,8 @@ class MemoryStore:
             self._local.conn = sqlite3.connect(str(self.db_path))
             self._local.conn.row_factory = sqlite3.Row
             self._local.conn.execute("PRAGMA journal_mode=WAL")
+            # Same file as the metrics: its write-ahead file is cut back after checkpoints too.
+            self._local.conn.execute("PRAGMA journal_size_limit=67108864")
         return self._local.conn
 
     def close(self):
@@ -412,7 +414,10 @@ class MemoryStore:
         job_url: str = "",
         ats_platform: str | None = None,
     ) -> bool:
-        """Add a memory. Returns True if new, False if duplicate (confidence bumped)."""
+        """Add a memory. Returns True if new, False if duplicate (confidence bumped).
+
+        `success` may be None (a run that ended without a verdict): saved as not successful.
+        """
         if not content.strip():
             return False
 
@@ -451,7 +456,7 @@ class MemoryStore:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 website_domain, ats_platform, category, content.strip(),
-                content_hash, int(success), confidence, job_url, now, now,
+                content_hash, int(bool(success)), confidence, job_url, now, now,
             ),
         )
         conn.commit()

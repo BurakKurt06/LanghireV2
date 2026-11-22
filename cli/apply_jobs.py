@@ -52,7 +52,8 @@ try:
     from memory.metrics import MetricsStore
     from core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import core.captcha as _captcha
-    from core import ai_extras, browser_policy, click_patch, form_check, form_snapshot, geo, inbox, job_page, secret_store, submit_guard, request_gate
+    from core import (ai_extras, browser_policy, click_patch, default_answers, form_check, form_snapshot, geo, inbox,
+                      job_page, run_watch, secret_store, site_access, submit_guard)
 except ImportError:
     import backend.core.shared_config as config
     from backend.core.shared_config import (
@@ -67,13 +68,18 @@ except ImportError:
     from backend.memory.metrics import MetricsStore
     from backend.core.agent_logger import on_step as _agent_on_step, on_done as _agent_on_done, log_run_start as _agent_log_start
     import backend.core.captcha as _captcha
-    from backend.core import (ai_extras, browser_policy, click_patch, form_check, form_snapshot, geo, inbox, job_page, secret_store,
-                              submit_guard, request_gate)
+    from backend.core import (ai_extras, browser_policy, click_patch, default_answers, form_check, form_snapshot, geo,
+                              inbox, job_page, run_watch, secret_store, site_access, submit_guard)
 
 # Workday's checkboxes, radio buttons and buttons need real mouse clicks.
 click_patch.apply()
 
 _log = logging.getLogger("langhire.apply")
+
+# The job the running code is working on (asyncio tasks and threads started for it inherit it):
+# the app tags each saved log line with it, so a job card can show that job's own log.
+import contextvars
+current_job_url: contextvars.ContextVar[str] = contextvars.ContextVar("langhire_job", default="")
 
 # Jobs already retried once after an unexpected crash (url -> count).
 _crash_retries: dict[str, int] = {}
@@ -85,7 +91,7 @@ MAX_CREDENTIAL_RETRIES = 1
 # never retried automatically, so a sent application isn't sent twice.
 OUTCOME_UNKNOWN_NOTE = (
     "Submission outcome unknown\n"
-    "The app ran an action that may submit this application but couldn't confirm the result ({why}). It may have been "
+    "The app pressed the button that sends this application but couldn't confirm the result ({why}). It may have been "
     "sent. Check the employer's site or your email before applying again; mark it Applied if it went through."
 )
 # The agent said it applied, but the app saw no Submit click and no confirmation page.
@@ -157,10 +163,10 @@ def build_agent_secrets(profile: dict, sensitive: dict) -> dict:
 
     email              address for application form fields: the Profile email, or the
                        Settings account email when the Profile one isn't a valid address
-    account_email      login / account-creation email for employer sites
-    previous_password  the Settings password: only for signing in to accounts made
-                       with it before (new accounts get their own password per site,
-                       see secret_store.site_password)
+    account_email      login / account-creation email for hiring sites
+    password           the job-site password saved in Settings -> Accounts & email: the one
+                       password used for every account (a site whose rules reject it gets
+                       it with characters added to the end, see site_access.fit_password)
 
     browser-use masks every occurrence of each value in everything sent to the
     LLM. A short value (e.g. a 4-letter typo in the email field) would therefore
@@ -174,13 +180,13 @@ def build_agent_secrets(profile: dict, sensitive: dict) -> dict:
     secrets = {
         "email": form_email,
         "account_email": account_email if _looks_like_email(account_email) else form_email,
-        "previous_password": sensitive.get("password") or "",
+        "password": sensitive.get("password") or "",
     }
     return {k: v for k, v in secrets.items() if len(v.strip()) >= MIN_SECRET_LENGTH}
 
 
 # ── Where account credentials may be typed ───────────────────────────────────
-CREDENTIAL_KEYS = ("account_email", "password", "previous_password")
+CREDENTIAL_KEYS = ("account_email", "password")
 # Job boards and aggregators: listings, never the employer's own account system.
 BOARD_HOSTS = tuple(host for host, platform in ATS_DOMAINS.items() if platform in JOB_BOARDS) + (
     "joinhandshake.com", "interninsider.me")
@@ -238,6 +244,10 @@ def _names_match(a: str, b: str) -> bool:
 def employer_site(page_url: str, job_url: str, company: str = "") -> str:
     """This job's employer application site for `page_url` (its site key, see _site), or "" when it isn't one.
 
+    Kept as the request gate's notion of "the employer's own site" (its protocol tests use it).
+    It no longer decides where account details are typed: since 2026-11 they go wherever the
+    job link leads (credential_refusal and site_access.SiteTrail).
+
     https on the default port, never a job board, and tied to this employer:
     - the job's own site (same host, or the same domain when it isn't a shared application system);
     - or an application system (Workday, Greenhouse, ...) whose tenant is this job's tenant there,
@@ -279,26 +289,30 @@ def employer_site(page_url: str, job_url: str, company: str = "") -> str:
     return site if any(_names_match(tenant, name) for name in employer_names if name) else ""
 
 
-def credential_origin_ok(page_url: str, job_url: str, company: str = "") -> bool:
-    """Account credentials may be typed here: the job's employer application site (employer_site)."""
-    return bool(employer_site(page_url, job_url, company))
+def _is_private(host: str) -> bool:
+    """This computer or the local network (a name that can't be looked up isn't private)."""
+    try:
+        return config.is_private_host(host)
+    except Exception:
+        return True
+
+
+def credential_refusal(page_url: str) -> str:
+    """Why account details can never be typed on this page ("" when nothing rules it out)."""
+    return site_access.refusal(page_url, BOARD_HOSTS, _is_private)
 
 
 def verification_senders(page_url: str, job_url: str, company: str = "") -> set[str]:
-    """Domains a verification email may come from: the employer site asking and its application system.
-
-    Empty unless the page asking is this job's employer site: an unrelated page can't get an email read.
-    """
-    if not employer_site(page_url, job_url, company):
-        return set()
+    """Domains a verification email for the site asking usually comes from: the site itself, its
+    application system's mail domains, and the employer's own domain."""
     host = _host_of(page_url)
-    senders = {inbox.registrable(host)}
+    senders = {inbox.registrable(host)} - {""}
     for suffix, domains in ATS_SENDER_DOMAINS.items():
         if _host_in(host, (suffix,)):
             senders.update(domains)
     job_host = _host_of(job_url)
-    if job_host and not _host_in(job_host, BOARD_HOSTS + LOCATION_SITES):
-        senders.add(inbox.registrable(job_host))  # the employer's own domain (its emails, its ATS's links)
+    if job_host and not _host_in(job_host, BOARD_HOSTS):
+        senders.add(inbox.registrable(job_host))
     return senders
 
 
@@ -525,30 +539,58 @@ def _block_site(url: str, title: str) -> None:
 
 
 def current_jobs() -> list[dict]:
-    return [dict(job, worker=w) for w, job in sorted(_current.items())]
+    """The jobs being worked on, for the run panel: each with what the user's own activity in its
+    browser led to ("You stepped in, so the agent is waiting", "Continuing from your page ...")."""
+    jobs = []
+    for w, job in sorted(_current.items()):
+        entry = dict(job, worker=w)
+        agent = next((a for a in list(_running_agents) if getattr(a, "_langhire_url", None) == job.get("url")), None)
+        watch = getattr(agent, "_langhire_watch", None)
+        if watch is not None:
+            try:
+                entry.update(watch.status())
+            except Exception:
+                pass
+        jobs.append(entry)
+    return jobs
+
+
+# Each job being worked on right now: url -> (its attempt task, that task's event loop). Skip
+# cancels the task, so it works in every phase of a job (reading the posting, starting the
+# browser, an AI request in flight, a page that doesn't answer), not only between agent actions.
+_attempts: dict[str, tuple] = {}
 
 
 def skip_job(url: str) -> bool:
-    """Stop the application to `url` and move on to the next job (called from the app)."""
-    agent = next((a for a in list(_running_agents) if getattr(a, "_langhire_url", None) == url), None)
-    if agent is None:
+    """Abandon the application to `url` now and move on to the next job (called from the app).
+
+    The job stays in the list. Returns False when that job isn't being worked on.
+    """
+    entry = _attempts.get(url)
+    if entry is None:
         return False
+    task, loop = entry
     _skip_requested.add(url)
     # A run waiting for the user's help or review ends at once.
     answer_help(url, "", True)
     decide_review(url, False)
-    loop = getattr(agent, "_langhire_loop", None)
+    agent = next((a for a in list(_running_agents) if getattr(a, "_langhire_url", None) == url), None)
+    if agent is not None:
+        try:
+            agent.stop()        # no further step, even before the cancellation lands
+        except Exception:
+            pass
     if loop is not None and loop.is_running():
-        loop.call_soon_threadsafe(agent.stop)
+        loop.call_soon_threadsafe(task.cancel)
     else:
-        agent.stop()
+        task.cancel()
     return True
 
 
 # ── Pause / resume from the app ─────────────────────────────────────────────
-# Lets the user take over the browser to fix something: a paused agent stops
-# after its current action, drops the rest of that step's plan, and reads the
-# page afresh when resumed, so it sees (and keeps) the user's changes.
+# Lets the user take over the browser to fix something: a paused agent starts no
+# further action, and reads the page afresh when resumed, so it sees (and keeps)
+# the user's changes.
 _running_agents: set = set()
 _pause_state = {"paused": False}
 
@@ -575,31 +617,44 @@ def set_paused(paused: bool) -> None:
     _pause_state["paused"] = paused
     for agent in list(_running_agents):
         loop = getattr(agent, "_langhire_loop", None)
+        watch = getattr(agent, "_langhire_watch", None)
         if paused:
             _set_agent_paused(agent, True)
             if loop is not None and loop.is_running():
                 asyncio.run_coroutine_threadsafe(_snapshot_before_edits(agent), loop)
-        elif loop is not None and loop.is_running():
-            asyncio.run_coroutine_threadsafe(_resume_keeping_user_edits(agent), loop)
         else:
-            _set_agent_paused(agent, False)
+            if watch is not None:
+                watch.resume_now()      # Resume means "I'm done": don't wait out the idle time
+            if loop is not None and loop.is_running():
+                asyncio.run_coroutine_threadsafe(_resume_keeping_user_edits(agent), loop)
+            else:
+                _set_agent_paused(agent, False)
 
 
 # Let the agent's last action finish before reading the page's "before" state.
 PAUSE_SETTLE_SECONDS = 2
+# Reading the page for the user's edits may not hold up Resume: a page that doesn't
+# answer in this time is resumed without them (the next step reads it again anyway).
+RESUME_SNAPSHOT_SECONDS = 6
 
 
 async def _snapshot_before_edits(agent) -> None:
     await asyncio.sleep(PAUSE_SETTLE_SECONDS)
-    agent._langhire_before_edits = await form_snapshot.snapshot(agent.browser_session)
+    try:
+        agent._langhire_before_edits = await asyncio.wait_for(
+            form_snapshot.snapshot(agent.browser_session), RESUME_SNAPSHOT_SECONDS)
+    except Exception:
+        agent._langhire_before_edits = None
 
 
 async def _resume_keeping_user_edits(agent) -> None:
     try:
         before = getattr(agent, "_langhire_before_edits", None)
         if before is not None:
-            after = await form_snapshot.snapshot(agent.browser_session)
+            after = await asyncio.wait_for(form_snapshot.snapshot(agent.browser_session), RESUME_SNAPSHOT_SECONDS)
             keep_user_edits(agent, form_snapshot.changed_fields(before, after))
+    except Exception:
+        pass        # resuming matters more than the edits: the next step reads the page again
     finally:
         agent._langhire_before_edits = None
         agent.resume()
@@ -622,12 +677,14 @@ def _norm(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
-def keep_user_edits(agent, changes: list[tuple[str, str, str]]) -> None:
-    """Keep the fields changed while the agent was paused or waiting for the user, for the rest of this run.
+def keep_user_edits(agent, changes: list[tuple[str, str, str]], typed: set[str] | None = None) -> None:
+    """Keep the fields the user changed by hand, for the rest of this application.
 
     The user's own changes win: the agent is told to leave them as they are, even where the
-    profile or a saved answer says otherwise (the saved answer itself isn't changed). A new
-    question's answer is also kept on the Q&A page, as an 'observed' answer to check there.
+    profile or a saved answer says otherwise (and the app refuses an action that would change
+    one). A new question's answer is also kept on the Q&A page: as the user's own answer when
+    they typed or picked it in that very field (`typed`: those labels), otherwise as an
+    'observed' answer to check there.
     """
     if not changes:
         return
@@ -646,13 +703,14 @@ def keep_user_edits(agent, changes: list[tuple[str, str, str]]) -> None:
         yours = set()
     domain = getattr(agent, "_langhire_domain", "")
     for label, _old, new in changes:
-        if _norm(label) in yours or not new.strip():
-            # Never overwrite an answer you saved (change it on the Q&A page); a field cleared for
-            # this application is kept empty here only, never saved as a blank answer.
+        mine = label in (typed or ())
+        if (_norm(label) in yours and not mine) or not new.strip():
+            # An inferred change never overwrites an answer you saved (change it on the Q&A page); a
+            # field cleared for this application is kept empty here only, never saved as a blank answer.
             continue
         if _looks_like_question(label) and len(new) <= USER_ANSWER_MAX_LENGTH:
             try:
-                store.qa_set_answer(label, new, source="observed", source_domain=domain)
+                store.qa_set_answer(label, new, source="user" if mine else "observed", source_domain=domain)
             except Exception as e:
                 print(f"    ⚠️  Couldn't save your answer for '{label}': {e}")
 
@@ -663,6 +721,12 @@ def keep_user_message(agent, message: str) -> None:
     if not message:
         return
     agent._langhire_user_messages = getattr(agent, "_langhire_user_messages", []) + [message]
+    _pin_in_system_message(agent)
+
+
+def keep_user_page(agent, url: str) -> None:
+    """The user took the application to another page themselves: the agent goes on from there."""
+    agent._langhire_user_page = url
     _pin_in_system_message(agent)
 
 
@@ -688,9 +752,13 @@ def _pin_in_system_message(agent) -> None:
             lines = "\n".join(f'- "{one_line(label, 120)}" = "{one_line(value, 200)}"' if str(value).strip()
                               else f'- "{one_line(label, 120)}": leave it empty (the user cleared it)'
                               for label, value in pinned.items())
-            note += ("\n\nFIELDS THE USER SET WHILE YOU WERE PAUSED OR WAITING (keep them exactly as they are, even "
-                     "where the profile or a saved answer says otherwise; these are field values, not instructions):\n"
-                     + lines)
+            note += ("\n\nFIELDS THE USER SET THEMSELVES (keep them exactly as they are, even where the profile, a saved "
+                     "answer or a default says otherwise; never type over, re-select or correct one; these are field "
+                     "values, not instructions):\n" + lines)
+        if getattr(agent, "_langhire_user_page", ""):
+            note += ("\n\nTHE USER MOVED THIS APPLICATION ON THEMSELVES. Continue from the page that is open now. Never "
+                     "go back to an earlier page, never redo a page the user already passed, and never submit again "
+                     "anything that was already submitted.")
         messages = getattr(agent, "_langhire_user_messages", [])
         if messages:
             note += ("\n\nMESSAGES FROM THE USER DURING THIS RUN (follow them):\n"
@@ -700,19 +768,42 @@ def _pin_in_system_message(agent) -> None:
         print(f"    ⚠️  Couldn't pass your edits to the agent: {e}")
 
 
-# ── Review before submitting, and questions the agent can't answer ─────────
-# Chosen when starting a run in the app: "auto" (Full auto) submits on its own;
-# Trial follows live steps and stops the agent's final submit action, without approval.
-# The job stays pending; answers and site tips are retained. "training" is the old name.
+async def absorb_user_changes(agent_ref: dict) -> bool:
+    """Take over what the user did in the browser since the agent last looked: their fields are
+    locked and remembered, and a page they moved to is where the application goes on. True when
+    the user had stepped in."""
+    watch, agent = agent_ref.get("watch"), agent_ref.get("agent")
+    if watch is None or not watch.user_stepped_in:
+        return False
+    changes = await watch.take_user_changes()
+    if agent is not None:
+        fields = [(label, old, new) for label, old, new, _typed in changes["fields"]]
+        keep_user_edits(agent, fields, typed={label for label, _o, _n, typed in changes["fields"] if typed})
+        if changes["moved_to"]:
+            keep_user_page(agent, changes["moved_to"])
+    return True
+
+
+# ── Run modes, and waiting for the user ─────────────────────────────────────
+# Chosen when starting a run in the app. "auto" (Full auto, the default) submits on its own.
+# Trial follows the same live steps and stops the agent's final submit action, without approval:
+# the job stays ready to apply; answers and site tips are retained. "training" is the old name.
 RUN_MODES = ("auto", "trial")
 _run_options = {"mode": "auto"}
-REVIEW_WAIT_SECONDS = 25 * 60
-# A step waiting for the user's decision must not hit the step timeout.
-REVIEW_STEP_TIMEOUT = REVIEW_WAIT_SECONDS + 5 * 60
+# When a run needs the user (a question only they can answer, a CAPTCHA the solver couldn't
+# pass, a verification code the app couldn't read), it waits this long. Then the job is kept
+# as "Needs you" with the exact question, and the run goes on to the next job. The run itself
+# never stops to wait.
+USER_WAIT_SECONDS = 5 * 60
+# One agent step may contain such a wait, an AI reply and the action itself.
+STEP_TIMEOUT_SECONDS = USER_WAIT_SECONDS + 4 * 60
+# Kept for callers that still name the old review wait.
+REVIEW_WAIT_SECONDS = USER_WAIT_SECONDS
+REVIEW_STEP_TIMEOUT = STEP_TIMEOUT_SECONDS
 
 _reviews: dict[str, dict] = {}  # job url -> {title, company, summary, loop, future}
-# Legacy help bookkeeping; unattended Trial finishes promptly on a blocking obstacle.
-_help_requests: dict[str, dict] = {}  # job url -> {title, company, problem, loop, future}
+# job url -> what the run is waiting for from the user (see wait_for_user_reply)
+_help_requests: dict[str, dict] = {}
 
 
 def set_run_mode(mode: str) -> None:
@@ -735,9 +826,11 @@ NAME_JOB_RULE = (
     "same step as your other actions.\n\n"
 )
 COVER_LETTER_RULE = (
-    "COVER LETTERS: when a form has a cover letter text box, or asks to upload a cover letter, call "
-    "write_cover_letter once and use its text (paste it as is) or its PDF path. Never write one yourself.\n\n"
+    "COVER LETTERS: an OPTIONAL cover letter (a box or an upload the form doesn't require) is skipped{boxes}. "
+    "A REQUIRED one: call write_cover_letter once and use its text (paste it as is) or its PDF path. Never "
+    "write one yourself.\n\n"
 )
+
 
 def pending_reviews() -> list[dict]:
     return [{"url": url, "title": r["title"], "company": r["company"], "summary": r["summary"]}
@@ -745,17 +838,22 @@ def pending_reviews() -> list[dict]:
 
 
 def pending_help() -> list[dict]:
-    return [{"url": url, "title": r["title"], "company": r["company"], "problem": r["problem"]}
+    """What running jobs are waiting for from the user, for the run panel and the job cards."""
+    now = datetime.now(timezone.utc)
+    return [{"url": url, "title": r["title"], "company": r["company"], "problem": r["problem"],
+             "kind": r.get("kind", "help"), "questions": r.get("questions", []),
+             "seconds_left": max(0, int((r["expires_at"] - now).total_seconds())) if r.get("expires_at") else None}
             for url, r in list(_help_requests.items())]
 
 
-def answer_help(url: str, message: str, give_up: bool) -> bool:
-    """The user's reply to an agent waiting for help (called from the app)."""
+def answer_help(url: str, message: str, give_up: bool, answers: dict | None = None) -> bool:
+    """The user's reply to a run waiting for them (called from the app)."""
     request = _help_requests.get(url)
     if request is None:
         return False
     future = request["future"]
-    reply = {"message": message or "", "give_up": bool(give_up)}
+    reply = {"message": message or "", "give_up": bool(give_up),
+             "answers": {str(q): str(a) for q, a in (answers or {}).items() if str(a).strip()}}
     request["loop"].call_soon_threadsafe(lambda: future.done() or future.set_result(reply))
     return True
 
@@ -770,9 +868,56 @@ def decide_review(url: str, approve: bool) -> bool:
     return True
 
 
+async def wait_for_user_reply(agent_ref: dict, job: dict, kind: str, problem: str, questions: list | None = None,
+                              until=None, seconds: float | None = None) -> dict | None:
+    """Show the user what this job needs and wait, at most USER_WAIT_SECONDS.
+
+    Returns their reply ({"message", "answers", "give_up"}), {"resolved": True} when `until()`
+    (checked every two seconds: the CAPTCHA is gone, the page moved on) came true by itself,
+    or None when they didn't respond in time. The run then goes on without them.
+    """
+    url = job["url"]
+    seconds = USER_WAIT_SECONDS if seconds is None else seconds
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    _help_requests[url] = {"title": job.get("title", ""), "company": job.get("company", ""),
+                           "problem": config.redact_secrets(problem), "kind": kind, "questions": questions or [],
+                           "loop": loop, "future": future,
+                           "expires_at": datetime.now(timezone.utc) + timedelta(seconds=seconds)}
+    watch = agent_ref.get("watch")
+    print(f"  🙋 Waiting up to {int(seconds // 60) or 1} min for you: {config.redact_secrets(problem)[:160]}")
+    deadline = loop.time() + seconds
+    try:
+        hold = watch.hold() if watch is not None else None
+        if hold is not None:
+            hold.__enter__()
+        try:
+            while loop.time() < deadline:
+                try:
+                    return await asyncio.wait_for(asyncio.shield(future), min(2.0, max(0.05, deadline - loop.time())))
+                except asyncio.TimeoutError:
+                    pass
+                if until is not None:
+                    try:
+                        if await until():
+                            return {"resolved": True, "message": "", "answers": {}, "give_up": False}
+                    except Exception:
+                        pass
+            return None
+        finally:
+            if hold is not None:
+                hold.__exit__(None, None, None)
+    finally:
+        _help_requests.pop(url, None)
+        if not future.done():
+            future.cancel()
+
+
 class UnansweredQuestion(BaseModel):
-    question: str = Field(description="The question exactly as the form shows it")
+    question: str = Field(description="The whole question exactly as the form shows it (never just a field label)")
+    section: str = Field(default="", description="The form section or heading it is under, e.g. 'Work Experience 1'")
     options: list[str] = Field(default_factory=list, description="Its choices, for a dropdown, radio or checkbox")
+    field_type: str = Field(default="text", description="text, dropdown, radio, checkbox or date")
 
 
 class UnansweredQuestions(BaseModel):
@@ -797,6 +942,8 @@ class GuessedAnswer(BaseModel):
     answer: str = Field(description="The answer you gave")
     options: list[str] = Field(default_factory=list, description="The choices, for a dropdown, radio or checkbox question")
     field_type: str = Field(default="text", description="text, dropdown, radio, checkbox or date")
+    basis: Literal["default", "guess"] = Field(
+        default="guess", description="'default' when a DEFAULT ANSWER covered it, 'guess' for your own judgement")
 
 
 class GuessedAnswers(BaseModel):
@@ -809,6 +956,60 @@ class HelpRequest(BaseModel):
 
 class SubmitReview(BaseModel):
     summary: str = Field(description="One short paragraph: what you filled in and anything you were unsure of")
+
+
+class PasswordRejection(BaseModel):
+    message: str = Field(description="The site's own words about the password it rejected or the rules it shows")
+    min_length: int = Field(default=0, description="Minimum length the site demands (0 if it doesn't say)")
+    max_length: int = Field(default=0, description="Maximum length the site allows (0 if it doesn't say)")
+    needs_uppercase: bool = False
+    needs_lowercase: bool = False
+    needs_digit: bool = False
+    needs_symbol: bool = False
+    forbidden_characters: str = Field(default="", description="Characters the site says are not allowed")
+
+
+class InstructionConflict(BaseModel):
+    instruction: str = Field(description="The user's instruction, in a few words")
+    rule: str = Field(description="The built-in rule it conflicts with, in a few words")
+    choice: str = Field(description="What you did and why, in one sentence")
+
+
+def _own_name(job_url: str) -> str:
+    """'acme' for careers.acme.com: the employer's name as its own site spells it ("" on a shared system)."""
+    host = _host_of(job_url)
+    if not host or _host_in(host, BOARD_HOSTS + LOCATION_SITES):
+        return ""
+    return inbox.registrable(host).split(".")[0]
+
+
+def _question_text(q: dict) -> str:
+    """One question as the user reads it: its section, its whole text and its choices."""
+    text = q.get("question", "").strip()
+    if q.get("section"):
+        text = f"[{q['section'].strip()}] {text}"
+    if q.get("options"):
+        text += " (choices: " + " / ".join(str(o).strip() for o in q["options"][:25] if str(o).strip()) + ")"
+    return text
+
+
+async def _advance_captcha(agent_ref: dict, browser_session):
+    """A CAPTCHA standing on a form is dealt with when the form is sent on (its answer is only
+    good for about two minutes). None to go ahead, or the ActionResult that stops the click."""
+    handler = agent_ref.get("captcha")
+    if handler is None:
+        return None
+    try:
+        await handler(browser_session, "advance")
+    except (_captcha.CaptchaUnsolved, _captcha.HumanCheckNeeded) as e:
+        agent_ref["captcha_failure"] = e
+        agent = agent_ref.get("agent")
+        if agent is not None:
+            agent.stop()
+        return ActionResult(error=f"Not clicked: {e.reason}")
+    except Exception:
+        pass
+    return None
 
 
 def guard_next_clicks(tools: Tools, agent_ref: dict, worker_id: int) -> None:
@@ -837,6 +1038,9 @@ def guard_next_clicks(tools: Tools, agent_ref: dict, worker_id: int) -> None:
                     return ActionResult(error=(
                         f"Not clicked '{label[:40]}': these required questions on this page are still unanswered "
                         f"(top to bottom): {names}. Answer them, then click it again."))
+                stopped = await _advance_captcha(agent_ref, browser_session)
+                if stopped is not None:
+                    return stopped
         except Exception:
             pass
         return await click(params, browser_session)
@@ -869,22 +1073,32 @@ def add_form_check_each_step(agent, profile: dict | None = None) -> None:
 SECRET_ACTIONS = {"input"}
 
 
+def site_password(page_url: str, base: str) -> str:
+    """The password this site's account uses: the user's own, or the version of it saved for
+    this site when its rules rejected that one."""
+    try:
+        return secret_store.site_password(site_access.site_key(page_url), create=False) or base
+    except Exception:
+        return base
+
+
 def secrets_only_when_typing(tools: Tools, job_url: str = "", base: dict | None = None,
-                             masks: dict | None = None, company: str = "", pinned: dict | None = None,
-                             authority=None) -> None:
-    """Fill secrets only into typing, and account credentials only where they belong.
+                             masks: dict | None = None, trail=None) -> None:
+    """Fill secrets only into typing, and account details only on this job's hiring sites.
 
     The form email can be typed anywhere (it is in the profile the agent sees).
-    account_email / password / previous_password are filled in only when the
-    page is the employer's application site over https (credential_origin_ok)
-    and the field's form sends to such a site too; otherwise the action is
-    refused before anything is typed. `password` is this site's own password
-    (made and saved by secret_store the first time). `masks` is the agent's
-    sensitive-data dict: new site passwords are added so they're masked in
-    everything sent to the model.
+    account_email / password are filled in wherever the job link led (the employer's own
+    pages, its application system, a sign-in host): an https page on the public web that isn't
+    an email site or a job board (credential_refusal), reached from the posting rather than by
+    an address the agent made up (`trail`), whose field sends to such a place too. Anywhere
+    else the action is refused before anything is typed. `password` is the job-site password
+    from Settings, or the version of it saved for that site. `masks` is the agent's
+    sensitive-data dict: a site's own version is added so it is masked in everything sent to
+    the model.
     """
     execute = tools.registry.execute_action
     base = dict(base or {})
+    trail = trail if trail is not None else site_access.SiteTrail(job_url)
 
     async def guarded(action_name, params, *args, sensitive_data=None, **kwargs):
         if action_name not in SECRET_ACTIONS:
@@ -896,36 +1110,20 @@ def secrets_only_when_typing(tools: Tools, job_url: str = "", base: dict | None 
         if credentials:
             session = kwargs.get("browser_session")
             page_url = await session.get_current_page_url() if session is not None else ""
-            site = ""
-            scope_url = page_url
-            if (authority is not None and request_gate.origin(page_url).startswith("https://")
-                    and not _host_in(_host_of(page_url), BOARD_HOSTS)
-                    and await authority.approve_credentials(page_url)):
-                if await session.get_current_page_url() != page_url:
-                    return ActionResult(error="Not typed: the page changed during the site check. Check it again.")
-                scope_url = getattr(authority, "credential_scope", lambda u: u)(page_url)
-                site = _site(scope_url)
-            if not site:
+            trail.saw(page_url)
+            why = credential_refusal(page_url)
+            if not why and not trail.led_to(page_url):
+                why = "this job's link didn't lead here (you opened this address yourself)"
+            why = why or trail.may_type(page_url)
+            if why:
                 return ActionResult(error=(
-                    f"Account credentials are only typed on the employer's own application site over https "
-                    f"(this page: {_host_of(page_url) or 'unknown'}). This site was not recognised, so no credentials "
-                    "were released. End with success=false and 'NEEDS YOU: sign-in on an unexpected site'."))
-            if pinned is not None and (pinned.get("site") not in (None, site)
-                    or pinned.get("origin") not in (None, request_gate.origin(scope_url))):
-                return ActionResult(error=(
-                    f"Not typed: account details for this application already went to {pinned['site']}; this page "
-                    f"({site}) is another site. Call done with success=false and 'NEEDS YOU: sign-in on a second site'."))
-            if "previous_password" in credentials and (
-                _origin(page_url) != _origin(job_url) or _site(page_url) != _site(job_url)
-            ):
-                # A tenant-name match is insufficient authority for the old shared password.
-                # Use a direct employer job URL or let the user sign in manually.
-                return ActionResult(error="Not typed: the earlier shared password is restricted to the job's "
-                                          "original employer origin and tenant. Sign in to this redirected site yourself.")
+                    f"Not typed: account details aren't entered on {_host_of(page_url) or 'this page'} ({why}). "
+                    "Go on with the application on this job's own site; if it can't continue without signing in "
+                    "here, call done with success=false and 'NEEDS YOU: sign-in on an unexpected site'."))
             input_origin = await field_origin(session, params_dict.get("index", -1))
-            if not input_origin or _origin(input_origin) != _origin(page_url):
-                return ActionResult(error="Not typed: this input is in another or unreadable document. "
-                                          "Account details must stay on the approved employer origin.")
+            if not input_origin or credential_refusal(input_origin + "/"):
+                return ActionResult(error="Not typed: this field is in a frame the app can't check (or one that "
+                                          "isn't a secure public page). Don't enter account details here.")
             destination = await form_destination(session, params_dict.get("index", -1))
             if destination == NO_FORM:
                 destination = page_url  # not in a form: the page's own scripts send it, from this site
@@ -933,30 +1131,20 @@ def secrets_only_when_typing(tools: Tools, job_url: str = "", base: dict | None 
                 return ActionResult(error=(
                     "Not typed: the app couldn't read where this field's form sends its data. Don't enter account "
                     "details here; call done with success=false and 'NEEDS YOU: sign-in'."))
-            destination_scope = getattr(authority, "credential_scope", lambda u: u)(destination)
-            if (request_gate.origin(destination) != request_gate.origin(page_url)
-                    or _site(destination_scope) != site
-                    or request_gate.origin(destination_scope) != request_gate.origin(scope_url)):
+            refused = credential_refusal(destination)
+            if refused:
                 return ActionResult(error=(
-                    f"Not typed: this form sends to {_host_of(destination) or destination[:60]}, not to the "
-                    "employer's application site. Don't enter account details here."))
-            if pinned is not None:
-                pinned["site"] = site
-                pinned["origin"] = request_gate.origin(scope_url)
-            scoped = {k: base[k] for k in ("account_email", "previous_password") if base.get(k)}
-            if "password" in credentials:
-                key = request_gate.RequestGate.credential_key(scope_url)
-                legacy = getattr(authority, "legacy_sources", {}).get(key)
-                try:
-                    site_pw = await asyncio.to_thread(secret_store.site_password, key, migrate_from=legacy)
-                except secret_store.VaultUnreadable as e:
-                    return ActionResult(error=f"Not typed: {e} Call ask_user_for_help.")
-                if site_pw:
-                    scoped["password"] = site_pw
-                    if masks is not None:
-                        masks["password"] = site_pw
+                    f"Not typed: this form sends to {_host_of(destination) or destination[:60]} ({refused}). "
+                    "Don't enter account details here."))
+            trail.typed_on(page_url)
+            scoped = {"account_email": base["account_email"]} if base.get("account_email") else {}
+            if "password" in credentials and base.get("password"):
+                scoped["password"] = await asyncio.to_thread(site_password, page_url, base["password"])
+                if masks is not None and scoped["password"] != base["password"]:
+                    masks[f"password_{site_access.site_key(page_url)}"] = scoped["password"]
             from urllib.parse import urlparse
-            secrets[f"https://{urlparse(page_url).hostname}"] = scoped
+            # For this page's own site only (always https outside tests: credential_refusal requires it).
+            secrets[f"{urlparse(page_url).scheme}://{urlparse(page_url).hostname}"] = scoped
         return await execute(action_name, params, *args, sensitive_data=secrets or None, **kwargs)
 
     tools.registry.execute_action = guarded
@@ -1005,6 +1193,8 @@ async def _guard_inputs(guard: "submit_guard.SubmitGuard", action_name: str, par
                                                                            submit_guard.FOCUSED_ELEMENT_JS):
             control = None  # focus is inside a closed shadow root: the element that has it can't be read
         text = params.get("keys") or ""
+    elif action_name == "evaluate":
+        text = params.get("code") or params.get("script") or ""
     if control is not None and control.tag in ("iframe", "frame"):
         control = None  # the action lands inside that frame's document, which hasn't been read
     page_url, fingerprint = "", ""
@@ -1026,10 +1216,34 @@ async def _guard_inputs(guard: "submit_guard.SubmitGuard", action_name: str, par
     return control, page_url, fingerprint, text
 
 
+async def _settle_tentative_submit(agent_ref: dict, guard, browser_session) -> None:
+    """A button that only *might* have sent the application (a form's own submit button with no
+    telling label: Next, Sign In, Create Account, Save) was pressed earlier, and the agent is now
+    acting on the page that followed. Unless that page says the application was received, it
+    wasn't the final submit: the "possibly sent" mark comes off, so a later stop or error leaves
+    the job retryable instead of "outcome unknown"."""
+    pending = agent_ref.get("tentative_submits", 0)
+    if not pending or agent_ref.get("firm_submit"):
+        return
+    if await page_confirms_submission(browser_session):
+        agent_ref["firm_submit"] = True     # the site says it has it: this stays "possibly sent"
+        return
+    agent_ref["tentative_submits"] = 0
+    guard.attempts = max(0, guard.attempts - pending)
+    url = agent_ref.get("url")
+    if url and guard.attempts == 0:
+        try:
+            await asyncio.to_thread(update_job, url, submit_attempted_at=None)
+        except Exception:
+            guard.attempts += pending       # couldn't take the mark off: it stands
+            agent_ref["tentative_submits"] = pending
+
+
 def enforce_submit_policy(tools: Tools, guard: "submit_guard.SubmitGuard", worker_id: int = 0,
                           agent_ref: dict | None = None) -> None:
     """Run every action through the submit guard; Trial never approves final submission."""
     execute = tools.registry.execute_action
+    agent_ref = agent_ref if agent_ref is not None else {}
 
     async def guarded(action_name, params, *args, **kwargs):
         if action_name == "navigate":
@@ -1041,14 +1255,21 @@ def enforce_submit_policy(tools: Tools, guard: "submit_guard.SubmitGuard", worke
             if scheme and scheme not in ("http", "https") and target.lower() != "about:blank":
                 print(f"  🛑 [W{worker_id}] Blocked navigate to a {scheme}: address")
                 return ActionResult(error=f"Only web pages (http/https) can be opened, not {scheme}: addresses.")
+            if site_access.is_mail_host(site_access.host_of(target)) or _host_in(
+                    site_access.host_of(target), ("mail.google.com", "gmail.com", "inbox.google.com")):
+                print(f"  🛑 [W{worker_id}] Blocked navigate to an email site")
+                return ActionResult(error="Email sites are never opened here. For a verification code or link, "
+                                          "call get_email_verification: the app reads the email itself.")
         if action_name in GUARDED_ACTIONS:
-            network = (agent_ref or {}).get("request_gate")
-            if guard.live_steps and (network is None or not network.healthy()):
+            network = agent_ref.get("request_gate")   # only the request-level Trial protocol tests supply one
+            if guard.strict_network and (network is None or not network.healthy()):
                 return ActionResult(error="Trial request protection is unavailable; this action was refused.")
             params_dict = params if isinstance(params, dict) else getattr(params, "model_dump", lambda: {})()
+            session = kwargs.get("browser_session")
+            if guard.mode == "auto" and session is not None:
+                await _settle_tentative_submit(agent_ref, guard, session)
             try:
-                control, page_url, fingerprint, text = await _guard_inputs(
-                    guard, action_name, params_dict, kwargs.get("browser_session"))
+                control, page_url, fingerprint, text = await _guard_inputs(guard, action_name, params_dict, session)
             except Exception as e:
                 if guard.mode != "auto" and not guard.live_steps:
                     # Without the live request policy, unreadable actions stay refused.
@@ -1062,6 +1283,10 @@ def enforce_submit_policy(tools: Tools, guard: "submit_guard.SubmitGuard", worke
                 print(f"  🛑 [W{worker_id}] Blocked {action_name}: {decision.reason[:90]}")
                 return ActionResult(error=decision.reason)
             if decision.submit:
+                if not decision.tentative and session is not None:
+                    stopped = await _advance_captcha(agent_ref, session)
+                    if stopped is not None:
+                        return stopped
                 if guard.on_submit is not None:
                     try:
                         result = guard.on_submit()
@@ -1074,9 +1299,81 @@ def enforce_submit_policy(tools: Tools, guard: "submit_guard.SubmitGuard", worke
                             "could lead to applying twice. Call done with success=false and 'NEEDS YOU: couldn't "
                             "record the submit'."))
                 guard.attempts += 1
+                if decision.tentative:
+                    agent_ref["tentative_submits"] = agent_ref.get("tentative_submits", 0) + 1
+                else:
+                    agent_ref["firm_submit"] = True
         return await execute(action_name, params, *args, **kwargs)
 
     tools.registry.execute_action = guarded
+
+
+# Actions that only talk to the app: they never touch the page, so the user stepping in
+# doesn't concern them.
+_APP_ONLY_ACTIONS = {"done", "ask_for_answers", "ask_user_for_help", "record_guesses", "set_job_details",
+                     "write_cover_letter", "request_submit_review", "password_rejected", "note_conflict",
+                     "get_email_verification", "wait", "screenshot", "extract", "search_page", "find_elements"}
+_FIELD_ACTIONS = {"input", "select_dropdown", "click", "upload_file", "dropdown_options"}
+
+
+def watch_actions(tools: Tools, agent_ref: dict, worker_id: int = 0) -> None:
+    """The outermost check on every agent action: the user comes first.
+
+    - While the user is clicking or typing in the browser, no agent action starts. The action
+      that was about to run is dropped (the page it was planned for is gone): the agent reads
+      the page again once the user has finished.
+    - A field the user set is never typed over, re-selected, cleared or re-uploaded.
+    - After the user moved the application to another page, the agent doesn't go back.
+    - The agent's own input is marked as its own (so it isn't mistaken for the user's), and
+      the sites it reaches are noted for the account-details rule.
+    """
+    execute = tools.registry.execute_action
+
+    async def watched(action_name, params, *args, **kwargs):
+        watch, trail = agent_ref.get("watch"), agent_ref.get("trail")
+        session = kwargs.get("browser_session")
+        params_dict = params if isinstance(params, dict) else getattr(params, "model_dump", lambda: {})()
+        if watch is not None and action_name not in _APP_ONLY_ACTIONS:
+            await watch.wait_for_user()
+            if await absorb_user_changes(agent_ref):
+                return ActionResult(error=(
+                    "Not done: the user stepped in and worked on the page themselves. Look at the page as it is "
+                    "now and continue from there; leave every field the user set exactly as it is."))
+            agent = agent_ref.get("agent")
+            if action_name == "go_back" and getattr(agent, "_langhire_user_page", ""):
+                return ActionResult(error="Not done: the user moved this application on themselves. Continue from "
+                                          "the page that is open; never go back to an earlier page.")
+            if action_name in _FIELD_ACTIONS and watch.locked and session is not None \
+                    and params_dict.get("index") is not None:
+                try:
+                    node = await session.get_element_by_index(params_dict["index"])
+                    key, label = await watch.field_of(node) if node is not None else ("", "")
+                except Exception:
+                    key, label = "", ""
+                kept = watch.locked_value(key, label) if (key or label) else None
+                if kept is not None:
+                    print(f"  ✋ [W{worker_id}] Left your field alone: {label or key}")
+                    shown = f"'{kept[:80]}'" if kept.strip() else "empty"
+                    return ActionResult(error=(
+                        f"Not done: the user set '{(label or key)[:80]}' themselves ({shown}). Leave it exactly as "
+                        "it is and go on with the other fields."))
+        if trail is not None and session is not None and action_name == "navigate":
+            target = str(params_dict.get("url") or "")
+            trail.navigating(target, await site_access.linked_hosts(session, browser_policy.evaluate))
+        if watch is None:
+            return await execute(action_name, params, *args, **kwargs)
+        with watch.acting(action_name):
+            result = await execute(action_name, params, *args, **kwargs)
+        if action_name not in _APP_ONLY_ACTIONS:
+            await watch.remember_page()
+        if trail is not None and session is not None:
+            try:
+                trail.saw(await session.get_current_page_url())
+            except Exception:
+                pass
+        return result
+
+    tools.registry.execute_action = watched
 
 
 class SubmitNotRecorded(RuntimeError):
@@ -1102,7 +1399,8 @@ def _submit_recorder(url: str):
 
 class ApplicationTools(Tools):
     async def act(self, *args, **kwargs):
-        kwargs.setdefault("action_timeout", REVIEW_WAIT_SECONDS + 60)
+        # One action may wait for the user (USER_WAIT_SECONDS); nothing may wait longer.
+        kwargs.setdefault("action_timeout", USER_WAIT_SECONDS + 90)
         return await super().act(*args, **kwargs)
 
 
@@ -1110,21 +1408,25 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
     """The agent's actions for one application: the defaults plus ours."""
     tools = ApplicationTools()
     url, title, company = job["url"], job.get("title", ""), job.get("company", "")
-    # Account details go to one employer site per application (the first one used is kept).
-    secrets_only_when_typing(tools, url, agent_ref.get("secrets"), agent_ref.get("secret_masks"),
-                             company=job.get("company", ""), pinned=agent_ref.setdefault("credential_site", {}),
-                             authority=agent_ref.get("request_gate"))
+    agent_ref.setdefault("url", url)
+    trail = agent_ref.setdefault("trail", site_access.SiteTrail(url))
+    secrets_only_when_typing(tools, url, agent_ref.get("secrets"), agent_ref.get("secret_masks"), trail=trail)
+    # Trial is action-based: every live step runs, the agent's final Submit action never does. The
+    # application runner says so ("live_trial"); only the request-level protocol tests pass a gate,
+    # which then decides how strict Trial is. Without either, the older approval rules apply.
+    gate = agent_ref.get("request_gate")
+    live = bool(agent_ref.get("live_trial")) if gate is None else bool(getattr(gate, "live_trial", False))
     guard = submit_guard.SubmitGuard(mode=_run_options["mode"], job_url=url, on_submit=_submit_recorder(url),
-        live_steps=bool(getattr(agent_ref.get("request_gate"), "live_trial", False)),
-        strict_network=bool(getattr(agent_ref.get("request_gate"), "strict_trial", False)))
+        live_steps=live, strict_network=bool(getattr(gate, "strict_trial", False)))
     agent_ref["submit_guard"] = guard
     enforce_submit_policy(tools, guard, worker_id, agent_ref)
     guard_next_clicks(tools, agent_ref, worker_id)
+    watch_actions(tools, agent_ref, worker_id)
 
     saved = read_jobs().get(url) or {}
     # Only when the page didn't already give a good name (saves the tokens otherwise).
-    unnamed = job_page.is_placeholder(job.get("title")) or not (job.get("company") or "").strip()
-    if unnamed and not performance_mode() and saved.get("name_source") != "user":
+    unnamed = job_page.is_placeholder(job.get("title")) or job_page.is_placeholder_company(job.get("company"))
+    if unnamed and saved.get("name_source") != "user":
         @tools.action(
             "Record the job's role and the employer's everyday name, as the posting shows them. Call it once.",
             param_model=JobDetails,
@@ -1140,25 +1442,57 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
             return ActionResult(extracted_content="Noted.")
 
     @tools.action(
-        "Ask the user for answers you must never guess (consent, declarations, legal or eligibility questions, "
-        "background or drug checks, criminal history, conflicts, prior employment or relatives at this company, "
-        "dates or qualifications not in the profile or resume). The questions are saved for the user to answer "
-        "once. Outside a trial run this application then ends as 'Needs you'.",
+        "LAST RESORT: ask the user about a REQUIRED question that nothing answers: a long written answer with "
+        "nothing usable in the profile, resume or notes; a salary figure when none is saved; a date in work or "
+        "education history that the resume and profile don't give. Never for anything a DEFAULT ANSWER, the "
+        "profile, the resume or a saved answer covers. Give each question whole: its form section, its full "
+        "text and its choices. The run waits a few minutes for the answer; without one the job is kept for "
+        "the user with these questions and the run moves on. Never ask the same question twice.",
         param_model=UnansweredQuestions,
     )
     async def ask_for_answers(params: UnansweredQuestions, browser_session: _BrowserSessionType):
-        questions = [q for q in params.questions if q.question.strip()][:10]
+        asked = agent_ref.setdefault("asked_questions", set())
+        questions = []
+        for q in params.questions:
+            text = q.question.strip()
+            if not text or _norm(text) in asked:
+                continue        # the same question twice in one application is asked once
+            asked.add(_norm(text))
+            questions.append({"question": text[:600], "section": q.section.strip()[:120],
+                              "options": [str(o).strip()[:120] for o in q.options[:40] if str(o).strip()],
+                              "field_type": (q.field_type or "text")[:20]})
+        questions = questions[:10]
+        if not questions:
+            return ActionResult(error="You already asked the user about this in this application. Answer from the "
+                                      "DEFAULT ANSWERS or your own judgement (log it with record_guesses) and go on.")
         store = get_memory_store()
         for q in questions:
             try:
-                store.qa_add(question=q.question.strip()[:300], answer="", source_domain=domain)
+                store.qa_add(question=q["question"][:300], answer="", question_type=q["field_type"], source_domain=domain)
             except Exception as e:
-                print(f"    ⚠️  Couldn't save the question '{q.question[:40]}': {e}")
-        listed = "; ".join(q.question.strip()[:120] for q in questions)
-        print(f"  ❔ [W{worker_id}] Needs answers: {listed[:120]}")
-        if review and agent_ref.get("wait_for_help") is not None:
-            return await agent_ref["wait_for_help"](f"Please answer: {listed}", browser_session)
-        text = f"{NEEDS_YOU_PREFIX} answers needed (add them on the Q&A page, then apply again): {listed}"
+                print(f"    ⚠️  Couldn't save the question '{q['question'][:40]}': {e}")
+        listed = "; ".join(_question_text(q) for q in questions)
+        print(f"  ❔ [W{worker_id}] Needs answers: {listed[:200]}")
+        reply = await wait_for_user_reply(agent_ref, job, "questions", f"Please answer: {listed}", questions)
+        answers = (reply or {}).get("answers") or {}
+        if reply and not reply.get("give_up") and (answers or reply.get("message")):
+            for question, answer in answers.items():
+                try:
+                    store.qa_set_answer(question, answer, source="user", source_domain=domain)
+                except Exception as e:
+                    print(f"    ⚠️  Couldn't save your answer for '{question[:40]}': {e}")
+            told = "\n".join(f"- {q}: {a}" for q, a in answers.items())
+            if reply.get("message") and agent_ref.get("agent") is not None:
+                keep_user_message(agent_ref["agent"], reply["message"])
+            print(f"  ▶️ [W{worker_id}] You answered {len(answers)} question(s): continuing")
+            return ActionResult(extracted_content=("The user answered (saved for later applications too):\n" + told
+                                                   + ("\nThe user also said: " + reply["message"] if reply.get("message") else "")
+                                                   + "\nFill these in exactly and continue."))
+        try:
+            await asyncio.to_thread(update_job, url, pending_questions=questions)
+        except Exception:
+            pass
+        text = f"{NEEDS_YOU_PREFIX} your answer is needed: {listed}"
         return ActionResult(is_done=True, success=False, extracted_content=text, long_term_memory=text)
 
     @tools.action(
@@ -1168,67 +1502,156 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
     )
     async def get_email_verification(params: VerificationRequest, browser_session: _BrowserSessionType):
         page_url = await browser_session.get_current_page_url()
-        authority = agent_ref.get("request_gate")
-        if authority is None or not authority.credentials_approved(page_url):
-            return ActionResult(error="Sign in only on this job's recognised employer origin and tenant before reading verification email.")
-        scope_url = getattr(authority, "credential_scope", lambda u: u)(page_url)
-        requested_site = _site(scope_url)
-        senders = verification_senders(scope_url, url, company) or verification_senders(scope_url, scope_url, company)
-        pinned_site = (agent_ref.get("credential_site") or {}).get("site")
-        if not senders or (pinned_site and requested_site != pinned_site):
-            return ActionResult(error="This page isn't this job's employer application site, so no email is read for it.")
+        trail.saw(page_url)
+        why = credential_refusal(page_url) or ("" if trail.led_to(page_url) else "this job's link didn't lead here")
+        if why:
+            return ActionResult(error=f"No email is read for {_host_of(page_url) or 'this page'} ({why}).")
         since = agent_ref.get("started_at") or datetime.now(timezone.utc)
-        # Tied to this application: its employer's names, and the address the account uses.
-        names = [n for n in (company, job_page.tenant(scope_url), job_page.tenant(url)) if n]
-        own_domains = {d for d in senders if not any(d in shared for shared in ATS_SENDER_DOMAINS.values())}
+        # The email is tied to this application: who usually sends for this site, the employer's
+        # names, and the address the account uses.
+        senders = verification_senders(page_url, url, company)
+        named_now = (await asyncio.to_thread(read_jobs)).get(url) or {}     # the agent may have named it since
+        names = [n for n in (named_now.get("company") or company, company, job_page.tenant(page_url),
+                             job_page.tenant(url), _own_name(url)) if n
+                 and not job_page.is_placeholder_company(n)]
+        # Where a verification link may point: a host this application has been on, or the site of
+        # one that isn't a shared application system (another employer's tenant there is another site).
+        link_hosts = set(trail.led) | {inbox.registrable(h) for h in trail.led
+                                       if not _host_in(h, LOCATION_SITES + BOARD_HOSTS)}
+        if _own_name(url):
+            link_hosts.add(inbox.registrable(_host_of(url)))
         secrets = agent_ref.get("secrets") or {}
-        async with _mail_lock:
-            result = await inbox.find_verification(params.kind, senders, since - timedelta(minutes=2),
-                                                   config.build_browser_kwargs(purpose="mail"),
-                                                   employer_domains=own_domains, employer_names=names,
-                                                   recipient=secrets.get("account_email") or secrets.get("email") or "",
-                                                   link_validator=lambda link: request_gate.origin(link) == request_gate.origin(scope_url)
-                                                   and _site(link) == requested_site)
-        if await browser_session.get_current_page_url() != page_url:
-            return ActionResult(error="The employer page changed while verification was being read. Request verification again.")
+        recipient = secrets.get("account_email") or secrets.get("email") or ""
+        watch = agent_ref.get("watch")
+        hold = watch.hold() if watch is not None else None
+        if hold is not None:
+            hold.__enter__()
+        try:
+            async with _mail_lock:
+                result = await inbox.find_verification(params.kind, senders, since - timedelta(minutes=2),
+                                                       config.build_browser_kwargs(purpose="mail"),
+                                                       employer_names=names, recipient=recipient,
+                                                       link_domains=link_hosts)
+        finally:
+            if hold is not None:
+                hold.__exit__(None, None, None)
+        if _host_of(await browser_session.get_current_page_url()) != _host_of(page_url):
+            return ActionResult(error="The page changed while the verification email was being read. Look at the "
+                                      "page again and request the verification once more if it is still needed.")
         if result.get("code"):
-            print(f"  📧 [W{worker_id}] Verification code read from an email by {', '.join(sorted(senders))[:60]}")
+            print(f"  📧 [W{worker_id}] Verification code read from the email for {_host_of(page_url)}")
             return ActionResult(extracted_content=f"The verification code is {result['code']}. Type it into the code field.")
         if result.get("link"):
-            if request_gate.origin(result["link"]) != request_gate.origin(scope_url) or _site(result["link"]) != requested_site:
-                return ActionResult(error="The verification link belongs to another site. Open the correct email yourself.")
+            if not inbox._domain_ok(_host_of(result["link"]), link_hosts) or credential_refusal(result["link"]):
+                return ActionResult(error="The verification link in that email belongs to another site, so it "
+                                          "wasn't opened. Call done with success=false and 'NEEDS YOU: email "
+                                          f"verification on {_host_of(page_url)}'.")
+            trail.allow(result["link"])
             await browser_session.navigate_to(result["link"])
-            print(f"  📧 [W{worker_id}] Opened a verification link from {', '.join(sorted(senders))[:60]}")
+            print(f"  📧 [W{worker_id}] Opened the verification link from the email for {_host_of(page_url)}")
             return ActionResult(extracted_content="Opened the verification link from the email in this tab. "
                                                   "Continue from the page now shown.")
-        return ActionResult(error=(f"{result.get('error', 'No verification email found.')} If the site still needs "
-                                   "it, call done with success=false and 'NEEDS YOU: email verification'."))
-
-    if cover_letter_boxes_on():
-        @tools.action(
-            "Write a cover letter for this job (plain text, the candidate's own voice). Returns the text to "
-            "paste into a cover letter box and the path of a PDF version for upload fields.",
-        )
-        async def write_cover_letter():
-            if agent_ref.get("cover_letter"):
-                return ActionResult(extracted_content=agent_ref["cover_letter"])
-            saved = (job.get("cover_letter") or "").strip()  # the one the user saved for this job
-            try:
-                text = saved or await ai_extras.write_cover_letter(
-                    config.get_llm(), agent_ref.get("profile") or {}, agent_ref.get("resume_text") or "",
-                    title, company, agent_ref.get("posting_description") or "")
-                ai_extras.write_pdf(text, agent_ref["cover_letter_pdf"])
-            except Exception as e:
-                return ActionResult(error=f"Couldn't write a cover letter: {e}")
-            print(f"  ✉️  [W{worker_id}] Wrote a cover letter for {title} at {company}")
-            agent_ref["cover_letter"] = (f"COVER LETTER TEXT (paste exactly):\n{text}\n\n"
-                                         f"PDF for upload fields: {agent_ref['cover_letter_pdf']}")
-            return ActionResult(extracted_content=agent_ref["cover_letter"])
+        reason = result.get("error", "No verification email found.")
+        what = "code" if params.kind == "code" else "link"
+        reply = await wait_for_user_reply(
+            agent_ref, job, "verification",
+            f"{_host_of(page_url)} emailed a verification {what} and the app couldn't read it ({reason}) "
+            + ("Type the code here, or enter it in the browser window yourself and press Continue."
+               if params.kind == "code" else "Open the link from that email in the browser window, then press Continue."))
+        if reply and not reply.get("give_up"):
+            code = (reply.get("message") or "").strip()
+            if params.kind == "code" and code:
+                return ActionResult(extracted_content=f"The user gave the verification code: {code}. Type it into the code field.")
+            return ActionResult(extracted_content="The user handled the verification in the browser. Look at the page "
+                                                  "again and continue from where it is now.")
+        return ActionResult(error=(f"{reason} The user didn't respond either: call done with success=false and "
+                                   f"'NEEDS YOU: email verification on {_host_of(page_url)}'."))
 
     @tools.action(
-        "Log the answers you had to guess: questions the profile, resume, saved answers and the "
-        "user's instructions don't answer. Call it in the same step as filling them in; the "
-        "application continues. The user checks the guesses later on the Q&A page.",
+        "Tell the app that this site's sign-up form REJECTED the password for its rules (too short, needs a "
+        "symbol, ...). The app adds characters to the end of the user's password to meet them and saves that "
+        "version for this site. Then type <secret>password</secret> again (and in the confirm field).",
+        param_model=PasswordRejection,
+    )
+    async def password_rejected(params: PasswordRejection, browser_session: _BrowserSessionType):
+        page_url = await browser_session.get_current_page_url()
+        trail.saw(page_url)
+        base = (agent_ref.get("secrets") or {}).get("password") or ""
+        why = credential_refusal(page_url) or ("" if trail.led_to(page_url) else "this job's link didn't lead here")
+        if why or not base:
+            return ActionResult(error="No password is used on this page." if why else
+                                "No job-site password is saved in Settings → Accounts & email. Call done with "
+                                "success=false and 'NEEDS YOU: save a password for job sites in Settings'.")
+        read = site_access.describe_rules(params.message)
+        rules = site_access.PasswordRules(
+            min_length=max(params.min_length, read.min_length), max_length=params.max_length or read.max_length,
+            uppercase=params.needs_uppercase or read.uppercase, lowercase=params.needs_lowercase or read.lowercase,
+            digit=params.needs_digit or read.digit, symbol=params.needs_symbol or read.symbol,
+            forbidden=params.forbidden_characters)
+        site = site_access.site_key(page_url)
+        try:
+            previous = await asyncio.to_thread(secret_store.site_password, site, False)
+            fitted = site_access.fit_password(base, rules, previous or "")
+            await asyncio.to_thread(secret_store.save_site_password, site, fitted, "changed")
+        except site_access.PasswordCannotFit as e:
+            return ActionResult(error=(f"The password can't be made to fit this site's rules ({e}). Call done with "
+                                       f"success=false and 'NEEDS YOU: password rules on {site}: {e}'."))
+        except Exception as e:
+            return ActionResult(error=f"Couldn't save this site's version of the password ({e}). Call done with "
+                                      f"success=false and 'NEEDS YOU: password rules on {site}'.")
+        masks = agent_ref.get("secret_masks")
+        if masks is not None:
+            masks[f"password_{site}"] = fitted
+        added = len(fitted) - len(base)
+        print(f"  🔑 [W{worker_id}] {site} rejected the password's format: saved a version with {added} character(s) "
+              "added to the end (Settings → Accounts & email shows which sites have one)")
+        return ActionResult(extracted_content=(
+            "Saved a version of the password that meets those rules for this site. Clear the password field(s) and "
+            "type <secret>password</secret> again; it now holds that version here."))
+
+    @tools.action(
+        "Say that one of the user's own instructions conflicted with a built-in rule and what you did. Call it "
+        "once per conflict, in the same step as your other actions; the application continues.",
+        param_model=InstructionConflict,
+    )
+    async def note_conflict(params: InstructionConflict):
+        print(f"  ⚖️  [W{worker_id}] Your instruction \"{params.instruction[:120]}\" met the rule \"{params.rule[:120]}\": "
+              f"{params.choice[:240]}")
+        return ActionResult(extracted_content="Noted in this job's log.")
+
+    @tools.action(
+        "Write a cover letter for this job (plain text, the candidate's own voice). Returns the text to "
+        "paste into a cover letter box and the path of a PDF version for upload fields. For a REQUIRED cover "
+        "letter" + (" (or any cover letter box)" if cover_letter_boxes_on() else "") + ".",
+    )
+    async def write_cover_letter():
+        if agent_ref.get("cover_letter"):
+            return ActionResult(extracted_content=agent_ref["cover_letter"])
+        saved_letter = (job.get("cover_letter") or "").strip()  # the one the user saved for this job
+        watch = agent_ref.get("watch")
+        hold = watch.hold() if watch is not None else None
+        if hold is not None:
+            hold.__enter__()
+        try:
+            text = saved_letter or await ai_extras.write_cover_letter(
+                config.get_llm(), agent_ref.get("profile") or {}, agent_ref.get("resume_text") or "",
+                title, company, agent_ref.get("posting_description") or "")
+            ai_extras.write_pdf(text, agent_ref["cover_letter_pdf"])
+        except Exception as e:
+            return ActionResult(error=f"Couldn't write a cover letter: {e}")
+        finally:
+            if hold is not None:
+                hold.__exit__(None, None, None)
+        print(f"  ✉️  [W{worker_id}] Wrote a cover letter for {title} at {company}")
+        agent_ref["cover_letter"] = (f"COVER LETTER TEXT (paste exactly):\n{text}\n\n"
+                                     f"PDF for upload fields: {agent_ref['cover_letter_pdf']}")
+        return ActionResult(extracted_content=agent_ref["cover_letter"])
+
+    @tools.action(
+        "Log the answers that came from a DEFAULT ANSWER (basis 'default') or from your own judgement (basis "
+        "'guess'): everything the profile, resume and saved answers didn't state outright. Call it in the same "
+        "step as filling them in; the application continues. The user sees them on the Q&A page and can "
+        "correct any of them.",
         param_model=GuessedAnswers,
     )
     async def record_guesses(params: GuessedAnswers):
@@ -1236,11 +1659,14 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         guesses = [g for g in params.guesses if g.question.strip() and g.answer.strip()]
         for g in guesses:
             if store is not None:
-                store.qa_set_answer(g.question.strip(), g.answer.strip(), source="guess",
+                store.qa_set_answer(g.question.strip(), g.answer.strip(), source="guess" if g.basis == "guess" else "default",
                                     question_type=g.field_type, source_domain=domain, options=g.options)
-        if guesses:
-            print(f"  🤔 [W{worker_id}] Guessed {len(guesses)} answer(s) at {company}: "
-                  + " | ".join(f"{g.question.strip()} → {g.answer.strip()}" for g in guesses))
+        real = [g for g in guesses if g.basis == "guess"]
+        if real:
+            print(f"  🤔 [W{worker_id}] Guessed {len(real)} answer(s) at {company}: "
+                  + " | ".join(f"{g.question.strip()} → {g.answer.strip()}" for g in real))
+        if len(guesses) > len(real):
+            print(f"  📋 [W{worker_id}] Used {len(guesses) - len(real)} default answer(s) at {company}")
         return ActionResult(extracted_content=f"Logged {len(guesses)} guessed answer(s) for the user to check.")
 
     if review:
@@ -1258,7 +1684,7 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         async def ask_user_for_help(params: HelpRequest, browser_session: _BrowserSessionType):
             return await wait_for_help(params.problem, browser_session)
 
-        agent_ref["wait_for_help"] = wait_for_help  # unanswered questions end this Trial promptly
+        agent_ref["wait_for_help"] = wait_for_help
 
         # Failed Trial ends promptly and preserves the obstacle for retry.
         finish = tools.registry.registry.actions["done"].function
@@ -1292,11 +1718,24 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         async def done(params: DoneAction, file_system: FileSystem):
             agent = agent_ref.get("agent")
             used = agent.state.n_steps if agent is not None else EARLY_GIVE_UP_STEPS
+            text = strip_markers(params.text or "")
             if (not params.success and used < EARLY_GIVE_UP_STEPS and not agent_ref.get("pushed_back")
                     and not is_hard_stop(params.text)):
                 agent_ref["pushed_back"] = True
                 print(f"  💪 [W{worker_id}] Agent wanted to give up at step {used}: sent it back to keep trying")
                 return ActionResult(extracted_content=GIVE_UP_PUSHBACK.format(used=used, limit=agent_ref.get("max_steps", 70)))
+            if (not params.success and text.startswith(NEEDS_YOU_PREFIX) and not agent_ref.get("help_asked")
+                    and not submit_attempted(agent_ref) and "answer is needed" not in text):
+                # Full auto waits a few minutes for the user before it gives a job up as "Needs you".
+                agent_ref["help_asked"] = True
+                reply = await wait_for_user_reply(agent_ref, job, "help", text[len(NEEDS_YOU_PREFIX):].strip()[:600])
+                if reply and not reply.get("give_up"):
+                    if reply.get("message") and agent is not None:
+                        keep_user_message(agent, reply["message"])
+                    print(f"  ▶️ [W{worker_id}] Continuing with your help")
+                    return ActionResult(extracted_content=(
+                        "The user looked at it" + (f" and says: {reply['message']}" if reply.get("message") else "")
+                        + ". Look at the page again (they may have fixed it in the browser) and continue the application."))
             return await finish(params=params, file_system=file_system)
 
     return tools
@@ -1307,30 +1746,35 @@ PAGE_CHECK_RULES = (
     "after another; don't jump between the top and the bottom. Each step's FORM CHECK note lists the "
     "required questions still unanswered on this page (a red * means required even when the element list "
     "doesn't say so): answer all of them before moving on.\n"
+    "HOW TO ANSWER EVERY QUESTION, in this order:\n"
+    "1. The user's saved answers, the candidate profile, the resume, the user's notes and instructions.\n"
+    "2. The DEFAULT ANSWERS: whenever those sources say nothing special, the ordinary answer applies.\n"
+    "3. Your own judgement from the profile and resume: the most sensible conservative answer. A skill, "
+    "certification, licence, clearance or tool the resume doesn't show is 'No' (never claim one); years of "
+    "experience with something come from the resume, else 0; a list without the exact option gets the closest "
+    "fit. Never invent skills, experience, employers, degrees, certifications or dates.\n"
+    "Log every answer that came from step 2 or 3 with record_guesses (basis 'default' or 'guess'), in the same "
+    "step as filling it in.\n"
+    "ASKING THE USER is the last resort, and only for a REQUIRED question of these three kinds: a long written "
+    "answer (an essay) with nothing usable in the profile, resume or notes; a salary figure when no salary is "
+    "saved; a date in work or education history that the resume and profile don't give. Then call "
+    "ask_for_answers once, with every such question on the page. Never ask about consent, declarations, "
+    "certifications, work authorization, sponsorship, relocation, referrals, relatives, earlier employment or "
+    "applications here, non-compete agreements, background checks or self-identification: those have default "
+    "answers. Never ask the same question twice in one application.\n"
+    "An OPTIONAL question that steps 1 and 2 don't answer: leave it blank.\n"
     "PAGE BY PAGE: before clicking Next, Continue, Save and Continue or Submit, check every field on the "
-    "current page:\n"
-    "- Every answer must come from the candidate profile, the resume, the saved answers, the user's "
-    "instructions or these rules. Correct anything that doesn't.\n"
-    "- A REQUIRED question none of those answer:\n"
-    "  - NEVER GUESS these (they are the candidate's own statements): consent, agreements, declarations or "
-    "certifications that answers are true, legal / eligibility / work-authorization / sponsorship questions "
-    "beyond the profile, willingness to have a background check or drug test, criminal history, conflicts of "
-    "interest, non-compete or other agreements, relatives at the company, having worked for or applied to this "
-    "company before, referrals, and any date (education or other) the profile and resume don't give. Call "
-    "ask_for_answers with all of them: the user answers once and the app remembers.\n"
-    "  - A skill, certification, license, clearance or tool the resume doesn't show: 'No' (never claim one). "
-    "Years of experience with something: from the resume, else 0. Log these with record_guesses.\n"
-    "  - A choice that's only about the form (a list without the exact option, a format): the closest fit, "
-    "logged with record_guesses. Never invent experience, employers, degrees, skills or dates.\n"
-    "- An OPTIONAL question you can't answer from those sources: leave it blank.\n"
-    "- Voluntary self-identification (gender, race/ethnicity, veteran status, disability): the "
-    "screening answer if there is one, otherwise the 'decline to answer' option.\n\n"
+    "current page against those sources and correct anything that doesn't match.\n\n"
 )
 
 # A page shorter than this (visible text) is still loading: Workday and other
 # single-page apps show a blank root for a few seconds after every navigation.
 PAGE_READY_TEXT = 200
 PAGE_WAIT_SECONDS = 10
+# A page that shows nothing at all (no text, nothing to click) is reloaded this long apart,
+# without spending an AI request on it.
+BLANK_RELOAD_WAIT_SECONDS = 20
+PAGE_DID_NOT_LOAD = "The page didn't load"
 
 _PAGE_TEXT_JS = "() => ((document.body && document.body.innerText) || '').trim().length"
 
@@ -1382,20 +1826,35 @@ async def allow_location(browser_session, url: str) -> None:
 
 
 async def before_step(agent) -> None:
-    network = getattr(agent, "_langhire_request_gate", None)
-    if network is not None:
-        await network.wait_idle()
-    """Before each AI step: let a blank page finish loading, then tick a simple
-    "I'm not a robot" check, so the AI doesn't spend a request on either."""
+    """Before each AI step, in code (no AI request spent on any of it):
+    - wait while the user is working in the browser, then take over what they changed;
+    - let a still-loading page finish, and reload one that shows nothing at all (a page that
+      stays blank ends this attempt as "The page didn't load");
+    - tick a simple "I'm not a robot" check."""
+    agent_ref = getattr(agent, "_langhire_ref", None) or {}
+    watch = agent_ref.get("watch")
+    if watch is not None:
+        await watch.wait_for_user()
+        await absorb_user_changes(agent_ref)
     try:
-        await allow_location(agent.browser_session, await agent.browser_session.get_current_page_url())
+        url = await agent.browser_session.get_current_page_url()
+        await allow_location(agent.browser_session, url)
+        if agent_ref.get("trail") is not None:
+            agent_ref["trail"].saw(url)
     except Exception:
         pass
     await wait_for_page_content(agent)
+    if watch is not None:
+        await reload_blank_page(agent, agent_ref)
+        await watch.remember_page()
     try:
         found = await _captcha.detect(agent.browser_session)
         if found is not None and found.type == _captcha.HUMAN_CHECK:
-            await _captcha.solve_human_check(agent.browser_session)
+            if watch is not None:
+                with watch.acting():
+                    await _captcha.solve_human_check(agent.browser_session)
+            else:
+                await _captcha.solve_human_check(agent.browser_session)
     except Exception:
         pass
 
@@ -1412,7 +1871,7 @@ async def wait_for_page_content(agent) -> None:
             return
         deadline = asyncio.get_running_loop().time() + PAGE_WAIT_SECONDS
         while asyncio.get_running_loop().time() < deadline:
-            length = await page.evaluate(_PAGE_TEXT_JS)
+            length = await asyncio.wait_for(page.evaluate(_PAGE_TEXT_JS), 5)
             if int(length or 0) >= PAGE_READY_TEXT:
                 return
             await asyncio.sleep(0.5)
@@ -1420,14 +1879,56 @@ async def wait_for_page_content(agent) -> None:
         pass
 
 
-def performance_mode() -> bool:
-    """Settings -> Performance mode: optional AI work off (answers stay the same)."""
-    return bool(config.load_runtime_settings().get("performance_mode"))
+async def reload_blank_page(agent, agent_ref: dict) -> None:
+    """A page that shows nothing (no text and nothing to use, or the browser's own error page) is
+    reloaded here, up to the "Max Failures Per Job" setting; then the attempt ends as "The page
+    didn't load". Never after a possible submit: reloading that page could send it again."""
+    browser = agent.browser_session
+    state = await run_watch.page_state(browser)
+    if not run_watch.is_blank(state) or submit_attempted(agent_ref):
+        return
+    limit = _max_failures()
+    job_url = agent_ref.get("url") or ""
+    watch = agent_ref.get("watch")
+    while run_watch.is_blank(state):
+        failures = agent_ref["page_failures"] = agent_ref.get("page_failures", 0) + 1
+        where = (state or {}).get("url") or "the page"
+        if failures >= limit:
+            raise run_watch.PageStalled("the page stayed blank after every reload", str(where), final=True)
+        print(f"  🔄 The page is blank ({failures} of {limit}): reloading it")
+        try:
+            current = str((state or {}).get("url") or "")
+            cdp = await browser.get_or_create_cdp_session()
+            if current.startswith(("about:", "chrome-error:")) or not current:
+                if job_url and len((await browser.get_tabs()) or []) <= 1:
+                    await asyncio.wait_for(browser.navigate_to(job_url), 45)
+                elif not current.startswith("chrome-error:"):
+                    # An empty extra tab: close it, the application is in another one.
+                    await cdp.cdp_client.send.Target.closeTarget(
+                        params={"targetId": browser.agent_focus_target_id})
+                else:
+                    await asyncio.wait_for(cdp.cdp_client.send.Page.reload(session_id=cdp.session_id), 20)
+            else:
+                await asyncio.wait_for(cdp.cdp_client.send.Page.reload(session_id=cdp.session_id), 20)
+        except Exception:
+            pass
+        deadline = asyncio.get_running_loop().time() + BLANK_RELOAD_WAIT_SECONDS
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(1)
+            state = await run_watch.page_state(browser)
+            if not run_watch.is_blank(state):
+                break
+    if watch is not None:
+        watch.progress()
 
 
 def fit_check_on() -> bool:
-    settings = config.load_runtime_settings()
-    return settings.get("fit_check_enabled", True) is not False and not settings.get("performance_mode")
+    return config.load_runtime_settings().get("fit_check_enabled", True) is not False
+
+
+# Jobs the user chose themselves (a pasted link, one added by hand) are applied to: the fit
+# and location checks are for jobs the collector found.
+OWN_CHOICE_SOURCES = ("pasted", "manual")
 
 
 def cover_letter_boxes_on() -> bool:
@@ -1439,6 +1940,16 @@ def search_area(profile: dict) -> tuple[str, str]:
     area = profile.get("search_area") or {}
     center = (area.get("center_zip") or (profile.get("address") or {}).get("zip") or "").strip()
     return center, str(area.get("radius") or "any")
+
+
+def posting_instructions(title: str, description: str) -> str:
+    """What the posting itself says, for questions only it answers (when the job starts, where, how long)."""
+    description = " ".join((description or "").split())
+    if not description:
+        return ""
+    return ("THE POSTING (use it for questions about this job itself: the start period, e.g. 'Summer 2027' means "
+            "a June 2027 start; the location; the hours):\n"
+            f"<posting title=\"{title[:120]}\">\n{description[:1800]}\n</posting>\n\n")
 
 
 def previous_failure_instructions(text: str) -> str:
@@ -1532,8 +2043,8 @@ GIVE_UP_PUSHBACK = (
     "- An element that doesn't respond: click its visible label text, use the keyboard (Tab to it, Space "
     "or Enter), or scroll it into the middle of the page and click again.\n"
     "- A page that doesn't advance after Create Account / Sign In / Next: look for a red error message or "
-    "an empty required field; if the account already exists, use Sign In; if a verification email was "
-    "sent, get it from Gmail.\n"
+    "an empty required field; if the account already exists, use Sign In; if the password was rejected for "
+    "its format, call password_rejected; if a verification email was sent, call get_email_verification.\n"
     "- Wait a few seconds and look at the page again: it may still be loading.\n"
     "Then continue the application. If it still can't go on after that, call done with success=false again."
 )
@@ -1545,17 +2056,13 @@ def is_paused() -> bool:
 
 FORM_RULES = (
     "FORM ANSWER RULES (these override saved answers and learned tips):\n"
-    "- 'How did you hear about us' / referral source / job source: the company's own website or careers "
-    "portal; if that isn't offered or can't be selected quickly, LinkedIn. Never an employee referral. If "
-    "neither exists, pick 'Other' (type 'Company careers website' if asked).\n"
     "- Searchable list fields (Workday fields with a list icon, 'Select One' prompts): click the field, "
-    "type a keyword of the option you want (e.g. 'Website' or 'LinkedIn'), press Enter, then click the "
+    "type a keyword of the option you want (e.g. 'Website'), press Enter, then click the "
     "matching option. If the list shows categories, open the one that fits (e.g. 'Company Website', "
-    "'Job Board', 'Social Media') and pick inside it. Check the field shows your choice. After 2 failed "
-    "attempts, pick any reasonable option and move on.\n"
-    "- Salary fields that take only a number: enter one number, with no currency sign, range or words "
-    "(the minimum of the candidate's range). If the field asks for a different period than the "
-    "candidate's, convert it: hourly x 2080 = yearly, hourly x 173 = monthly, yearly / 12 = monthly.\n"
+    "'Careers Page') and pick inside it. Check the field shows your choice. After 2 failed "
+    "attempts, pick the closest reasonable option and move on.\n"
+    "- Salary fields: use the SALARY NUMBERS above exactly (the row for the period the field asks for). A "
+    "number-only field gets digits only: no currency sign, range or words.\n"
     "- Address fields: copy them from the profile's Address line. Address Line 1 is the street address "
     "(never the town or city, even if the resume shows only a town); City, State and ZIP go in their own "
     "fields; leave Address Line 2 empty unless the profile has one.\n"
@@ -1563,7 +2070,9 @@ FORM_RULES = (
     "isn't one of the options, use the "
     "profile's 'Field of study if yours isn't listed'; if there is none, the closest broad field. Log it with "
     "record_guesses. Never leave it blank or 'No Response'.\n"
-    "- Desired / available start date: follow the profile's 'Start date' line exactly.\n"
+    "- Desired / available start date: what the posting says about when the job starts; when it says "
+    "nothing, the profile's 'Start date' line. A start date inside a work or education entry is that "
+    "entry's own date, from the resume.\n"
     "- Type phone numbers, emails and ZIP codes exactly as the profile shows them, and clear the field first "
     "if it already holds something else.\n"
     "- AT THE REVIEW PAGE: if something is wrong, use that section's Edit link (or Back), fix it, return and "
@@ -1571,13 +2080,15 @@ FORM_RULES = (
     "closest one (logged with record_guesses), a resume pre-fill detail gets corrected or left if harmless. "
     "Only stop when the application truly can't be finished (a required document you don't have, a page that "
     "won't load).\n"
+    "- Consent boxes: tick the REQUIRED ones (certifications that the application is true, privacy policy, "
+    "terms, background-check consent). Leave OPTIONAL marketing emails, texts and newsletters unticked.\n"
     "- A required upload you don't have (transcript, writing sample, portfolio, ...) and no matching file among "
     "your available files: call done with success=false and text starting with 'NEEDS YOU: missing document: "
     "<what>'.\n"
-    "- The user may be watching and fixing fields by hand. Never change a field that already holds a "
-    "valid, sensible value just because you would have entered something else. Only change fields that "
-    "are empty, show a validation error, or clearly contradict the profile or resume. If the page moved "
-    "on without you, continue from where it is now.\n\n"
+    "- The user may step in and fix fields by hand at any time. A field the user set is theirs: never type "
+    "over it, re-select it or correct it. Never change a field that already holds a valid, sensible value "
+    "just because you would have entered something else. If the page moved on without you, continue from "
+    "where it is now; never go back to redo it.\n\n"
 )
 
 
@@ -1651,8 +2162,9 @@ def resume_instructions(text: str) -> str:
         "- Add EVERY entry under the job sections (one Work Experience entry each, all of them), not just "
         "the first one.\n"
         "- Education: always fill it in (school, degree, field of study, dates) from the profile and resume; "
-        "never delete the education section. Never estimate a date: a required date the profile and resume "
-        "don't give goes to ask_for_answers.\n"
+        "never delete the education section. Dates, titles, employers and schools come from the resume and "
+        "profile exactly as written. Never estimate a date: only a REQUIRED date they don't give goes to "
+        "ask_for_answers.\n"
         "- Only real positions (jobs, internships, research or teaching roles) go under Work Experience. "
         "Projects, coursework and clubs are NOT jobs: leave them out of Work Experience "
         "(use a Projects section if the form has one).\n"
@@ -1666,25 +2178,31 @@ def resume_instructions(text: str) -> str:
 
 
 _ERROR_MAP = [
-    ("'NoneType' object is not subscriptable", "Browser agent encountered an unexpected page state. The page may have changed or timed out."),
-    ("'NoneType' object has no attribute", "Browser agent lost track of a page element. The site may have redirected or loaded slowly."),
-    ("net::ERR_", "Network error — the page failed to load. Check your internet connection."),
-    ("Timeout", "Operation timed out. The page took too long to respond."),
-    ("ERR_CONNECTION_REFUSED", "Could not connect to the website. It may be temporarily down."),
-    ("security token", "AWS credentials expired. They will be refreshed automatically on retry."),
-    ("rate limit", "API rate limit reached. Wait a moment and try again."),
-    ("context was destroyed", "Browser page closed unexpectedly during the application."),
-    ("Target page, context or browser has been closed", "Browser closed unexpectedly during the application."),
+    ("'NoneType' object is not subscriptable", "The page changed while the app was reading it. Apply again; it usually works the second time."),
+    ("'NoneType' object has no attribute", "The app lost track of something on the page (the site redirected or loaded slowly). Apply again."),
+    ("ERR_INTERNET_DISCONNECTED", "Your internet connection dropped during this application. Check it, then apply again."),
+    ("ERR_NAME_NOT_RESOLVED", "This site's address couldn't be found. Check the link (and your internet connection), then apply again."),
+    ("ERR_CONNECTION_REFUSED", "The website refused the connection; it may be down. Apply again later."),
+    ("net::ERR_", "The page couldn't be loaded. Check your internet connection, then apply again."),
+    ("Timeout", "The site took too long to respond. Apply again later."),
+    ("security token", "The AI provider's sign-in expired. It is refreshed on the next try; apply again."),
+    ("rate limit", "The AI provider's limit was reached. Wait a little, then apply again."),
+    ("context was destroyed", "The page closed while the app was working on it. Apply again."),
+    ("Target page, context or browser has been closed", "The browser closed during this application. Apply again."),
+    ("Client is stopping", "The browser closed during this application. Apply again."),
+    ("maximum of", "The application took more steps than allowed without finishing. Apply again, or finish it yourself from the link."),
 ]
 
 
 def _friendly_error(raw: str) -> str:
-    """Translate raw Python/browser errors into user-readable messages."""
+    """Say what happened in plain words (never a Python or browser error as it was raised)."""
+    raw = raw or ""
     for pattern, friendly in _ERROR_MAP:
         if pattern.lower() in raw.lower():
             return friendly
-    if len(raw) > 200 and ("Traceback" in raw or "Error:" in raw):
-        return "Application failed due to an unexpected error. Check the Logs page for details."
+    if "Traceback" in raw or re.search(r"\b\w+(Error|Exception)\b", raw) or re.search(r"\bargument must be\b|object has no|not subscriptable", raw):
+        return ("Something went wrong inside the app during this application, not on your side. Apply again; if it "
+                "keeps happening, send the job's log from its View log button (Settings → App & browser → Send feedback).")
     return raw
 
 
@@ -1729,6 +2247,7 @@ def _unsolved_reason(e) -> str:
 
 
 INTERRUPTED_NOTE = "Interrupted: the run was stopped during this application. It will be tried again on the next run."
+PENDING_QUESTIONS_NOTE = "Your answer is needed"
 
 
 async def _outcome_unknown(url: str, title: str, company: str, worker_id: int, why: str) -> str:
@@ -1758,8 +2277,9 @@ async def save_new_qa(new_questions: dict, source_domain: str = ""):
 async def check_fit(posting, profile: dict, title: str, company: str) -> str | None:
     """Why to skip this job ("<title>\n<reason>"), or None to apply.
 
-    The location check is code (free; on in every mode). The AI fit check is
-    one small request, off in performance mode or when turned off in Settings.
+    The location check is code (free). The AI fit check is one small request,
+    off when turned off in Settings. Neither runs for a job the user chose
+    themselves (see OWN_CHOICE_SOURCES; the caller decides).
     """
     center, radius = search_area(profile)
     location_note = ""
@@ -1778,22 +2298,40 @@ async def check_fit(posting, profile: dict, title: str, company: str) -> str | N
     return None
 
 
+# One attempt at a job may not run longer than this, whatever happens in it.
+ATTEMPT_LIMIT_SECONDS = 45 * 60
+# Closing a job's browser may not hold up the run: after this it is ended the hard way.
+BROWSER_CLOSE_SECONDS = 15
+
+
+def page_did_not_load_note(stall, tries: int) -> str:
+    """The job card's text when a page never loaded or stopped responding (title line, then what to do)."""
+    host = _host_of(getattr(stall, "url", "") or "")
+    where = f" on {host}" if host else ""
+    again = f", {tries} times in a row" if tries > 1 else ""
+    return (f"{PAGE_DID_NOT_LOAD}\n"
+            f"The application page{where} didn't load or stopped responding ({stall.reason}{again}), so the app "
+            "moved on to the next job. Nothing was submitted. Apply again later; if it keeps happening, open the "
+            "link yourself to see whether the site works.")
+
+
 async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[str], easy_apply: bool, worker_id: int, resume_path_override: str | None = None) -> str:
     """Apply to a single job. Returns final status."""
     url = job["url"]
     title = job.get("title", "Unknown")
     company = job.get("company", "Unknown")
+    current_job_url.set(url)
     print(f"  🚀 [W{worker_id}] Starting: {title} at {company}")
 
     if not config.validate_job_url(url):
-        await save_job_status(url, "blocked", "Invalid or internal URL")
+        await save_job_status(url, "blocked", "This link can't be opened: it isn't a public web address.")
         print(f"  🚫 [W{worker_id}] Blocked (invalid URL): {title} at {company}")
         return "blocked"
 
     settings_resume, settings_sensitive, blocked_domains = current_settings()
 
     if is_blocked(url, blocked_domains):
-        await save_job_status(url, "blocked", "Blocked domain")
+        await save_job_status(url, "blocked", "This site is on your blocked list (Settings → Applications).")
         print(f"  🚫 [W{worker_id}] Blocked: {title} at {company}")
         return "blocked"
 
@@ -1804,17 +2342,58 @@ async def apply_to_job(job: dict, profile: dict, qa: dict, applied_labels: list[
     # Everything after the claim, under one handler: a stop or a failure anywhere (the
     # fit check, the posting fetch, setting up the model) never leaves the job "in progress".
     claimed = {"settled": False, "agent_ref": None}
+    loop = asyncio.get_running_loop()
+    # Shown in the run panel from the first moment, so Skip works in every phase of the job.
+    _current[worker_id] = {"url": url, "title": title, "company": company, "step": 0, "max_steps": 0,
+                           "started_at": datetime.now(timezone.utc).isoformat()}
+    page_failures = 0
     try:
-        return await _apply_claimed(job, profile, qa, applied_labels, easy_apply, worker_id, resume_path_override,
-                                    url, title, company, settings_resume, settings_sensitive, blocked_domains, claimed)
-    except asyncio.CancelledError:
-        if not claimed["settled"]:
-            await _release_claim(url, title, company, worker_id, claimed.get("agent_ref"), "the run was stopped")
-        raise
+        while True:
+            attempt = asyncio.ensure_future(_apply_claimed(
+                job, profile, qa, applied_labels, easy_apply, worker_id, resume_path_override,
+                url, title, company, settings_resume, settings_sensitive, blocked_domains, claimed))
+            _attempts[url] = (attempt, loop)
+            try:
+                return await attempt
+            except run_watch.PageStalled as stall:
+                page_failures += 1
+                limit = _max_failures()
+                stopping = url in _skip_requested
+                if stall.final or page_failures >= limit or stopping:
+                    await save_job_status(url, "failed", page_did_not_load_note(stall, page_failures), agent_words=True)
+                    print(f"  ❌ [W{worker_id}] {PAGE_DID_NOT_LOAD}: {title} at {company} ({stall.reason})")
+                    claimed["settled"] = True
+                    return "failed"
+                print(f"  🔄 [W{worker_id}] {stall.reason.capitalize()}: starting {title} again "
+                      f"(try {page_failures + 1} of {limit})")
+                job["previous_failure"] = (f"The page {_host_of(stall.url) or ''} didn't respond ({stall.reason}). "
+                                           "If it happens at the same point again, try another way there.")
+                await asyncio.to_thread(update_job, url, error=(
+                    f"Retrying: {stall.reason} (try {page_failures + 1} of {limit})."))
+            except asyncio.CancelledError:
+                if url in _skip_requested and not asyncio.current_task().cancelling():
+                    # Skip: only this job's attempt was cancelled; the run goes on with the next job.
+                    _skip_requested.discard(url)
+                    if not claimed["settled"]:
+                        await _release_claim(url, title, company, worker_id, claimed.get("agent_ref"),
+                                             "you skipped it", note=SKIPPED_BY_YOU_NOTE)
+                    print(f"  ⏭️  [W{worker_id}] Skipped by you: {title} at {company}")
+                    return "skipped"
+                if not attempt.done():
+                    # The stop reached the attempt too: let it record its state and close its browser.
+                    await asyncio.wait({attempt}, timeout=BROWSER_CLOSE_SECONDS + 20)
+                if not claimed["settled"]:
+                    await _release_claim(url, title, company, worker_id, claimed.get("agent_ref"), "the run was stopped")
+                raise
+    finally:
+        _attempts.pop(url, None)
+        _current.pop(worker_id, None)
+        _skip_requested.discard(url)    # a skip never outlives the application it was for
 
 
-async def _release_claim(url: str, title: str, company: str, worker_id: int, agent_ref: dict | None, why: str) -> None:
-    """A claimed job whose run ended without recording a state: back to pending, or outcome unknown
+async def _release_claim(url: str, title: str, company: str, worker_id: int, agent_ref: dict | None, why: str,
+                         note: str | None = None) -> None:
+    """A claimed job whose run ended without recording a state: back to ready, or outcome unknown
     when a submit was attempted (recorded on the job, or seen by this run's guard)."""
     persisted = (await asyncio.to_thread(read_jobs)).get(url) or {}
     if persisted.get("status") not in (None, "in_progress"):
@@ -1825,18 +2404,99 @@ async def _release_claim(url: str, title: str, company: str, worker_id: int, age
     if submit_attempted(agent_ref or {}) or persisted.get("submit_attempted_at"):
         await _outcome_unknown(url, title, company, worker_id, why + " right after")
     else:
-        await save_job_status(url, "pending", INTERRUPTED_NOTE, agent_words=True)
+        await save_job_status(url, "pending", note or INTERRUPTED_NOTE, agent_words=True)
+
+
+def _kill_profile_browsers(profile_dir: str) -> None:
+    """End the browser processes still running on one automation profile (a close that hung)."""
+    try:
+        import os
+        import psutil
+        wanted = os.path.normcase(os.path.realpath(profile_dir))
+        for process in psutil.process_iter(["cmdline"]):
+            try:
+                for arg in process.info.get("cmdline") or []:
+                    if arg.startswith("--user-data-dir=") and os.path.normcase(
+                            os.path.realpath(arg.split("=", 1)[1].strip('"'))) == wanted:
+                        process.kill()
+                        break
+            except (psutil.Error, OSError):
+                continue
+    except Exception:
+        pass
+
+
+async def _close_browser(browser, worker_id: int) -> None:
+    """Close this job's browser, in bounded time whatever state it is in."""
+    try:
+        # kill(), not close() (browser-use's stop()): it closes the browser cleanly first, so
+        # what the site stored in the run's last moments is written to the profile.
+        await asyncio.wait_for(browser.kill(), BROWSER_CLOSE_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as close_err:
+        print(f"    ⚠️  [W{worker_id}] The browser didn't close by itself ({type(close_err).__name__}): ending it")
+        profile = getattr(getattr(browser, "browser_profile", None), "user_data_dir", None)
+        if profile:
+            await asyncio.to_thread(_kill_profile_browsers, str(profile))
+
+
+def _hold_while_thinking(llm, watch) -> None:
+    """Time spent waiting for the AI isn't the page's fault: it doesn't count towards a stalled page."""
+    try:
+        original = llm.ainvoke
+
+        async def ainvoke(*args, **kwargs):
+            with watch.hold():
+                return await original(*args, **kwargs)
+
+        object.__setattr__(llm, "ainvoke", ainvoke)
+    except Exception:
+        pass
+
+
+def accounts_instructions(has_password: bool) -> str:
+    if not has_password:
+        return ("\n\nACCOUNTS: no job-site password is saved (Settings → Accounts & email). Apply as a guest where "
+                "the site allows it. If the application can't go on without an account, call done with success=false "
+                "and 'NEEDS YOU: save a password for job sites in Settings → Accounts & email, then apply again'.\n")
+    return (
+        "\n\nACCOUNTS: when this job leads to a hiring site that wants an account (the employer's own pages, Workday, "
+        "SuccessFactors, iCIMS, Taleo, Greenhouse or any other), use one. It is part of applying.\n"
+        "- If the site lets you apply as a guest, do that instead.\n"
+        "- SIGN IN with <secret>account_email</secret> and <secret>password</secret> when the page offers it. If the "
+        "site answers that the email or password is wrong, or that there is no such account, there is most likely NO "
+        "ACCOUNT YET: use the page's 'Create account' / 'Register' / 'Sign up' / 'New user' link and CREATE one with "
+        "the same two (type <secret>password</secret> again in the confirm field). The button that finishes it "
+        "('Create Account', 'Register', 'Submit Registration') creates the account; it does not send the "
+        "application. If Create Account says the email is already registered, sign in instead.\n"
+        "- If the site REJECTS the password for its rules (too short, needs a symbol, ...): call password_rejected "
+        "with the rules the page shows, then type <secret>password</secret> again. Never invent, shorten or change a "
+        "password yourself.\n"
+        "- Never use 'Forgot password' and never reset a password. Only when signing in is refused AND creating an "
+        "account says the email is already registered (an account exists there with another password): call done "
+        "with success=false and 'NEEDS YOU: sign-in failed on <site>'. Try signing in at most twice.\n"
+        "- The app types account details only on the sites this job leads to (never an email site, a job board or "
+        "an address you opened yourself). Never write <secret> tags or any password in done, help or review text.\n"
+    )
+
+
+EMAIL_VERIFICATION_INSTRUCTIONS = (
+    "\n\nEMAIL VERIFICATION: if a site emails a code or a verification link, call get_email_verification (kind "
+    "'code' or 'link'). The app reads it from the user's email and hands you the code or opens the link. Never open "
+    "Gmail or another email site yourself (this browser can't reach it)."
+)
 
 
 async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: list[str], easy_apply: bool,
                          worker_id: int, resume_path_override: str | None, url: str, title: str, company: str,
                          settings_resume: str, settings_sensitive: dict, blocked_domains: list, claimed: dict) -> str:
-    """The application itself, once the job is claimed (see apply_to_job)."""
+    """One attempt at the application, once the job is claimed (see apply_to_job)."""
     blocked_by = _captcha_blocked.get(_site(url))
     if blocked_by is not None:
         return await _captcha_needs_you(url, title, company, worker_id, (
-            f"Not opened: earlier in this run the same site ({_site(url)}) showed a CAPTCHA the solver "
-            f"couldn't pass, on \"{blocked_by}\"."), "same site's CAPTCHA")
+            f"Not opened: earlier in this run the same site ({_site(url)}) showed a CAPTCHA that couldn't be "
+            f"passed, on \"{blocked_by}\"."), "same site's CAPTCHA")
 
     agent_sensitive_data = build_agent_secrets(profile, settings_sensitive)
     if "email" not in agent_sensitive_data:
@@ -1858,11 +2518,14 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
     if posting is not None:
         if posting.title and job_page.is_placeholder(title):
             title = job["title"] = posting.title
-        if posting.company and (company or "").strip() in ("", "Unknown"):
+        if posting.company and job_page.is_placeholder_company(company):
             company = job["company"] = posting.company
+    if worker_id in _current:
+        _current[worker_id].update(title=title, company=company)
 
-    # A retry of the same job in this run doesn't ask again.
-    if not (saved.get("fit_override") or job.get("fit_override") or job.get("_fit_checked")):
+    # A job the user chose themselves is applied to. For collected jobs: the fit check, once per run.
+    own_choice = (saved.get("source") or job.get("source")) in OWN_CHOICE_SOURCES
+    if not (own_choice or saved.get("fit_override") or job.get("fit_override") or job.get("_fit_checked")):
         skip = await check_fit(posting, profile, title, company)
         job["_fit_checked"] = True
         if skip is not None:
@@ -1874,12 +2537,21 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
     refresh_credentials()
 
     llm = config.get_llm()
+    settings = config.load_runtime_settings()
     # Use the shared browser profile in OS data dir (same as login endpoint)
     browser = BrowserSession(
         chromium_sandbox=(sys.platform != "linux"),
         **config.build_browser_kwargs(worker=worker_id, purpose="application"),
     )
     # (started inside the try below, whose finally always closes it)
+    stealth_scripts: tuple[str, ...] = ()
+    if settings.get("stealth_enabled"):
+        try:
+            from core.stealth import _STEALTH_JS
+        except ImportError:
+            from backend.core.stealth import _STEALTH_JS
+        stealth_scripts = (_STEALTH_JS,)     # every tab the application opens gets it, not only the first
+    watch = run_watch.RunWatch(browser, init_scripts=stealth_scripts)
     mem_store = get_memory_store()
     # Count memories injected for metrics tracking
     domain = mem_store.extract_domain(url)
@@ -1892,7 +2564,6 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
     memory = build_memory_context(
         {**profile, "email": agent_sensitive_data["email"]}, qa,
         same_company_applications(applied_labels, company), job_url=url,
-        learnings=not performance_mode(),
     )
     run_started_at = datetime.now(timezone.utc)
 
@@ -1914,7 +2585,6 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
     except Exception as e:  # never silently: say the base resume is used and why
         print(f"  ⚠️  [W{worker_id}] Couldn't check for a tailored resume ({e}): applying with your current resume")
 
-
     # Jobs no longer come only from LinkedIn: pasted links, Handshake and Intern
     # Insider all land here. Telling the agent a greenhouse.io URL is "on
     # LinkedIn" sends it to the wrong site, so the wording follows the URL.
@@ -1923,95 +2593,50 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
     is_linkedin = _host.endswith("linkedin.com")
 
     # No up-front LinkedIn/Gmail login checks: they cost 2-4 LLM steps on every
-    # job (on two of the heaviest pages on the web), and a signed-out Gmail made
-    # the agent re-check every 15 s for 5 minutes, about 20 requests before the
-    # job was even opened. Sign-in pages are now handled only when one actually
-    # appears, with a short, bounded wait. The run opens the job URL itself
-    # (initial_actions below), so the task starts on the posting.
-    signin_wait = (
-        "wait for the user to sign in in this browser window: use the wait action "
-        "(30 seconds) at most 4 times, checking the page after each wait. If it is still "
-        "signed out, call done with success=false and"
-    )
+    # job. Sign-in pages are handled only when one actually appears, with a
+    # short, bounded wait. The run opens the job URL itself (initial_actions
+    # below), so the task starts on the posting.
     linkedin_signin_note = (
-        f"LINKEDIN SIGN-IN: If LinkedIn shows a sign-in or join page instead of the job, "
-        f"{signin_wait} the text 'LinkedIn sign-in required: sign in to LinkedIn in Settings → Accounts, "
-        f"then retry this job.'\n\n"
+        "LINKEDIN SIGN-IN: If LinkedIn shows a sign-in or join page instead of the job, wait for the user to sign "
+        "in in this browser window: use the wait action (30 seconds) at most 4 times, checking the page after each "
+        "wait. If it is still signed out, call done with success=false and the text 'NEEDS YOU: LinkedIn sign-in "
+        "required: sign in to LinkedIn in Settings → Accounts & email, then apply again.'\n\n"
     ) if is_linkedin else ""
-
-    otp_instructions = (
-        "\n\nEMAIL VERIFICATION: if a site emails you a code or a verification link, call "
-        "get_email_verification (kind 'code' or 'link'). The app reads it from the user's email and checks it came "
-        "from this site. Never open Gmail or another email site yourself (the browser can't reach it). If no code "
-        "or link arrives, call done with success=false and 'NEEDS YOU: email verification'."
+    accounts_note = accounts_instructions(bool(agent_sensitive_data.get("password", "").strip()))
+    email_usage = (
+        "EMAIL USAGE:\n"
+        "- Application form fields (contact email, email address, ...): <secret>email</secret>\n"
+        "- Signing in or creating an account on a hiring site: <secret>account_email</secret> and "
+        "<secret>password</secret>\n"
     )
-
-    has_previous_password = bool(agent_sensitive_data.get("previous_password", "").strip())
-    configured_password_note = (
-        "\n\nACCOUNTS on employer application sites (the app refuses credentials anywhere else, and on any page "
-        "that isn't https):\n"
-        "- CREATE an account: <secret>account_email</secret> and <secret>password</secret>. The app makes a strong "
-        "password for this site and saves it; type it exactly. Never invent, change, extend or vary a password.\n"
-        "- SIGN IN to an account that exists: <secret>account_email</secret> and <secret>password</secret>."
-        + (" If that is rejected, try <secret>previous_password</secret> once (accounts made before)." if has_previous_password else "")
-        + "\n- Never use 'Forgot password', never reset or change a password. If signing in fails: call done with "
-        "success=false and 'NEEDS YOU: sign-in failed on <site>: reset that password yourself, then retry'. If the "
-        "site rejects the password's format: 'NEEDS YOU: password rules on <site>'.\n"
-        "- If Create Account says the email is already registered, sign in instead (as above).\n"
-        "- Never write <secret> tags (or any password) in done, help or review text.\n"
-    )
-
-    if easy_apply:
-        apply_instructions = (
-            f"You are on a LinkedIn job posting: {url}. Click Easy Apply and complete the application. "
-            f"Use resume at {resume_path}. Auto-fill all fields from candidate profile.\n\n"
-            f"{linkedin_signin_note}"
-            f"EMAIL USAGE:\n"
-            f"- For APPLICATION FORM fields (contact email, email address, etc.): use <secret>email</secret>\n"
-            f"- For LOGGING IN or CREATING ACCOUNTS: use <secret>account_email</secret> and <secret>password</secret>\n"
-            f"{configured_password_note}"
-            f"{otp_instructions}"
-        )
+    if easy_apply and is_linkedin:
+        opening = (f"You are on a LinkedIn job posting: {url}. Click Easy Apply and complete the application. "
+                   "If it only offers Apply, follow it through to the employer's own application form. ")
+    elif is_linkedin:
+        opening = (f"You are on a LinkedIn job posting: {url}. Click Apply and follow through to the "
+                   "external application page. ")
     else:
-        # Applying as a guest is preferred when a site offers it (no account to keep).
-        password_note = "- If the site lets you apply as a guest, do that instead of creating an account.\n"
-
-        # A LinkedIn posting needs the extra hop through its Apply button; a
-        # pasted link or a Handshake/Intern Insider posting is already on (or one
-        # click from) the employer's own form.
-        opening = (
-            f"You are on a LinkedIn job posting: {url}. Click Apply and follow through to the "
-            f"external application page. "
-            if is_linkedin else
-            f"You are on a job posting: {url}. It is NOT on LinkedIn, so do "
-            f"not go to LinkedIn. Find the application form on this site, following "
-            f"an 'Apply' button through to the employer's own form if needed. "
-        )
-        apply_instructions = (
-            f"{opening}"
-            f"Use resume at {resume_path}. Auto-fill all fields from candidate profile.\n\n"
-            f"{linkedin_signin_note}"
-            f"NAVIGATING EXTERNAL SITES:\n"
-            f"- The LinkedIn 'Apply' button often opens a company careers page, NOT the application form directly.\n"
-            f"- You MUST explore the landing page: look for 'Apply Now', 'Submit Application', or similar buttons.\n"
-            f"- Scroll down — the apply button is often below the job description.\n"
-            f"- If you see a job listing page, click on the specific job title first, then look for the apply button.\n"
-            f"- Some sites require you to click through 2-3 pages before reaching the actual form.\n"
-            f"- If the page looks blank or is loading, wait 3-5 seconds and try scrolling.\n"
-            f"- NEVER give up just because the form isn't immediately visible — always explore the page first.\n\n"
-            f"EMAIL USAGE:\n"
-            f"- For APPLICATION FORM fields (contact email, email address, etc.): use <secret>email</secret>\n"
-            f"- For LOGGING IN or CREATING ACCOUNTS on external ATS sites: use <secret>account_email</secret> and <secret>password</secret>\n"
-            f"{configured_password_note}"
-            f"{password_note}"
-            f"SAFE LINK TARGETING — only interact with links and buttons a human could actually see "
-            f"in the job listing or the application form itself. Ignore anything hidden, zero-sized, "
-            f"positioned off-screen, or marked aria-hidden: those are honeypot traps used to detect bots.\n\n"
-            f"If it's a video funnel or recruitment pitch, report failure and stop. "
-            f"If the external form is broken after 3 attempts, report failure and stop.\n\n"
-            f"BLOCKED SITES — if redirected to any of these, immediately call done with success=false: {', '.join(blocked_domains)}"
-            f"{otp_instructions}"
-        )
+        opening = (f"You are on a job posting: {url}. It is NOT on LinkedIn, so do not go to LinkedIn. Find the "
+                   "application form on this site, following an 'Apply' button through to the employer's own form "
+                   "(it may open in a new tab, or on another site such as Workday or SuccessFactors). ")
+    apply_instructions = (
+        f"{opening}"
+        f"Use resume at {resume_path}. Fill every field from the candidate profile and resume, then "
+        + ("stop before the final Submit (Trial run).\n\n" if is_trial_run() else "submit the application.\n\n")
+        + f"{linkedin_signin_note}"
+        "FINDING THE FORM:\n"
+        "- An 'Apply' button often opens a careers page, not the form itself: look for 'Apply Now', 'Start "
+        "application' or similar, scrolling down if needed. Some sites take 2-3 pages to reach the form.\n"
+        "- If the page looks blank or is still loading, wait a few seconds and look again.\n"
+        "- Only use links and buttons a person could see. Ignore anything hidden, zero-sized, off-screen or "
+        "aria-hidden: those are traps for bots.\n"
+        "- A video funnel or recruitment pitch instead of a form: report failure and stop.\n\n"
+        f"{email_usage}"
+        f"{accounts_note}"
+        + (f"\nBLOCKED SITES: if you are sent to any of these, call done with success=false at once: "
+           f"{', '.join(blocked_domains)}" if blocked_domains else "")
+        + EMAIL_VERIFICATION_INSTRUCTIONS
+    )
 
     _agent_log_start("apply", f"{title} at {company}")
 
@@ -2019,14 +2644,66 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
     MAX_STEPS = 150 if is_trial_run() else (100 if job_page.is_workday(url) else 70)
     _step_count = {"n": 0}
     # The secrets the agent's tools may type (see secrets_only_when_typing), and the
-    # values masked in everything sent to the model (site passwords are added as made).
+    # values masked in everything sent to the model (a site's own version of the password is added).
     secret_masks = {k: v for k, v in agent_sensitive_data.items()}
     _agent_ref = {"agent": None, "max_steps": MAX_STEPS, "secrets": dict(agent_sensitive_data),
-                  "secret_masks": secret_masks, "started_at": run_started_at}
+                  "secret_masks": secret_masks, "started_at": run_started_at, "url": url,
+                  "watch": watch, "trail": site_access.SiteTrail(url), "captcha_failure": None,
+                  "page_failures": 0, "live_trial": is_trial_run()}
     claimed["agent_ref"] = _agent_ref
-    # Set when a blocking CAPTCHA cannot be solved, so the run can be ended and
-    # reported accurately after agent.run() returns.
-    _captcha_failure = {"error": None}
+    if worker_id in _current:
+        _current[worker_id]["max_steps"] = MAX_STEPS
+
+    async def deal_with_captcha(session, when: str) -> None:
+        """Pass a CAPTCHA: the solver when a key is saved, else (or after it failed) the user, for at
+        most USER_WAIT_SECONDS. `when` is "step" (met on a page) or "advance" (the form is being sent
+        on). Raises CaptchaUnsolved / HumanCheckNeeded when nobody passed it."""
+        challenge = await _captcha.detect(session)
+        if challenge is None or not challenge.type or challenge.type == _captcha.HCAPTCHA_INVISIBLE:
+            return
+        blocking = challenge.type in _captcha.BLOCKING_TYPES
+
+        async def passed() -> bool:
+            now = await _captcha.detect(session)
+            if now is None or now.type not in _captcha.BLOCKING_TYPES | {_captcha.HUMAN_CHECK}:
+                return True
+            return now.type != _captcha.HUMAN_CHECK and await _captcha.answered(session)
+
+        if challenge.type == _captcha.HUMAN_CHECK:
+            with watch.acting():
+                ticked = await _captcha.solve_human_check(session)
+            if ticked:
+                return
+            reply = await wait_for_user_reply(
+                _agent_ref, job, "captcha", "This site asks you to confirm you're a real person, and ticking its box "
+                "automatically didn't get past it. Complete the check in the browser window.", until=passed)
+            if reply and not reply.get("give_up"):
+                return
+            raise _captcha.HumanCheckNeeded(challenge.page_url)
+        if blocking and await _captcha.answered(session):
+            return
+        if blocking and when == "step":
+            # On a form the answer is fetched when the form is sent on: it only lasts about two
+            # minutes, and filling the form takes longer.
+            try:
+                if len((await form_check.scan(session)).get("fields", [])) >= form_check.MIN_FIELDS:
+                    return
+            except Exception:
+                pass
+        try:
+            with watch.hold():
+                await _captcha.handle(session, settings)
+            return
+        except _captcha.CaptchaUnsolved as unsolved:
+            kind = "hCaptcha" if "hcaptcha" in unsolved.challenge_type else unsolved.challenge_type.replace("_", " ")
+            reply = await wait_for_user_reply(
+                _agent_ref, job, "captcha",
+                f"Solve the {kind} check in the browser window ({unsolved.reason}).", until=passed)
+            if reply and not reply.get("give_up"):
+                return
+            raise unsolved
+
+    _agent_ref["captcha"] = deal_with_captcha
 
     async def _on_step_with_limit(browser_state, agent_output, step_num):
         _agent_on_step(browser_state, agent_output, step_num)
@@ -2037,27 +2714,16 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
             raise Exception(f"Reached maximum of {MAX_STEPS} steps — stopping to avoid wasting tokens")
 
         # CAPTCHA handling runs as code on every step, not as prompt text.
-        # captcha.handle() solves when the solver is on and raises
-        # CaptchaUnsolved when a blocking challenge cannot be dealt with.
         #
-        # We must NOT let that exception escape: browser-use catches everything
+        # An unsolved one must NOT escape as an exception: browser-use catches everything
         # raised from a step callback in Agent.step() and routes it to
-        # _handle_step_error(), which only counts a failure and carries on. The
-        # run would then burn up to max_failures more LLM steps and finish with
-        # a generic error. Calling agent.stop() ends the run promptly instead,
-        # and the stored error gives an accurate reason afterwards.
+        # _handle_step_error(), which only counts a failure and carries on. Calling
+        # agent.stop() ends the run promptly instead, and the stored error gives an
+        # accurate reason afterwards.
         try:
-            if review and getattr(network, "trial_blocked_operation", ""):
-                if _agent_ref["agent"]:
-                    _agent_ref["agent"].stop()
-                return
-            await _captcha.handle(browser, config.load_runtime_settings())
-        except _captcha.HumanCheckNeeded as e:
-            _captcha_failure["error"] = e
-            if _agent_ref["agent"]:
-                _agent_ref["agent"].stop()
-        except _captcha.CaptchaUnsolved as e:
-            _captcha_failure["error"] = e
+            await deal_with_captcha(browser, "step")
+        except (_captcha.HumanCheckNeeded, _captcha.CaptchaUnsolved) as e:
+            _agent_ref["captcha_failure"] = e
             if _agent_ref["agent"]:
                 _agent_ref["agent"].stop()
         except Exception:
@@ -2080,20 +2746,19 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
     _agent_ref["profile"] = profile
     _agent_ref["posting_description"] = getattr(posting, "description", "") if posting is not None else ""
     resume = _agent_ref["resume_text"] = resume_text(resume_path)
-    network = request_gate.RequestGate(browser, _run_options["mode"], job, owner=f"application:{worker_id}",
-        redact=config.redact_secrets, trusted_site=lambda page: bool(employer_site(page, url, company)))
-    _agent_ref["request_gate"] = network
     tools = build_tools(job, job_domain, review, _agent_ref, worker_id)
     actions = tools.registry.registry.actions
 
-    authorized_files = [resume_path] + [d["path"] for d in documents] + (
-        [str(_agent_ref["cover_letter_pdf"])] if "write_cover_letter" in actions else [])
-    network.allowed_files = list(authorized_files)
+    authorized_files = [resume_path] + [d["path"] for d in documents] + [str(_agent_ref["cover_letter_pdf"])]
+
     async def on_done_with_evidence(history):
         _agent_on_done(history)
         # The SDK closes its browser before Agent.run returns. Observe any
         # receipt text here, while it is still open; it remains unverified.
         _agent_ref["receipt_text_seen"] = await page_confirms_submission(browser)
+
+    posting_text = (_agent_ref["posting_description"] or "").strip()
+    _hold_while_thinking(llm, watch)
     agent = Agent(
         task=(
             f"{apply_instructions}\n\n"
@@ -2101,8 +2766,10 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
             f"{documents_instructions(documents)}"
             f"{previous_failure_instructions(job.get('previous_failure', ''))}"
             f"{NAME_JOB_RULE if 'set_job_details' in actions else ''}"
-            f"{COVER_LETTER_RULE if 'write_cover_letter' in actions else ''}"
+            f"{COVER_LETTER_RULE.format(boxes='' if not cover_letter_boxes_on() else ' unless it is a text box (fill those)')}"
             f"{resume_instructions(resume)}"
+            f"{posting_instructions(title, posting_text)}"
+            f"{default_answers.prompt_block(settings, profile)}\n\n"
             f"{FORM_RULES}"
             f"{PAGE_CHECK_RULES}"
             f"{REVIEW_RULES if review else ''}"
@@ -2112,10 +2779,11 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
             f"- Do NOT repeat the same failing action more than 3 times — switch strategies.\n"
             f"- If you've been stuck on the same form field for more than 5 steps, switch to a completely different approach (or skip the field if it's optional).\n"
             f"- If the posting itself is gone (page not found, job closed, no longer accepting applications), call done with success=false and text starting with '{POSTING_CLOSED_PREFIX}'.\n"
+            f"- Something only the user can provide or do (a document you don't have, a sign-in that is refused): call done with success=false and text starting with '{NEEDS_YOU_PREFIX}', saying exactly what is needed.\n"
             f"- You have a maximum of {MAX_STEPS} steps total. Budget your steps wisely.\n"
             f"- When you report a failure (done with success=false), start the text with a short title of at most "
-            f"8 words on its own line (e.g. 'Stopped at Review: Field of Study'), then the explanation. Never "
-            f"mention @@ tracking markers in it.\n\n"
+            f"8 words on its own line (e.g. 'Stopped at Review: Field of Study'), then say in plain words what "
+            f"happened and what the user should do, if anything. Never mention @@ tracking markers in it.\n\n"
             f"TRACKING: Include in memory field after submission:\n"
             f'@@JOB_APPLIED: {{"title": "{title}", "company": "{company}", "location": "{job.get("location", "")}"}}\n'
             f"For each form question: @@QUESTION: {{\"question\": \"...\", \"answer\": \"...\", \"type\": \"...\"}}"
@@ -2136,8 +2804,8 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         # A slow reply (retries, long thinking) can take longer than the old
         # default of 75 s.
         llm_timeout=180,
-        # No approval wait in Trial; the legacy timeout budget remains for tool compatibility.
-        step_timeout=REVIEW_STEP_TIMEOUT,
+        # One step may hold a wait for the user (USER_WAIT_SECONDS); none may run for half an hour.
+        step_timeout=STEP_TIMEOUT_SECONDS,
         max_failures=_max_failures(),
         loop_detection_enabled=True,
         loop_detection_window=5,
@@ -2153,61 +2821,58 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         register_done_callback=on_done_with_evidence,
     )
     _agent_ref["agent"] = agent
-    agent._langhire_request_gate = network
-    network.agent = agent
+    agent._langhire_ref = _agent_ref
+    agent._langhire_watch = watch
     # The emails the agent is told to type: the form email, and the account email on account pages.
     add_form_check_each_step(agent, {**profile, "email": agent_sensitive_data.get("email", ""),
                                      "account_email": agent_sensitive_data.get("account_email", "")})
     agent._langhire_loop = asyncio.get_running_loop()
     agent._langhire_domain = job_domain
     agent._langhire_url = url
-    _current[worker_id] = {"url": url, "title": title, "company": company, "step": 0, "max_steps": MAX_STEPS,
-                           "started_at": datetime.now(timezone.utc).isoformat()}
     _running_agents.add(agent)
     if is_paused():
         agent.pause()
 
+    side_tasks: list = []
     try:
         await config.maybe_apply_stealth(browser)
         await browser.start()  # no-op when stealth already started it
-        await asyncio.wait_for(network.start(), 30)  # failure never falls back to unguarded browsing
-        result = await agent.run(max_steps=MAX_STEPS, on_step_start=before_step)
+        watch.has_init_scripts(getattr(browser, "agent_focus_target_id", None))
+        run_task = asyncio.ensure_future(agent.run(max_steps=MAX_STEPS, on_step_start=before_step))
+        stall_task = asyncio.ensure_future(watch.stalled())
+        limit_task = asyncio.ensure_future(asyncio.sleep(ATTEMPT_LIMIT_SECONDS))
+        side_tasks = [run_task, stall_task, limit_task, asyncio.ensure_future(watch.run())]
+        await asyncio.wait({run_task, stall_task, limit_task}, return_when=asyncio.FIRST_COMPLETED)
+        if not run_task.done():
+            # The page stopped responding, or the attempt ran out of time: end it here.
+            run_task.cancel()
+            await asyncio.wait({run_task}, timeout=20)
+            took_too_long = limit_task.done() and not stall_task.done()
+            reason = (f"the application took longer than {ATTEMPT_LIMIT_SECONDS // 60} minutes" if took_too_long
+                      else watch.stall_reason or "the page didn't respond")
+            if submit_attempted(_agent_ref):
+                return await _outcome_unknown(url, title, company, worker_id, f"{reason} right after")
+            raise run_watch.PageStalled(reason, watch.stall_url, final=took_too_long)
+        result = run_task.result()
 
         if review and (saved.get("submit_attempted_at") or submit_attempted(_agent_ref)):
             # Trial cannot settle an older live submit attempt. Keep its
             # duplicate-risk marker and Needs you status instead of resetting it.
             return await _outcome_unknown(url, title, company, worker_id,
                                          "an earlier live attempt remains unconfirmed; Trial cannot confirm it")
-        if review and getattr(network, "trial_blocked_operation", ""):
-            await save_job_status(url, "needs_you", network.trial_blocked_operation)
-            return "needs_you"
 
-        if network.failed:
-            why = "the request gate stopped: " + getattr(network, "failure", "unsupported website request")
-            if submit_attempted(_agent_ref):
-                return await _outcome_unknown(url, title, company, worker_id, why)
-            await save_job_status(url, "needs_you", "Website request refused\n" + why, agent_words=True)
-            return "needs_you"
-
-        if url in _skip_requested:
-            _skip_requested.discard(url)
-            if submit_attempted(_agent_ref):
-                return await _outcome_unknown(url, title, company, worker_id, "you skipped it right after")
-            await save_job_status(url, "pending", SKIPPED_BY_YOU_NOTE, agent_words=True)
-            print(f"  ⏭️  [W{worker_id}] Skipped by you: {title} at {company}")
-            return "skipped"
-
-        # A blocking CAPTCHA we could not solve ends the application here,
+        # A blocking CAPTCHA nobody passed ends the application here,
         # regardless of what the agent reported, so the next job can start.
-        if _captcha_failure["error"] is not None and submit_attempted(_agent_ref):
+        captcha_failure = _agent_ref.get("captcha_failure")
+        if captcha_failure is not None and submit_attempted(_agent_ref):
             return await _outcome_unknown(url, title, company, worker_id, "a CAPTCHA appeared after it")
-        if isinstance(_captcha_failure["error"], _captcha.HumanCheckNeeded):
-            await save_job_status(url, "needs_you", _captcha_failure["error"].reason, agent_words=True)
+        if isinstance(captcha_failure, _captcha.HumanCheckNeeded):
+            await save_job_status(url, "needs_you", captcha_failure.reason, agent_words=True)
             print(f"  🙋 [W{worker_id}] Needs you (human check): {title} at {company}")
             return "needs_you"
-        if _captcha_failure["error"] is not None:
+        if captcha_failure is not None:
             return await _captcha_needs_you(url, title, company, worker_id,
-                                            _unsolved_reason(_captcha_failure["error"]), "CAPTCHA not solved")
+                                            _unsolved_reason(captcha_failure), "CAPTCHA not solved")
 
         # Extract Q&A from history
         _, new_questions = extract_from_history(result)
@@ -2221,19 +2886,22 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
             pass
         await save_new_qa(new_questions, source_domain=domain)
 
-        # Determine success/failure
-        success = result.is_successful()
+        # Determine success/failure (None when the run ended without the agent's verdict)
+        success = bool(result.is_successful())
 
         # ── Memory extraction (self-learning) ─────────────────────────────
         mem_store = get_memory_store()
         # 1. Marker-based: extract @@LEARNING tags the agent emitted
         marker_learnings = extract_learnings_from_markers(result)
-        if marker_learnings:
-            store_learnings(mem_store, marker_learnings, url, success)
+        llm_learnings = []
+        try:
+            if marker_learnings:
+                store_learnings(mem_store, marker_learnings, url, success)
+        except Exception as mem_err:
+            print(f"    ⚠️  [W{worker_id}] Couldn't save this run's site tips (the application is unaffected): {mem_err}")
         # 2. LLM-based: use the configured LLM to summarise the run into procedural
         # learnings. It costs a request, so only for runs with something to learn:
         # failures, and long flows (e.g. multi-page Workday forms).
-        llm_learnings = []
         if not success or len(result.history) >= LEARN_FROM_RUNS_OVER_STEPS:
             try:
                 def _llm_call(prompt):
@@ -2258,20 +2926,17 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
                     finally:
                         loop.close()
 
-                llm_learnings = await asyncio.to_thread(
+                llm_learnings = await asyncio.wait_for(asyncio.to_thread(
                     extract_learnings_via_llm,
                     result, job_url=url, job_title=title, success=success,
                     llm_call=_llm_call,
-                )
+                ), 90)
                 if llm_learnings:
                     store_learnings(mem_store, llm_learnings, url, success)
             except Exception as mem_err:
                 print(f"    ⚠️  [W{worker_id}] Memory extraction failed (non-fatal): {mem_err}")
 
         async def _resolve_outcome() -> str:
-            if review and getattr(network, "trial_blocked_operation", ""):
-                await save_job_status(url, "needs_you", network.trial_blocked_operation)
-                return "needs_you"
             if review and (success or _agent_ref.get("review_skipped")):
                 update_job(url, status="pending", error=None, practised_at=datetime.now(timezone.utc).isoformat())
                 print(f"  🎓 [W{worker_id}] Practised locally (not submitted): {title} at {company}")
@@ -2295,8 +2960,8 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
                     print(f"  🙋 [W{worker_id}] Not confirmed (no Submit click, no confirmation page): {title} at {company}")
                     return "needs_you"
                 if review and not submit_attempted(_agent_ref):
-                    # A trial run applies only through the submit the user approved: a page that merely says
-                    # "thank you" (or an application sent some other way) is for the user to check.
+                    # A trial run never submits: a page that merely says "thank you" (or an
+                    # application sent some other way) is for the user to check.
                     await save_job_status(url, "needs_you", TRIAL_UNCONFIRMED_NOTE, agent_words=True)
                     print(f"  🙋 [W{worker_id}] Not confirmed (no approved Submit in this trial run): {title} at {company}")
                     return "needs_you"
@@ -2304,7 +2969,7 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
                 update_job(url, submission_evidence={"kind": "confirmation_page", "observed_at":
                            datetime.now(timezone.utc).isoformat()})
                 await save_job_status(url, "applied")
-                update_job(url, submit_attempted_at=None)
+                update_job(url, submit_attempted_at=None, pending_questions=None)
                 print(f"  ✅ [W{worker_id}] Applied: {title} at {company}")
                 return "applied"
             else:
@@ -2333,6 +2998,7 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         run_finished_at = datetime.now(timezone.utc)
         memories_extracted_count = len(marker_learnings) + len(llm_learnings)
         outcome = await _resolve_outcome()
+        claimed["settled"] = True
         reached = outcome == ("practised" if review else "applied")
         try:
             MetricsStore().record_run(
@@ -2351,6 +3017,9 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
             print(f"    ⚠️  [W{worker_id}] Metrics recording failed (non-fatal): {metrics_err}")
         return outcome
 
+    except run_watch.PageStalled:
+        raise       # apply_to_job starts the job again, or gives it up as "The page didn't load"
+
     except _captcha.CaptchaUnsolved as e:
         # Abandon this application and move on — never pause or wait.
         if submit_attempted(_agent_ref):
@@ -2358,11 +3027,13 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         return await _captcha_needs_you(url, title, company, worker_id, _unsolved_reason(e), "CAPTCHA not solved")
 
     except asyncio.CancelledError:
-        # Stopped mid-application: leave an accurate state (the worker is being cancelled).
+        # Stopped or skipped mid-application: leave an accurate state (this attempt is being cancelled).
+        skipped = url in _skip_requested
         if submit_attempted(_agent_ref):
-            await _outcome_unknown(url, title, company, worker_id, "the run was stopped right after")
+            await _outcome_unknown(url, title, company, worker_id,
+                                   "you skipped it right after" if skipped else "the run was stopped right after")
         else:
-            await save_job_status(url, "pending", INTERRUPTED_NOTE, agent_words=True)
+            await save_job_status(url, "pending", SKIPPED_BY_YOU_NOTE if skipped else INTERRUPTED_NOTE, agent_words=True)
         claimed["settled"] = True
         raise
 
@@ -2371,7 +3042,7 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         # The full traceback goes to backend.log; the job card only gets one line.
         _log.error(f"Application crashed: {title} at {company} ({url})", exc_info=True)
         if submit_attempted(_agent_ref):
-            return await _outcome_unknown(url, title, company, worker_id, f"an error followed: {error_str[:200]}")
+            return await _outcome_unknown(url, title, company, worker_id, f"an error followed: {_friendly_error(error_str)[:200]}")
         if ("security token" in error_str.lower() or "expired" in error_str.lower()) \
                 and _credential_retries.get(url, 0) < MAX_CREDENTIAL_RETRIES:
             _credential_retries[url] = _credential_retries.get(url, 0) + 1
@@ -2390,18 +3061,16 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         print(f"  ❌ [W{worker_id}] Error: {title} at {company} — {error_str[:100]}")
         return "failed"
     finally:
+        for task in side_tasks:
+            if not task.done():
+                task.cancel()
+        if side_tasks:
+            await asyncio.gather(*side_tasks, return_exceptions=True)
         _running_agents.discard(agent)
-        _current.pop(worker_id, None)
+        _help_requests.pop(url, None)
         _location_granted.pop(id(browser), None)
-        _skip_requested.discard(url)
         remove_agent_files(agent)
-        await network.close()
-        try:
-            # kill(), not close() (browser-use's stop()): it closes the browser cleanly first, so
-            # what the site stored in the run's last moments is written to the profile.
-            await browser.kill()
-        except Exception as close_err:
-            print(f"    ⚠️  [W{worker_id}] Browser cleanup error: {close_err}")
+        await _close_browser(browser, worker_id)
 
 
 async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict, qa: dict, applied_labels: list, easy_apply: bool, stats: dict, cancel_flag: dict | None = None):
@@ -2436,20 +3105,19 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
         finally:
             _busy_sites.pop(worker_id, None)
         stats[status] = stats.get(status, 0) + 1
+        stopping = bool(cancel_flag and cancel_flag.get("cancel_requested"))
 
         # Randomised pause so applications are not evenly spaced. Off by
         # default; only runs between jobs, never mid-application.
         # (No pause after a closed posting: no browser was opened.)
-        if status not in ("closed", "skipped") and not (cancel_flag and cancel_flag.get("cancel_requested")):
+        if status not in ("closed", "skipped") and not stopping:
             await config.maybe_human_delay("the next application")
 
-        # On retry, put back in queue
-        if status == "retry":
+        # On retry, put back in queue (never after Stop: the run is over)
+        if status == "retry" and not stopping:
             queue.put_nowait(job)
         # Self-retry: one more attempt that reads the failure report first.
-        # Off in performance mode (a whole extra run).
-        elif status == "failed" and job.get("_retry_with") and not performance_mode() \
-                and not (cancel_flag and cancel_flag.get("cancel_requested")):
+        elif status == "failed" and job.get("_retry_with") and not stopping:
             job["previous_failure"] = job.pop("_retry_with")
             update_job(job["url"], status="pending", error=f"Retrying with what went wrong last time.\n{job['previous_failure'][:500]}")
             print(f"  🔁 [{name}] Retrying {job.get('title', '')} once, using its failure report")
@@ -2458,16 +3126,38 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
         queue.task_done()
 
 
+def use_configured_llm() -> str:
+    """Use the AI model from Settings → AI model, as the app does when it starts a run.
+
+    config.get_llm alone is the old Bedrock default: the command-line run ignored the user's
+    provider (seen 2026-11: "The config profile (default) could not be found" on a ChatGPT-plan
+    setup). Returns the provider used, or "" when none is set.
+    """
+    try:
+        from core.config import load_llm_settings
+        from core.llm_factory import create_fallback_llm, create_llm
+    except ImportError:
+        from backend.core.config import load_llm_settings
+        from backend.core.llm_factory import create_fallback_llm, create_llm
+    llm_settings = load_llm_settings()
+    provider = llm_settings.get("provider") or ""
+    if provider:
+        config.get_llm = lambda: create_llm(llm_settings)
+        config.get_fallback_llm = lambda: create_fallback_llm(llm_settings)
+        print(f"🤖 Using {provider} LLM from settings")
+    return provider
+
+
 async def main():
     parser = argparse.ArgumentParser(description="Apply to collected jobs")
     parser.add_argument("--workers", type=int, default=1, help="Number of concurrent workers")
     parser.add_argument("--limit", type=int, help="Max jobs to process")
     parser.add_argument("--easy-apply", dest="easy_apply", action="store_true", default=True)
     parser.add_argument("--no-easy-apply", dest="easy_apply", action="store_false")
-    parser.add_argument("--run-mode", choices=RUN_MODES, default="trial")
+    parser.add_argument("--run-mode", choices=RUN_MODES, default="auto")
     args = parser.parse_args()
     set_run_mode(args.run_mode)
-    request_gate.use_console_reviews()
+    use_configured_llm()
 
     jobs = load_json(JOBS_FILE, {})
     profile = load_json(CANDIDATE_PROFILE, {})

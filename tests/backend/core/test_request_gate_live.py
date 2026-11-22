@@ -262,43 +262,26 @@ async def password_index(browser):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("allow_site", [False, True])
-async def test_trial_never_requests_credential_approval_or_sends_a_password(wire_site, data_dir, allow_site):
-    from cli import apply_jobs
-    from core import secret_store
-    url, seen, source = wire_site
-    virtual = "https://acme.test/"
-    source['html'] = PASSWORD_FORM
-    browser, gate = await browser_and_gate('trial', virtual, transport_factory=bridge_to(url))
-    try:
-        await browser.navigate_to(virtual)
-        index = await password_index(browser)
-        ref={'request_gate':gate,'secret_masks':{},'secrets':{'account_email':'test@example.com'}}
-        tools=apply_jobs.build_tools({'url':virtual,'title':'Intern','company':'Local'},'',True,ref,1)
-        result=await tools.registry.execute_action('input',{'index':index,'text':'<secret>password</secret>'},browser_session=browser)
-        assert result.error and request_gate.pending()==[]
-        assert not request_gate.decide(['a'*32],allow_site)
-        assert not secret_store.site_password('https://acme.test',create=False)
-        assert ('GET','/') in seen and all(r[0] == 'GET' and r[1] in ('/', '/favicon.ico') for r in seen), seen
-    finally:
-        await gate.close()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["trial", "auto"])
-async def test_modes_type_password_on_recognised_employer_without_asking(wire_site, data_dir, mode):
+@pytest.mark.parametrize("recognised", [False, True])
+async def test_modes_type_the_job_site_password_wherever_the_job_leads_without_asking(wire_site, data_dir, mode, recognised):
+    """The user's decision 5 (2026-11) replaced the two tests that stood here: "an unrecognised site
+    never gets a password" and "a recognised employer gets a password the app made for it". The
+    job-site password saved in Settings is typed on the site the job leads to, recognised by the old
+    employer rule or not; nothing is generated, and nobody is asked."""
     from cli import apply_jobs
     from core import secret_store
     url, seen, source = wire_site
     virtual = "https://acme.test/"
     source["html"] = PASSWORD_FORM
     browser, gate = await browser_and_gate(mode, virtual, transport_factory=bridge_to(url),
-                                           trusted_site=lambda page: page.startswith(virtual))
+                                           trusted_site=(lambda page: page.startswith(virtual)) if recognised else None)
     try:
         await asyncio.wait_for(browser.navigate_to(virtual), 15)
         page = await browser.get_current_page()
         index = await password_index(browser)
-        ref = {"request_gate": gate, "secret_masks": {}, "secrets": {"account_email": "test@example.com"}}
+        ref = {"request_gate": gate, "secret_masks": {},
+               "secrets": {"account_email": "test@example.com", "password": "Made-Up-Pass-77"}}
         apply_jobs.set_run_mode(mode)
         try:
             tools = apply_jobs.build_tools({"url": virtual, "title": "Intern", "company": "Acme"}, "", mode == "trial", ref, 1)
@@ -306,8 +289,10 @@ async def test_modes_type_password_on_recognised_employer_without_asking(wire_si
             apply_jobs.set_run_mode("auto")
         result = await asyncio.wait_for(tools.registry.execute_action(
             "input", {"index": index, "text": "<secret>password</secret>"}, browser_session=browser), 10)
-        password = secret_store.site_password("https://acme.test", create=False)
         assert result.error is None and request_gate.pending() == []
-        assert password and await page.evaluate("() => document.querySelector('#pw').value") == password
+        assert not request_gate.decide(["a" * 32], True)
+        assert await page.evaluate("() => document.querySelector('#pw').value") == "Made-Up-Pass-77"
+        assert secret_store.site_password_entries() == []          # no password is made up for a site
+        assert all(r[0] == "GET" for r in seen), seen               # typing sends nothing by itself
     finally:
         await gate.close()

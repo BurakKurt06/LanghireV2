@@ -75,7 +75,7 @@ export default function Inbox() {
   const working = inbox.checking || inbox.requested;
 
   return (
-    <div className="max-w-5xl">
+    <div className="page-wide">
       <PageHeader title="Inbox" subtitle="Replies to your applications, read from Gmail" />
 
       <Section title="Check Gmail">
@@ -128,7 +128,7 @@ export default function Inbox() {
       ) : (
         <div className="divide-y divide-border rounded-xl border border-border overflow-hidden">
           {emails.map((email) => {
-            const canPrep = (email.category === "interview" || email.category === "offer") && !inbox.performance_mode;
+            const canPrep = email.category === "interview" || email.category === "offer";
             return (
               <div key={email.id} className="p-4 bg-card">
                 <div className="flex items-start justify-between gap-4">

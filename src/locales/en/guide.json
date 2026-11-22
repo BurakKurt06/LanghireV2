@@ -11,7 +11,7 @@
       "learn": "Learn",
       "improve": "Improve"
     },
-    "pipelineDescription": "Set up your profile → Configure AI → Collect jobs from LinkedIn → Agent applies automatically → Learns from each run → Gets better over time"
+    "pipelineDescription": "Set up your profile → Configure AI → Paste job links (or collect them) → The agent applies (Full auto submits; Trial run stops before the final Submit) → Learns from each run → Gets better over time"
   },
   "checklist": {
     "title": "Setup Checklist",
@@ -63,7 +63,7 @@
       "howItWorks": "How it works:",
       "howItWorksDesc": "Job boards: in Jobs → Collect, select a board and use its Sign in button (LinkedIn also has one in Settings → Accounts & email). Sign in, pass any verification, then close the window. Collecting reuses that saved session; sign-in and automation never use the browser profile at the same time.",
       "firstTime": "First time:",
-      "firstTimeDesc": "Sign in to each board you collect from before your first collection. Employer application sites are different: the agent signs in or creates an account there with the account email from Settings → Accounts & email, and each site gets its own password made by the app.",
+      "firstTimeDesc": "Sign in to each board you collect from before your first collection. Employer application sites are different: the agent signs in there, or creates the account the site needs, with the account email and the one \"Password for job sites\" from Settings → Accounts & email. When a site's password rules reject it, the app adds characters to its end and keeps that version for that site; Settings → Accounts & email lists those sites.",
       "gmail": "Gmail (for OTP):",
       "gmailDesc": "Sign in with the Gmail button in Settings → Accounts & email. When an employer site sends a verification code or link, the app reads it from Gmail in its own separate browser profile; the application agent never opens Gmail and only receives the checked code or link.",
       "sessionExpired": "Session expired?",
@@ -85,9 +85,9 @@
     },
     "applying": {
       "title": "Applying to jobs",
-      "intro": "Once you've collected jobs, go to",
-      "linkText": "Apply",
-      "introEnd": "to start automated applications.",
+      "intro": "Paste your job links (or collect jobs) in",
+      "linkText": "Jobs",
+      "introEnd": "and press Start (it applies to every job that is ready). Nothing starts by itself: pasted links wait as \"Ready to apply\".",
       "easyApply": "Easy Apply:",
       "easyApplyDesc": "LinkedIn's built-in application form. The agent fills in your profile info, uploads your resume, answers questions, and submits — all within a modal dialog on LinkedIn.",
       "externalSites": "External Sites:",
@@ -99,7 +99,17 @@
       "blockedDomains": "Blocked domains:",
       "blockedDomainsDesc": "If certain sites cause issues, add them to the blocked list in",
       "blockedDomainsLink": "Settings → Job search",
-      "blockedDomainsEnd": ". The agent will skip jobs on those domains."
+      "blockedDomainsEnd": ". The agent will skip jobs on those domains.",
+      "modes": "Full auto or Trial run:",
+      "modesDesc": "Full auto (the default) submits each application. Trial run goes through every page the same way, sign-ins and uploads included, but never presses the final Submit. An application that may already have been sent is never submitted again by itself.",
+      "needsYou": "When the agent needs you:",
+      "needsYouDesc": "If a question has no answer anywhere (a long essay with nothing usable in your profile, or a required salary when none is saved), a CAPTCHA can't be solved, or a verification code can't be read, the run panel on the left shows it whole: the form section, the full question and its choices. The run waits up to 5 minutes for you, then moves on; the job stays \"Needs you\" with its question, and you can answer it right on its card. Your answer is remembered, and the job is tried again on the next run.",
+      "steppingIn": "Stepping in:",
+      "steppingInDesc": "Click or type in the agent's browser at any moment: the agent stops at once and waits until you have been idle for about 25 seconds (or you press Resume). It then goes on from the page you left it on and keeps every field you changed for that application.",
+      "defaults": "Default answers:",
+      "defaultsDesc": "Ordinary questions (are you authorized to work, were you referred, how did you hear about this job, ...) are answered without asking you, from the Default answers on the Q&A page. Change any of them there; your own saved answers and your profile always come first.",
+      "logs": "A job went wrong?",
+      "logsDesc": "Open its card's View log to see what the app did on it. Every run's log is in Settings → App & browser → Logs."
     },
     "memory": {
       "title": "Understanding the Memory system",
@@ -137,16 +147,19 @@
       "rateLimits": "LinkedIn rate limits:",
       "rateLimitsDesc": "LinkedIn may temporarily block Easy Apply if too many applications are submitted in a short time. Space out your application sessions.",
       "browserStuck": "Browser stuck?",
-      "browserStuckDesc": "If an operation seems frozen, click \"Stop\". The app gives its browsers a moment to close, then ends any that are left. Then try again.",
+      "browserStuckDesc": "A page that stays blank, stops responding or doesn't change for 5 minutes counts as a failure: the app reloads it and tries again, up to \"Max Failures Per Job\" (Settings → Applications), then skips the job with \"The page didn't load\". Stop ends the whole run at once.",
       "loginExpired": "Login expired?",
       "loginExpiredDesc": "Use the board's Sign in button in Jobs → Collect (or Settings → Accounts & email for LinkedIn and Gmail), then try again. Sessions occasionally expire.",
       "resumeUpload": "Resume not uploading?",
-      "resumeUploadDesc": "Make sure the file path in Settings points to an actual PDF file on your computer.",
-      "backendNotConnecting": "Backend not connecting?",
-      "backendNotConnectingDesc": "In development mode, make sure the Python backend is running:",
+      "resumeUploadDesc": "Make sure the resume in Profile → Resume (the same file as Settings → Applications) is an actual PDF file on your computer.",
+      "backendNotConnecting": "The app's engine isn't answering?",
+      "backendNotConnectingDesc": "It usually starts within a few seconds of opening LangHireV2. If the message stays, close the app and open it again. (When running from the source code, start it with:",
       "backendCommand": "uv run python backend/main.py",
       "costs": "Costs:",
-      "costsDesc": "Each application costs ~$0.02–0.10 in LLM API calls depending on form complexity. Monitor your provider's usage dashboard."
+      "costsDesc": "With an API key, each application costs about $0.02–0.10 in AI requests, depending on the form. Signed in with a ChatGPT plan, it uses that plan's limits instead.",
+      "backendCommandEnd": ")",
+      "shortcuts": "Keyboard shortcuts:",
+      "shortcutsDesc": "Ctrl+1 to Ctrl+8 open the pages in sidebar order (Dashboard, Profile, Jobs, Inbox, Memory, Q&A, Guide, Settings); Ctrl+L opens the logs; Ctrl+, opens Settings; F11 switches fullscreen on and off, Esc leaves it."
     }
   },
   "setupWizard": {

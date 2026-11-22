@@ -22,8 +22,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 
-from core.config import get_data_dir
-from core import secret_store
+from .config import get_data_dir
+from . import secret_store
 
 ISSUER = "https://auth.openai.com"
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # the Codex CLI's public OAuth client

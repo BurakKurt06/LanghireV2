@@ -96,7 +96,11 @@ async def test_stop_does_not_block_the_server(monkeypatch):
 
 
 def test_stopped_run_waits_for_its_profile_copy_thread(monkeypatch):
-    """R03: a run isn't over (and doesn't free the browser) while its profile-copy thread still runs."""
+    """R03: a stopped run doesn't free the browser profiles while its profile-copy thread still runs.
+
+    Since 2026-11 Stop shows the run as over at once (the user's requirement: "Stop: cancel
+    immediately and end the run"); what keeps a new run from starting on the profiles meanwhile is
+    the "still stopping" claim, which lasts until that thread has ended."""
     import main
     monkeypatch.setattr(main, '_get_metrics_store', lambda: None)
     monkeypatch.setattr(main, '_kill_browser_processes', lambda: None)
@@ -117,13 +121,18 @@ def test_stopped_run_waits_for_its_profile_copy_thread(monkeypatch):
         stopper = threading.Thread(target=main._force_stop, args=(status,))
         stopper.start()
         thread.join(1)
-        assert status['running'] or finished.is_set(), 'Run reported finished while its profile copy still ran'
+        assert main._browser_user() == "stop" or finished.is_set(), 'The profiles were freed while the copy still ran'
+        assert not status['running'], 'Stop must show the run as over at once'
     finally:
         release.set()
         assert finished.wait(3)
         thread.join(5)
         stopper.join(10)
     assert not thread.is_alive() and not status['running']
+    deadline = time.monotonic() + 5
+    while main._browser_user() == "stop" and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert main._browser_user() != "stop"       # freed once the thread has ended
 
 
 # ── The user's edits (R07) ──────────────────────────────────────────────────

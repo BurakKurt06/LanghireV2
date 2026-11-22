@@ -1,4 +1,34 @@
-## Current Trial definition — user clarification, 2026-10-26
+## Current decisions — 2026-11 (these supersede the sections below where they differ)
+
+**Full auto is the default run mode**; Trial run stays an option and its guarantee is unchanged:
+the agent's recognized final-submit action is never activated (`test_trial_action_mode*.py`,
+`test_submit_guard*.py`). The **application browser connects directly** (no request gate, no
+SOCKS proxy, no `--host-resolver-rules`); a PAC rule script keeps Gmail and private addresses out
+(`test_stealth.py`, `test_browsers.py`, `test_browser_network_live.py`). The request gate is
+collection-only now, so the strict per-ATS contract tests below are diagnostics of the gate, not
+of applications.
+
+What the new tests cover (all with fake pages, fake accounts, fake AI):
+
+- `tests/backend/cli/test_whole_application_live.py` (real browser): whole applications on a local
+  fake hiring site: Apply opens a new tab, the account is created with the job-site password
+  (lengthened to the site's rules), the emailed code is fetched by the app's own reader, the form is
+  filled and submitted; a page that stays blank is retried up to "Max failures per job" and given up
+  as "The page didn't load" without AI requests.
+- `tests/backend/cli/test_user_steps_in_live.py` (real browser): the user clicks or types in the
+  agent's browser; the agent stops, waits, continues from the user's page and keeps the user's fields.
+- `tests/backend/core/test_posting_reader_live.py` (real browser): a posting built in the browser
+  gets its real title and employer from a temporary headless profile that is deleted afterwards.
+- `tests/backend/test_new_endpoints.py`: default answers, answers given on a job card, a job's own
+  log, the eye button's secret reveal, the Dashboard's counts, and that pasting starts nothing.
+- `tests/backend/core/test_posting_names.py`, `tests/backend/memory/test_compaction.py`,
+  `tests/backend/memory/test_unknown_outcome.py`, and frontend tests next to each component.
+
+A run waits at most 5 minutes for the user (`apply_jobs.USER_WAIT_SECONDS`); tests use 0.2 s
+unless marked `real_user_wait`. Real-browser tests are opt-in with `LANGHIRE_REAL_BROWSER=1`;
+CI (`test.yml`) runs the list in its "real browser" step.
+
+## Trial definition — user clarification, 2026-10-26 (default changed 2026-11: Full auto)
 
 Normal application Trial uses the same network behavior as Full Auto: login,
 saves, Next, unknown ATS commands and site scripts can send data or submit. Only
@@ -112,9 +142,10 @@ src/test/setup.ts               # global Vitest setup (mocks Tauri, jest-dom mat
 - **Opt-in real-browser tests** (skipped by default, marked `real_browser`):
   `tests/backend/cli/test_submit_guard_live.py` (the submit guard against local forms),
   `tests/backend/cli/test_review_round5_live.py` (native input/label bypass regressions), and
-  `tests/backend/core/test_browser_network_live.py` (the agent browser's network limits: a
+  `tests/backend/core/test_browser_network_live.py` (the collection browser's network limits: a
   HTTP, STUN UDP and TURN TCP requests to this computer, explicit forwarding,
-  and refusal to secure an already-running profile). They start Brave (or Chrome)
+  and refusal to secure an already-running profile), plus the whole-application, user-steps-in
+  and posting-reader tests above. They start the bundled Chromium (or Brave/Chrome)
   headless with a throwaway profile and talk only to local servers:
   ```powershell
   $env:LANGHIRE_REAL_BROWSER = "1"; .venv\Scripts\python.exe -m pytest tests/backend/cli/test_submit_guard_live.py tests/backend/cli/test_review_round5_live.py tests/backend/core/test_browser_network_live.py tests/backend/core/test_request_gate_live.py tests/backend/core/test_application_pipeline_live.py; Remove-Item Env:LANGHIRE_REAL_BROWSER
@@ -381,11 +412,10 @@ the strict multipart parser and exact authorized-file-byte check. Auto positive
 controls still reach the local listener, Trial negatives do not, and native
 authorized resume uploads remain covered by browser regressions.
 
-Protocol evidence: read-only public GETs of the
-[iCIMS candidate portal](https://careers-hines.icims.com/jobs/search?in_iframe=1),
-its served `login.icims.com/authorize` flow, the
-[Taleo candidate login](https://drhorton.taleo.net/careersection/iam/accessmanagement/login.jsf),
-and the [SAP candidate login](https://career5.successfactors.eu/career?company=SAP&loginFlowRequired=true&lang=en_US).
+Protocol evidence: read-only public GETs of an employer's iCIMS candidate portal
+(`<employer>.icims.com/jobs/search?in_iframe=1`), its served `login.icims.com/authorize` flow, a
+Taleo candidate login (`<employer>.taleo.net/careersection/iam/accessmanagement/login.jsf`), and a
+SuccessFactors candidate login (`career<N>.successfactors.<tld>/career?company=<id>&loginFlowRequired=true`).
 All three actual served forms bind and accept their reconstructed login payloads
 **in memory only**; no public POST, credentials or account/application were sent.
 Auth0 describes its internal browser routes in

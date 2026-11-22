@@ -29,6 +29,17 @@ def _get_db_path() -> Path:
 DB_PATH = _get_db_path()
 
 
+# The write-ahead file is cut back to this size after each checkpoint. Without a limit it stays
+# as big as its biggest moment: 298 MB on the user's machine (2026-11) after one large delete.
+JOURNAL_SIZE_LIMIT = 64 * 1024 * 1024
+# Old log lines are deleted this many at a time, so no single transaction balloons that file.
+DELETE_CHUNK = 20_000
+# Compaction (VACUUM) only when this much of the file is free space: the user's 625 MB file held
+# 28 MB of data; deleted log lines leave their space inside the file until it is compacted.
+COMPACT_MIN_FREE_BYTES = 64 * 1024 * 1024
+COMPACT_MIN_FREE_SHARE = 0.25
+
+
 class MetricsStore:
     """SQLite-backed metrics store — shares the same DB as MemoryStore."""
 
@@ -42,6 +53,7 @@ class MetricsStore:
             self._local.conn = sqlite3.connect(str(self.db_path))
             self._local.conn.row_factory = sqlite3.Row
             self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute(f"PRAGMA journal_size_limit={JOURNAL_SIZE_LIMIT}")
         return self._local.conn
 
     def close(self):
@@ -267,13 +279,14 @@ class MetricsStore:
         conn.commit()
 
     def log_batch(self, rows: list[tuple]):
-        """Persist multiple log lines efficiently. Each row: (run_id, job_url, level, message)."""
+        """Persist multiple log lines efficiently. Each row: (run_id, job_url, level, message), with
+        an optional fifth item: when the line was written (ISO time; default: now)."""
         now = datetime.now(timezone.utc).isoformat()
         conn = self._get_conn()
         conn.executemany(
             "INSERT INTO run_logs (run_id, job_url, timestamp, level, message, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            [(r[0], r[1], now, r[2], r[3], now) for r in rows],
+            [(r[0], r[1], r[4] if len(r) > 4 and r[4] else now, r[2], r[3], now) for r in rows],
         )
         conn.commit()
 
@@ -315,10 +328,32 @@ class MetricsStore:
         return [dict(r) for r in rows]
 
     def cleanup_old_logs(self, days: int = 30) -> int:
+        """Delete log lines older than `days`, DELETE_CHUNK at a time. Returns how many."""
         conn = self._get_conn()
-        affected = conn.execute(
-            "DELETE FROM run_logs WHERE julianday('now') - julianday(created_at) > ?",
-            (days,),
-        ).rowcount
-        conn.commit()
-        return affected
+        total = 0
+        while True:
+            affected = conn.execute(
+                "DELETE FROM run_logs WHERE id IN (SELECT id FROM run_logs "
+                "WHERE julianday('now') - julianday(created_at) > ? LIMIT ?)",
+                (days, DELETE_CHUNK),
+            ).rowcount
+            conn.commit()
+            total += max(affected, 0)
+            if affected < DELETE_CHUNK:
+                return total
+
+    def compact(self, min_free_bytes: int = COMPACT_MIN_FREE_BYTES, min_free_share: float = COMPACT_MIN_FREE_SHARE) -> dict:
+        """Give the space of deleted rows back (VACUUM) when much of the file is free, and cut
+        the write-ahead file back. Returns {"before", "after", "compacted"} (bytes of the file)."""
+        conn = self._get_conn()
+        page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+        pages = conn.execute("PRAGMA page_count").fetchone()[0]
+        free = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        before = pages * page_size
+        compacted = bool(pages) and free * page_size >= min_free_bytes and free / pages >= min_free_share
+        if compacted:
+            conn.commit()
+            conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        after = conn.execute("PRAGMA page_count").fetchone()[0] * page_size
+        return {"before": before, "after": after, "compacted": compacted}

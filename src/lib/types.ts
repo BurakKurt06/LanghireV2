@@ -166,8 +166,6 @@ export interface AppSettings {
   browser_path?: string;
   /** Extra files the agent may upload (transcript, ...). */
   other_documents?: OtherDocument[];
-  /** Turns off optional AI work (fit check, agent job naming, per-step learnings, prep sheets). */
-  performance_mode?: boolean;
   /** AI fit check before applying. Default true. */
   fit_check_enabled?: boolean;
   /** Write cover letters into cover-letter boxes. Default false. */
@@ -208,6 +206,8 @@ export interface Job {
   tailored_resume_path?: string;
   /** The user's note for the agent, used on the next attempt. */
   user_note?: string;
+  /** Questions a run couldn't answer and the user didn't answer in time: answered on the job's card. */
+  pending_questions?: PendingQuestion[] | null;
   /** When a trial run last filled this job in and was skipped at the final review (not submitted). */
   practised_at?: string;
   /** From the Inbox page's Gmail check: what the employer's latest email said. */
@@ -477,7 +477,6 @@ export interface InboxStatus {
   last_checked: string | null;
   emails: InboxEmail[];
   busy: boolean;
-  performance_mode: boolean;
 }
 
 export interface CurrentJob {
@@ -488,6 +487,11 @@ export interface CurrentJob {
   step: number;
   max_steps: number;
   started_at: string;
+  /** The user is clicking or typing in this job's browser: the agent is waiting. */
+  user_active?: boolean;
+  /** What the user's own activity led to ("Continuing from your page, keeping your 3 edits."). */
+  note?: string;
+  edits_kept?: number;
 }
 
 export interface ApplyStatus {
@@ -541,6 +545,14 @@ export interface JobStats {
   closed?: number;
   needs_you?: number;
   skipped?: number;
+  /** Jobs whose last attempt may have sent the application (counted inside needs_you). */
+  outcome_unknown?: number;
+  /** Finished attempts that did not end in an application: failed + needs you + blocked. */
+  not_successful?: number;
+  /** applied + not_successful: the base of the success rate. */
+  finished?: number;
+  /** Percent of finished attempts that applied; null before the first finished attempt. */
+  success_rate?: number | null;
 }
 
 export interface DashboardResponse {
@@ -567,11 +579,24 @@ export interface SetupStatus {
 }
 
 // ── Q&A Repository ───────────────────────────────────────────────────────
+/** A question the app has to ask: whole, with where it is on the form and its choices. */
+export interface PendingQuestion {
+  question: string;
+  section?: string;
+  options?: string[];
+  field_type?: string;
+}
+
 export interface HelpRequest {
   url: string;
   title: string;
   company: string;
   problem: string;
+  /** questions: answer them; captcha: solve it in the browser; verification: type the code; help: anything else. */
+  kind?: "questions" | "captcha" | "verification" | "help";
+  questions?: PendingQuestion[];
+  /** The run moves on to the next job when this reaches 0. */
+  seconds_left?: number | null;
 }
 
 export interface PendingReview {

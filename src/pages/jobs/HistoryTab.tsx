@@ -21,8 +21,6 @@ import {
   stopApplying,
   pauseApplying,
   resumeApplying,
-  reviewApplication,
-  answerHelp,
   getApplyStatus,
   getJobs,
   getMetricRuns,
@@ -35,8 +33,9 @@ import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import LogLine from "../../components/LogLine";
 import InboxBadge from "../../components/InboxBadge";
 import { useTranslation } from "react-i18next";
-import type { Job, RunMetric, AppSettings, PendingReview, HelpRequest } from "../../lib/types";
-import { CircleAlert } from "lucide-react";
+import JobLogDialog from "../../components/JobLogDialog";
+import type { Job, RunMetric, AppSettings, HelpRequest } from "../../lib/types";
+import { CircleAlert, ScrollText } from "lucide-react";
 
 interface AppliedJobRow {
   job: Job;
@@ -52,9 +51,9 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
 
   const [running, setRunning] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [reviews, setReviews] = useState<PendingReview[]>([]);
+  // What running jobs wait for is answered in the sidebar's run panel (one place, every page).
   const [helpRequests, setHelpRequests] = useState<HelpRequest[]>([]);
-  const [helpReplies, setHelpReplies] = useState<Record<string, string>>({});
+  const [logJob, setLogJob] = useState<Job | null>(null);
   const [log, setLog] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const logRef = useRef<HTMLDivElement>(null);
@@ -69,7 +68,6 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
       getApplyStatus().then((s) => {
         setRunning(s.running);
         setPaused(!!s.paused);
-        setReviews(s.reviews || []);
         setHelpRequests(s.help || []);
         setLog(s.log || []);
       }),
@@ -134,7 +132,6 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
             }
             setRunning(s.running);
             setPaused(!!s.paused);
-            setReviews(s.reviews || []);
             setHelpRequests(s.help || []);
             setLog(s.log || []);
           }
@@ -159,17 +156,6 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
     await stopApplying();
     setRunning(false);
     setPaused(false);
-  };
-
-  const handleHelp = async (url: string, giveUp: boolean) => {
-    await answerHelp(url, helpReplies[url] || "", giveUp);
-    setHelpRequests((current) => current.filter((h) => h.url !== url));
-    setHelpReplies((current) => ({ ...current, [url]: "" }));
-  };
-
-  const handleReview = async (url: string, approve: boolean) => {
-    await reviewApplication(url, approve);
-    setReviews((current) => current.filter((r) => r.url !== url));
   };
 
   const handlePauseToggle = async () => {
@@ -293,51 +279,14 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
               {paused ? t("controls.pausedHint") : t("controls.pauseHint")}
             </p>
           )}
-          {running && helpRequests.map((help) => (
-            <div key={help.url} role="alert" className="rounded-2xl border border-amber-400 bg-amber-50 dark:bg-amber-500/10 p-4 mb-3">
-              <p className="text-sm font-semibold text-foreground inline-flex items-center gap-1.5">
-                <CircleAlert className="w-4 h-4 text-amber-600" />
-                {t("help.title", { title: help.title, company: help.company })}
-              </p>
-              <p className="text-xs text-foreground mt-2 whitespace-pre-wrap break-words">{help.problem}</p>
-              <p className="text-xs text-muted-foreground mt-2">{t("help.hint")}</p>
-              <textarea
-                aria-label={t("help.messageLabel")}
-                value={helpReplies[help.url] || ""}
-                onChange={(e) => setHelpReplies((current) => ({ ...current, [help.url]: e.target.value }))}
-                placeholder={t("help.messagePlaceholder")}
-                rows={2}
-                className="input-base text-sm mt-2"
-              />
-              <div className="flex gap-2 mt-2">
-                <button onClick={() => handleHelp(help.url, false)} className="btn-primary text-xs px-3 py-1.5">
-                  {t("help.continue")}
-                </button>
-                <button onClick={() => handleHelp(help.url, true)} className="btn-secondary text-xs px-3 py-1.5">
-                  {t("help.giveUp")}
-                </button>
-              </div>
-            </div>
-          ))}
-          {running && reviews.map((review) => (
-            <div key={review.url} role="alert" className="rounded-2xl border border-primary/40 bg-primary/5 p-4 mb-3">
-              <p className="text-sm font-semibold text-foreground">
-                {t("review.title", { title: review.title, company: review.company })}
-              </p>
-              <p className="text-xs text-muted-foreground mt-1">{t("review.hint")}</p>
-              {review.summary && (
-                <p className="text-xs text-foreground mt-2 whitespace-pre-wrap break-words">{review.summary}</p>
-              )}
-              <div className="flex gap-2 mt-3">
-                <button onClick={() => handleReview(review.url, true)} className="btn-primary text-xs px-3 py-1.5">
-                  {t("review.approve")}
-                </button>
-                <button onClick={() => handleReview(review.url, false)} className="btn-secondary text-xs px-3 py-1.5">
-                  {t("review.skip")}
-                </button>
-              </div>
-            </div>
-          ))}
+          {running && helpRequests.length > 0 && (
+            <p role="status" className="rounded-xl border border-amber-400 bg-amber-50 dark:bg-amber-500/10 p-3 mb-3 text-xs text-foreground inline-flex items-center gap-1.5">
+              <CircleAlert className="w-4 h-4 text-amber-600 flex-shrink-0" />
+              {helpRequests.length === 1
+                ? "A job is waiting for you. Answer it in the run panel on the left."
+                : `${helpRequests.length} jobs are waiting for you. Answer them in the run panel on the left.`}
+            </p>
+          )}
           <div ref={logRef} className="log-viewer">
             <div className="flex items-center gap-2 mb-2 text-muted-foreground">
               <Terminal className="w-3.5 h-3.5" /> {t("log.applicationLog")}
@@ -388,10 +337,12 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
 
               return (
                 <div key={row.job.url}>
-                  {/* Row */}
+                  {/* Row: a click expands it; View log sits beside it */}
+                  <div className="flex items-center hover:bg-secondary transition-colors">
                   <button
                     onClick={() => toggleExpand(row.job.url)}
-                    className="w-full text-left px-4 py-3 hover:bg-secondary transition-colors flex items-center gap-3"
+                    aria-expanded={isExpanded}
+                    className="flex-1 min-w-0 text-left pl-4 pr-2 py-3 flex items-center gap-3"
                   >
                     {isExpanded ? (
                       <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
@@ -442,6 +393,15 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
                         : "—"}
                     </span>
                   </button>
+                  <button
+                    onClick={() => setLogJob(row.job)}
+                    aria-label={`View log for ${row.job.title || "this job"}`}
+                    title="What the app did on this job, attempt after attempt"
+                    className="flex-shrink-0 mr-3 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold border border-border hover:bg-background"
+                  >
+                    <ScrollText className="w-3 h-3" /> View log
+                  </button>
+                  </div>
 
                   {/* Expanded detail panel */}
                   {isExpanded && (
@@ -600,6 +560,10 @@ export default function HistoryTab({ onJobsChanged }: HistoryTabProps) {
             })}
           </div>
         </div>
+      )}
+
+      {logJob && (
+        <JobLogDialog url={logJob.url} title={logJob.title || logJob.url} onClose={() => setLogJob(null)} />
       )}
 
       {/* Empty state for applied jobs */}

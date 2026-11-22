@@ -17,7 +17,6 @@ const mockGetInbox = vi.mocked(getInbox);
 
 const base: InboxStatus = {
   checking: false, requested: false, status: "", error: "", schedule: "off", last_checked: null, busy: false,
-  performance_mode: false,
   emails: [
     { id: "a", date: "2026-10-08T11:05", sender: "Stark Global", sender_email: "r@stark.example", subject: "Interview invitation",
       snippet: "", category: "interview", company: "Stark Global", role: "Analytics Intern",
@@ -71,13 +70,6 @@ describe("Inbox", () => {
     expect(makePrepSheet).not.toHaveBeenCalled();
     await user.click(buttons[0]);
     await waitFor(() => expect(makePrepSheet).toHaveBeenCalledWith("a"));
-  });
-
-  it("hides prep sheets in performance mode", async () => {
-    mockGetInbox.mockResolvedValue({ ...structuredClone(base), performance_mode: true } as never);
-    render(<Inbox />);
-    await screen.findByText("Stark Global");
-    expect(screen.queryByRole("button", { name: /Make prep sheet/ })).not.toBeInTheDocument();
   });
 
   it("opens a saved prep sheet", async () => {

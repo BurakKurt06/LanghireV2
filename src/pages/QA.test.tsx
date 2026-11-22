@@ -10,6 +10,8 @@ import {
   mergeQA,
   autoSquashQA,
   smartSquashQA,
+  getDefaultAnswers,
+  setDefaultAnswer,
 } from "../lib/api";
 import { trackEvent } from "../lib/analytics";
 import type { QAEntry } from "../lib/types";
@@ -33,6 +35,8 @@ vi.mock("../lib/api", async (importOriginal) => ({
   mergeQA: vi.fn(),
   autoSquashQA: vi.fn(),
   smartSquashQA: vi.fn(),
+  getDefaultAnswers: vi.fn(),
+  setDefaultAnswer: vi.fn(),
 }));
 
 const mockGetQAList = vi.mocked(getQAList);
@@ -43,6 +47,12 @@ const mockMergeQA = vi.mocked(mergeQA);
 const mockAutoSquashQA = vi.mocked(autoSquashQA);
 const mockSmartSquashQA = vi.mocked(smartSquashQA);
 const mockTrackEvent = vi.mocked(trackEvent);
+
+const DEFAULTS = [
+  { id: "worked_here", question: "Have you worked for this company before?", answer: "No", default: "No", changed: false },
+  { id: "heard_about", question: "How did you hear about this job?", answer: "A friend",
+    default: "The company's own careers website", changed: true },
+];
 
 function makeEntry(over: Partial<QAEntry> = {}): QAEntry {
   return {
@@ -74,6 +84,51 @@ describe("QA page", () => {
     mockMergeQA.mockResolvedValue({ success: true } as never);
     mockAutoSquashQA.mockResolvedValue({ success: true, merged: 3 } as never);
     mockSmartSquashQA.mockResolvedValue({ success: true, merged: 1 } as never);
+    vi.mocked(getDefaultAnswers).mockResolvedValue({ answers: DEFAULTS } as never);
+  });
+
+  it("lists the default answers in one place, folded until opened", async () => {
+    const user = userEvent.setup();
+    render(<QA />);
+    const section = await screen.findByRole("region", { name: "Default answers" });
+    expect(within(section).getByText(/2 answers, 1 changed by you/)).toBeInTheDocument();
+    expect(within(section).queryByLabelText("Have you worked for this company before?")).not.toBeInTheDocument();
+    await user.click(within(section).getByRole("button", { name: /Default answers/ }));
+    expect(within(section).getByLabelText("Have you worked for this company before?")).toHaveValue("No");
+    expect(within(section).getByLabelText("How did you hear about this job?")).toHaveValue("A friend");
+    expect(within(section).getAllByText("Built-in answer")).toHaveLength(1);
+    expect(within(section).getAllByText("Changed by you")).toHaveLength(1);
+  });
+
+  it("changes a default answer and can put the built-in one back", async () => {
+    vi.mocked(setDefaultAnswer)
+      .mockResolvedValueOnce({ success: true, answers: [{ ...DEFAULTS[0], answer: "Yes, as an intern", changed: true }, DEFAULTS[1]] } as never)
+      .mockResolvedValueOnce({ success: true, answers: [{ ...DEFAULTS[0], answer: "Yes, as an intern", changed: true },
+        { ...DEFAULTS[1], answer: DEFAULTS[1].default, changed: false }] } as never);
+    const user = userEvent.setup();
+    render(<QA />);
+    const section = await screen.findByRole("region", { name: "Default answers" });
+    await user.click(within(section).getByRole("button", { name: /Default answers/ }));
+
+    const worked = within(section).getByLabelText("Have you worked for this company before?");
+    await user.clear(worked);
+    await user.type(worked, "Yes, as an intern");
+    await user.click(within(section).getByRole("button", { name: "Save" }));
+    expect(vi.mocked(setDefaultAnswer)).toHaveBeenCalledWith("worked_here", "Yes, as an intern");
+    await waitFor(() => expect(within(section).getAllByText("Changed by you")).toHaveLength(2));   // both are now the user's
+
+    await user.click(within(section).getByRole("button", { name: 'Reset "How did you hear about this job?" to the built-in answer' }));
+    expect(vi.mocked(setDefaultAnswer)).toHaveBeenLastCalledWith("heard_about", "");
+    await waitFor(() =>
+      expect(within(section).getByLabelText("How did you hear about this job?")).toHaveValue("The company's own careers website"));
+    expect(within(section).getAllByText("Changed by you")).toHaveLength(1);
+    expect(within(section).getByLabelText("Have you worked for this company before?")).toHaveValue("Yes, as an intern");
+  });
+
+  it("an answer filled in from the default answers is labelled as one", async () => {
+    mockGetQAList.mockResolvedValue([makeEntry({ id: 9, question: "Are you related to anyone here?", answer: "No", source: "default" })] as never);
+    render(<QA />);
+    expect(await screen.findByText("card.origin.default")).toBeInTheDocument();
   });
 
   it("marks who answered, and says how many questions need an answer", async () => {

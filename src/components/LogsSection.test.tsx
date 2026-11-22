@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import Logs from "./Logs";
+import LogsSection from "./LogsSection";
 import { getRunsWithLogs, getRunLogs } from "../lib/api";
 import type { RunWithLogs, RunLog } from "../lib/types";
 
@@ -77,7 +77,7 @@ const logs: RunLog[] = [
   },
 ];
 
-describe("Logs page", () => {
+describe("Logs section (Settings -> App & browser)", () => {
   beforeEach(() => {
     mockGetRunsWithLogs.mockResolvedValue(runs as never);
     mockGetRunLogs.mockResolvedValue(logs as never);
@@ -85,12 +85,12 @@ describe("Logs page", () => {
 
   it("shows the loading spinner before runs resolve", () => {
     mockGetRunsWithLogs.mockReturnValue(new Promise(() => {}) as never);
-    render(<Logs />);
+    render(<LogsSection />);
     expect(screen.queryByText("title")).not.toBeInTheDocument();
   });
 
   it("renders the run list after load", async () => {
-    render(<Logs />);
+    render(<LogsSection />);
     expect(await screen.findByText("Backend Engineer")).toBeInTheDocument();
     expect(screen.getByText("Frontend Engineer")).toBeInTheDocument();
     // Company + domain detail line.
@@ -98,14 +98,14 @@ describe("Logs page", () => {
   });
 
   it("shows the select-a-run prompt before any run is chosen", async () => {
-    render(<Logs />);
+    render(<LogsSection />);
     await screen.findByText("Backend Engineer");
     expect(screen.getByText("detail.selectFromPanel")).toBeInTheDocument();
   });
 
   it("selecting a run loads and renders its log lines", async () => {
     const user = userEvent.setup();
-    render(<Logs />);
+    render(<LogsSection />);
     await screen.findByText("Backend Engineer");
 
     await user.click(screen.getByText("Backend Engineer"));
@@ -118,7 +118,7 @@ describe("Logs page", () => {
   it("renders a no-logs message when the selected run has no logs", async () => {
     mockGetRunLogs.mockResolvedValue([] as never);
     const user = userEvent.setup();
-    render(<Logs />);
+    render(<LogsSection />);
     await screen.findByText("Backend Engineer");
 
     await user.click(screen.getByText("Backend Engineer"));
@@ -128,7 +128,7 @@ describe("Logs page", () => {
 
   it("refresh re-fetches the run list", async () => {
     const user = userEvent.setup();
-    render(<Logs />);
+    render(<LogsSection />);
     await screen.findByText("Backend Engineer");
 
     await user.click(screen.getByRole("button", { name: /refresh/ }));
@@ -138,13 +138,13 @@ describe("Logs page", () => {
 
   it("renders the empty state when there are no runs", async () => {
     mockGetRunsWithLogs.mockResolvedValue([] as never);
-    render(<Logs />);
+    render(<LogsSection />);
     expect(await screen.findByText("runs.empty")).toBeInTheDocument();
   });
 
   it("renders gracefully when getRunsWithLogs rejects (empty list)", async () => {
     mockGetRunsWithLogs.mockRejectedValue(new Error("boom"));
-    render(<Logs />);
+    render(<LogsSection />);
     // Loading resolves via finally; empty state shown.
     expect(await screen.findByText("runs.empty")).toBeInTheDocument();
   });
@@ -152,7 +152,7 @@ describe("Logs page", () => {
   it("keeps the run list usable when getRunLogs rejects (no logs shown)", async () => {
     mockGetRunLogs.mockRejectedValue(new Error("boom"));
     const user = userEvent.setup();
-    render(<Logs />);
+    render(<LogsSection />);
     await screen.findByText("Backend Engineer");
 
     await user.click(screen.getByText("Backend Engineer"));

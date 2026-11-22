@@ -196,3 +196,40 @@ def site_password(site: str, create: bool = True, *, migrate_from: str | None = 
 def site_password_sites() -> list[str]:
     """The employer sites that have an app-generated password (for display, never the passwords)."""
     return sorted(_load_vault())
+
+
+def save_site_password(site: str, password: str, kind: str = "changed") -> None:
+    """Keep the password one site's account uses when it differs from the user's own.
+
+    kind "changed": the user's job-site password with characters added to meet that site's
+    rules (shown in Settings so the user can sign in there themselves). Raises VaultUnreadable
+    rather than replacing a damaged file.
+    """
+    site = (site or "").strip().lower()
+    if not site or not password:
+        return
+    from datetime import datetime, timezone
+    with _lock:
+        vault, readable = _vault_state()
+        if not readable:
+            raise VaultUnreadable(
+                f"The saved employer passwords ({_vault_path().name}) can't be read, so this site's password "
+                "wasn't saved; the file was left as it is. Restore or move it, then try again.")
+        vault[site] = {"password": protect(password), "kind": kind,
+                       "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+        path = _vault_path()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(vault, indent=1), encoding="utf-8")
+        tmp.replace(path)
+        restrict_file(path)
+
+
+def site_password_entries() -> list[dict]:
+    """[{site, kind, saved_at}] for display (never the passwords). kind "generated" marks a
+    password an earlier version made for that site; "changed" one made from the user's own."""
+    entries = []
+    for site, entry in sorted(_load_vault().items()):
+        if isinstance(entry, dict) and entry.get("password"):
+            entries.append({"site": site, "kind": entry.get("kind") or "generated",
+                            "saved_at": entry.get("saved_at") or ""})
+    return entries

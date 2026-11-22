@@ -4,7 +4,7 @@
   "hideCollector": "Hide Collector",
   "collectJobs": "Collect Jobs",
   "status": {
-    "pending": "Pending",
+    "pending": "Ready to apply",
     "applied": "Applied",
     "failed": "Failed",
     "blocked": "Blocked",
@@ -74,11 +74,11 @@
     "applying": "Applying...",
     "retry": "Retry",
     "apply": "Apply",
-    "openOnLinkedIn": "Open on LinkedIn",
     "payNotListed": "Pay not listed",
     "match": "Match {{score}}/10",
     "aiSuggestion": "AI match {{score}}/10",
-    "sourceFit": "Source fit {{score}}/10"
+    "sourceFit": "Source fit {{score}}/10",
+    "openPosting": "Open the job posting"
   },
   "showingJobs": "Showing {{count}} job",
   "showingJobs_plural": "Showing {{count}} jobs",

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import RunPanel from "./RunPanel";
 import {
@@ -50,27 +50,30 @@ describe("RunPanel", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("shows the site asking for account details and decides only its displayed ID", async () => {
+  // Decision 1: approval prompts were removed, so a site asking for account details shows no
+  // Allow/Block card any more; the run panel only shows the running job.
+  it("shows no account-details approval card for a site asking for account details", async () => {
     mockStatus.mockResolvedValue(running({ requests: [requestRow] }) as never);
-    const user = userEvent.setup();
     render(<RunPanel />);
-    expect(await screen.findByRole("group", { name: "Review https://login.careers.example" })).toBeInTheDocument();
-    expect(screen.getByText("Tenant: acme")).toBeInTheDocument();
-    expect(screen.getByText("https://login.careers.example/acme/sign-in")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Allow account details" }));
-    expect(decideBrowserRequests).toHaveBeenCalledWith([requestRow.id], true);
-    await user.click(screen.getByRole("button", { name: "Block" }));
-    expect(decideBrowserRequests).toHaveBeenCalledWith([requestRow.id], false);
+    expect(await screen.findByText("Data Intern")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Review https://login.careers.example" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Tenant: acme")).not.toBeInTheDocument();
+    expect(screen.queryByText("https://login.careers.example/acme/sign-in")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Allow account details" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Block" })).not.toBeInTheDocument();
+    expect(decideBrowserRequests).not.toHaveBeenCalled();
   });
 
-  it("shows collection approvals even when no application is running and can stop collection", async () => {
+  // Decision 1: collection approvals are no longer shown in the run panel; it renders nothing
+  // when no application run is going (collection has its own Stop on the Jobs page).
+  it("shows nothing for collection requests when no application is running", async () => {
     mockStatus.mockResolvedValue(running({ running: false, requests: [requestRow], current: [] }) as never);
-    const user = userEvent.setup();
-    render(<RunPanel />);
-    await screen.findByRole("region", { name: "Account details approval" });
-    await user.click(screen.getByRole("button", { name: "Stop" }));
-    expect(stopJobCollection).toHaveBeenCalled();
-    expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
+    const { container } = render(<RunPanel />);
+    await waitFor(() => expect(mockStatus).toHaveBeenCalled());
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByRole("region", { name: "Account details approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+    expect(stopJobCollection).not.toHaveBeenCalled();
   });
 
   it("shows the current job, mode, step and time", async () => {
@@ -80,6 +83,7 @@ describe("RunPanel", () => {
     expect(screen.getByText("Full auto")).toBeInTheDocument();
     expect(screen.getByText("Step 12")).toBeInTheDocument();
     expect(screen.getByText(/^1:3\d$/)).toBeInTheDocument();
+    expect(screen.getByText("Applying")).toBeInTheDocument();
   });
 
   it("pauses, skips this job and stops", async () => {
@@ -100,30 +104,154 @@ describe("RunPanel", () => {
     expect(await screen.findByText("Paused")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Resume/ }));
     expect(resumeApplying).toHaveBeenCalled();
+    expect(pauseApplying).not.toHaveBeenCalled();
   });
 
-  it("answers a help request with a message, or gives up", async () => {
+  // Decision 1: the "You stepped in" note (current[].user_active) replaces the old flow; the
+  // agent waits, and the Pause button becomes Resume.
+  it("says when the user stepped in and offers Resume instead of Pause", async () => {
+    mockStatus.mockResolvedValue(running({ current: [{ ...JOB, user_active: true }] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    expect(await screen.findByText("Waiting for you")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/^You stepped in, so the agent is waiting\./);
+    expect(screen.queryByRole("button", { name: /Pause/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Resume/ }));
+    expect(resumeApplying).toHaveBeenCalled();
+    expect(pauseApplying).not.toHaveBeenCalled();
+  });
+
+  // Decision 1: current[].note (what the user's own activity led to) is shown on the job.
+  it("shows the note about what the user's activity led to", async () => {
+    mockStatus.mockResolvedValue(running({ current: [{ ...JOB, note: "Continuing from your page, keeping your 3 edits." }] }) as never);
+    render(<RunPanel />);
+    expect(await screen.findByRole("status")).toHaveTextContent("Continuing from your page, keeping your 3 edits.");
+    expect(screen.getByText("Applying")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Pause/ })).toBeInTheDocument();
+  });
+
+  // Decision 1: answerHelp has a 4th argument (the answers) and "Give up" became "Next job".
+  it("answers a help request with a message, or moves on to the next job", async () => {
     mockStatus.mockResolvedValue(running({ run_mode: "trial", help: [{ url: JOB.url, title: "Data Intern", company: "Contoso",
       problem: "The phone field keeps rejecting the number." }] }) as never);
     const user = userEvent.setup();
     render(<RunPanel />);
     expect(await screen.findByText(/phone field keeps rejecting/)).toBeInTheDocument();
     expect(screen.getByText("Trial run")).toBeInTheDocument();
+    expect(screen.getByText("Needs you")).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Message to the agent" }), "Use 555 123 4567");
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "Use 555 123 4567", false);
-    await user.click(screen.getByRole("button", { name: "Give up" }));
-    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "", true);
+    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "Use 555 123 4567", false, {});
+    expect(screen.queryByRole("button", { name: "Give up" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Next job" }));
+    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "", true, {});
   });
 
-  it("approves or skips a trial review", async () => {
-    mockStatus.mockResolvedValue(running({ reviews: [{ url: JOB.url, title: "Data Intern", company: "Contoso", summary: "All set" }] }) as never);
+  // Decision 1: questions are shown whole (section, full text, choices) and the answers go as answerHelp's 4th argument.
+  it("shows each question whole and sends only the given answers", async () => {
+    const authQuestion = "Are you legally allowed to work in the country of this job without visa sponsorship?";
+    const whyQuestion = "Why do you want this internship?";
+    mockStatus.mockResolvedValue(running({ help: [{ url: JOB.url, title: "Data Intern", company: "Contoso", kind: "questions",
+      problem: "Two questions have no saved answer.", seconds_left: 125,
+      questions: [
+        { section: "Work authorization", question: authQuestion, options: ["Yes", "No", ""] },
+        { question: whyQuestion },
+      ] }] }) as never);
     const user = userEvent.setup();
     render(<RunPanel />);
-    await user.click(await screen.findByRole("button", { name: /^Submit$/ }));
-    expect(reviewApplication).toHaveBeenCalledWith(JOB.url, true);
-    await user.click(screen.getByRole("button", { name: /^Skip$/ }));
-    expect(reviewApplication).toHaveBeenCalledWith(JOB.url, false);
+    expect(await screen.findByText("Your answer is needed")).toBeInTheDocument();
+    expect(screen.getByText("Work authorization")).toBeInTheDocument();
+    const select = screen.getByRole("combobox", { name: authQuestion });
+    // Review 2026-11-12: any list of choices also takes a typed answer (a choice the list leaves out).
+    expect(within(select).getAllByRole("option").map((o) => o.textContent)).toEqual(["Choose…", "Yes", "No", "Something else (type it)"]);
+    expect(screen.getByRole("textbox", { name: whyQuestion })).toBeInTheDocument();
+    // ...and the optional message stays, for what a field can't hold (review 2026-11-12).
+    expect(screen.getByRole("textbox", { name: "Message to the agent" })).toBeInTheDocument();
+    expect(screen.queryByText("Two questions have no saved answer.")).not.toBeInTheDocument();
+    expect(screen.getByText(/moves on to the next job in 2:05\./)).toBeInTheDocument();
+
+    const answer = screen.getByRole("button", { name: "Answer and continue" });
+    expect(answer).toBeDisabled();
+    await user.selectOptions(select, "Yes");
+    expect(answer).toBeEnabled();
+    await user.click(answer);
+    expect(answerHelp).toHaveBeenCalledTimes(1);
+    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "", false, { [authQuestion]: "Yes" });
+  });
+
+  it("a tick-all-that-apply question gets tick boxes; a choice the list leaves out can be typed", async () => {
+    const which = "Which of these locations would you work in?";
+    const office = "Which office is closest to you?";
+    mockStatus.mockResolvedValue(running({ help: [{ url: JOB.url, title: "Data Intern", company: "Contoso", kind: "questions",
+      problem: "", questions: [
+        { question: which, field_type: "checkbox", options: ["New York", "Chicago", "Remote"] },
+        { question: office, field_type: "dropdown", options: ["Boston", "Austin"] },
+      ] }] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    const group = await screen.findByRole("group", { name: which });
+    await user.click(within(group).getByRole("checkbox", { name: "Remote" }));
+    await user.click(within(group).getByRole("checkbox", { name: "New York" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: office }), "Something else (type it)");
+    await user.type(screen.getByRole("textbox", { name: `Your answer: ${office}` }), "Denver");
+    await user.click(screen.getByRole("button", { name: "Answer and continue" }));
+    // Ticked choices in the form's own order; the typed answer as typed.
+    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "", false, { [which]: "New York, Remote", [office]: "Denver" });
+  });
+
+  it("a message alone can answer: 'I filled it in myself'", async () => {
+    const which = "Which of these apply to you?";
+    mockStatus.mockResolvedValue(running({ help: [{ url: JOB.url, title: "Data Intern", company: "Contoso", kind: "questions",
+      problem: "", questions: [{ question: which, field_type: "checkbox", options: ["A", "B"] }] }] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    const answer = await screen.findByRole("button", { name: "Answer and continue" });
+    expect(answer).toBeDisabled();
+    await user.type(screen.getByRole("textbox", { name: "Message to the agent" }), "I ticked both myself");
+    expect(answer).toBeEnabled();
+    await user.click(answer);
+    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "I ticked both myself", false, {});
+  });
+
+  // Decision 1: a CAPTCHA help request asks the user to solve it in the browser (no message box).
+  it("asks the user to solve a CAPTCHA in the browser", async () => {
+    mockStatus.mockResolvedValue(running({ help: [{ url: JOB.url, title: "Data Intern", company: "Contoso", kind: "captcha",
+      problem: "The site shows a picture puzzle." }] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    expect(await screen.findByText("Solve the CAPTCHA in the browser")).toBeInTheDocument();
+    expect(screen.getByText("The site shows a picture puzzle.")).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.queryByText(/moves on to the next job in/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "I solved it" }));
+    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "", false, {});
+  });
+
+  // Decision 1: a verification help request has a code box and Continue sends the code.
+  it("sends a verification code", async () => {
+    mockStatus.mockResolvedValue(running({ help: [{ url: JOB.url, title: "Data Intern", company: "Contoso", kind: "verification",
+      problem: "The site sent a code to your email.", seconds_left: 59 }] }) as never);
+    const user = userEvent.setup();
+    render(<RunPanel />);
+    expect(await screen.findByText("Verification code needed")).toBeInTheDocument();
+    expect(screen.getByText(/moves on to the next job in 0:59\./)).toBeInTheDocument();
+    const code = screen.getByRole("textbox", { name: "Verification code" });
+    expect(code).toHaveAttribute("placeholder", "Type the code from the email");
+    await user.type(code, "246810");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(answerHelp).toHaveBeenCalledWith(JOB.url, "246810", false, {});
+  });
+
+  // Decision 1: Trial "review" approve/skip cards were removed; Trial goes on without a Submit prompt.
+  it("shows no trial review card", async () => {
+    mockStatus.mockResolvedValue(running({ run_mode: "trial", reviews: [{ url: JOB.url, title: "Data Intern", company: "Contoso", summary: "All set" }] }) as never);
+    render(<RunPanel />);
+    expect(await screen.findByText("Trial run")).toBeInTheDocument();
+    expect(screen.queryByText("All set")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Submit$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Skip$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Skip this job" })).toBeInTheDocument();
+    expect(reviewApplication).not.toHaveBeenCalled();
   });
 
   it("lists every job running at the same time, each with its own Skip", async () => {

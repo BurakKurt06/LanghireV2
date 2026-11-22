@@ -19,11 +19,13 @@ import { Download, Loader2 as Spinner } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { PageHeader, LoadingSpinner, ProgressBar } from "../components/ui";
+import Insights from "../components/Insights";
 
 export default function Dashboard() {
   const { t } = useTranslation("dashboard");
   const [stats, setStats] = useState({
-    totalJobs: 0, applied: 0, failed: 0, pending: 0, successRate: 0, totalMemories: 0,
+    totalJobs: 0, applied: 0, notApplied: 0, failed: 0, needsYou: 0, blocked: 0, unknown: 0, pending: 0,
+    successRate: null as number | null, finished: 0, totalMemories: 0,
   });
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
@@ -70,21 +72,34 @@ export default function Dashboard() {
         const mem = data.memory || { total_memories: 0, unique_domains: 0, by_category: {} };
         const total = jobs.total || 0;
         const applied = jobs.applied || 0;
+        // Every attempt that ended without an application counts: an error, a job left for you
+        // ("Needs you", which includes an unknown outcome) and a blocked one. The card used to count
+        // only "failed", and showed "Failed 0, Success rate 100%" over a list full of errors.
+        const failed = jobs.failed || 0;
+        const needsYou = jobs.needs_you || 0;
+        const blocked = jobs.blocked || 0;
+        const notApplied = jobs.not_successful ?? failed + needsYou + blocked;
+        const finished = jobs.finished ?? applied + notApplied;
         if (!cancelled) {
           setStats({
             totalJobs: total,
             applied,
-            failed: jobs.failed || 0,
+            notApplied,
+            failed,
+            needsYou,
+            blocked,
+            unknown: jobs.outcome_unknown || 0,
             pending: jobs.pending || 0,
-            // Applied out of finished attempts (as on Analytics), not out of every job collected.
-            successRate: applied + (jobs.failed || 0) > 0 ? Math.round((applied / (applied + (jobs.failed || 0))) * 100) : 0,
+            // Applied out of all finished attempts; no rate at all before the first one.
+            successRate: finished > 0 ? Math.round((applied / finished) * 100) : null,
+            finished,
             totalMemories: mem.total_memories || 0,
           });
           if (setup) setSetupStatus(setup);
           trackEvent("dashboard_stats", {
             jobs_collected: total,
             jobs_applied: applied,
-            jobs_failed: jobs.failed || 0,
+            jobs_failed: notApplied,
             jobs_pending: jobs.pending || 0,
             jobs_in_progress: jobs.in_progress || 0,
             memories_created: mem.total_memories || 0,
@@ -155,12 +170,19 @@ export default function Dashboard() {
   }, []);
 
   const cards = [
-    { label: t("cards.totalJobs"), value: stats.totalJobs, icon: Briefcase, color: "text-[#222222]", bg: "bg-[#F7F7F7]" },
-    { label: t("cards.applied"), value: stats.applied, icon: CheckCircle, color: "text-success", bg: "bg-[#F0FFF0]" },
-    { label: t("cards.failed"), value: stats.failed, icon: XCircle, color: "text-destructive", bg: "bg-[#FFF0F0]" },
-    { label: t("cards.pending"), value: stats.pending, icon: Clock, color: "text-warning", bg: "bg-[#FFF8F0]" },
-    { label: t("cards.successRate"), value: `${stats.successRate}%`, icon: TrendingUp, color: "text-primary", bg: "bg-[#FFF0F3]" },
-    { label: t("cards.memories"), value: stats.totalMemories, icon: Brain, color: "text-[#6B21A8]", bg: "bg-[#F5F0FF]" },
+    { label: t("cards.totalJobs"), value: stats.totalJobs, icon: Briefcase, color: "text-[#222222]", bg: "bg-[#F7F7F7]", detail: "" },
+    { label: t("cards.applied"), value: stats.applied, icon: CheckCircle, color: "text-success", bg: "bg-[#F0FFF0]", detail: "" },
+    { label: t("cards.failed"), value: stats.notApplied, icon: XCircle, color: "text-destructive", bg: "bg-[#FFF0F0]",
+      detail: stats.notApplied > 0
+        ? [stats.failed && `${stats.failed} failed`,
+           stats.needsYou && `${stats.needsYou} need you${stats.unknown ? ` (${stats.unknown} may have been sent)` : ""}`,
+           stats.blocked && `${stats.blocked} blocked`].filter(Boolean).join(" · ")
+        : "" },
+    { label: t("cards.pending"), value: stats.pending, icon: Clock, color: "text-warning", bg: "bg-[#FFF8F0]", detail: "" },
+    { label: t("cards.successRate"), value: stats.successRate === null ? "—" : `${stats.successRate}%`, icon: TrendingUp,
+      color: "text-primary", bg: "bg-[#FFF0F3]",
+      detail: stats.finished > 0 ? `${stats.applied} of ${stats.finished} finished attempts` : "No finished attempts yet" },
+    { label: t("cards.memories"), value: stats.totalMemories, icon: Brain, color: "text-[#6B21A8]", bg: "bg-[#F5F0FF]", detail: "" },
   ];
 
   const setupSteps = [
@@ -174,7 +196,7 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="max-w-5xl">
+      <div className="page-wide">
         <PageHeader title={t("title")} subtitle={t("subtitle")} />
         {/* Show Chromium progress even while loading */}
         {chromiumState && chromiumState.state === "installing" && (
@@ -198,14 +220,14 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="max-w-5xl">
-      <PageHeader title="Dashboard" subtitle="Overview of your job application progress" />
+    <div className="page-wide">
+      <PageHeader title={t("title")} subtitle={t("subtitle")} />
 
       {backendOk === false && (
         <div className="error-banner mb-6 flex items-center gap-2">
           <XCircle className="w-4 h-4 text-destructive flex-shrink-0" />
           <span>
-            Backend not connected. Start it with: <code className="bg-[#FFE0E0] px-1.5 py-0.5 rounded-lg text-xs font-mono">uv run python backend/main.py</code>
+            The app's engine isn't answering yet. It usually starts within a few seconds; if this stays, close LangHireV2 and open it again.
           </span>
         </div>
       )}
@@ -227,24 +249,27 @@ export default function Dashboard() {
       {chromiumState && chromiumState.state === "failed" && (
         <div className="error-banner mb-6 flex items-center gap-2">
           <XCircle className="w-4 h-4 text-destructive flex-shrink-0" />
-          <span>Chromium install failed: {chromiumState.message}. Run <code className="bg-[#FFE0E0] px-1.5 py-0.5 rounded-lg text-xs font-mono">python3 -m playwright install chromium</code> manually.</span>
+          <span>The app's own browser couldn't be downloaded ({chromiumState.message}). Check your internet connection and open LangHireV2 again, or pick an installed browser in Settings → App &amp; browser.</span>
         </div>
       )}
 
       {/* Stats Grid */}
-      <div className="grid grid-cols-3 gap-5 mb-8">
-        {cards.map(({ label, value, icon: Icon, color, bg }) => (
+      <div className="grid grid-cols-3 2xl:grid-cols-6 gap-5 mb-8">
+        {cards.map(({ label, value, icon: Icon, color, bg, detail }) => (
           <div key={label} className="card flex items-center gap-4">
             <div className={`${bg} p-3.5 rounded-2xl`}>
               <Icon className={`w-5 h-5 ${color}`} />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-[13px] text-muted-foreground font-medium">{label}</p>
               <p className="text-2xl font-extrabold text-foreground">{value}</p>
+              {detail && <p className="text-[11px] text-muted-foreground truncate" title={detail}>{detail}</p>}
             </div>
           </div>
         ))}
       </div>
+
+      <Insights />
 
       {/* Quick Actions */}
       <div className="card mb-6">

@@ -264,12 +264,21 @@ def test_both_agent_purposes_create_their_own_protected_proxy(tmp_path, monkeypa
     from core import shared_config, egress_proxy
     monkeypatch.setattr(shared_config, "selected_browser", lambda settings: (None, tmp_path / "browser"))
     monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {})
-    for purpose in ("application", "collection"):
-        kwargs = shared_config.build_browser_kwargs(purpose=purpose)
-        request_gate.RequestGate(SimpleNamespace(), "trial", {"url": "https://jobs.example"}, owner=purpose + ":1")
-        assert "--disable-extensions" in kwargs["args"]
-        assert "--host-resolver-rules=MAP * ~NOTFOUND" in kwargs["args"]
-        assert not egress_proxy._servers[("owner", purpose + ":1")].permitted()
+    # Collection keeps the gate: its browser gets a proxy that refuses everything.
+    kwargs = shared_config.build_browser_kwargs(purpose="collection")
+    request_gate.RequestGate(SimpleNamespace(), "trial", {"url": "https://jobs.example"}, owner="collection:1")
+    assert "--disable-extensions" in kwargs["args"]
+    assert any(a.startswith("--proxy-server=socks5://127.0.0.1:") for a in kwargs["args"])
+    assert not egress_proxy._servers[("owner", "collection:1")].permitted()
+    # The application browser connects by itself since 2026-11 (the user's decision: the gate broke
+    # real hiring sites): no proxy server, no gate, only the rule script that names what is off limits.
+    kwargs = shared_config.build_browser_kwargs(purpose="application")
+    assert not any(a.startswith("--proxy-server=") for a in kwargs["args"]) and "--disable-extensions" not in kwargs["args"]
+    assert any(a.startswith("--proxy-pac-url=data:") for a in kwargs["args"])
+    assert ("owner", "application:1") not in egress_proxy._servers
+    # Neither passes the flag Chrome warns about on every launch.
+    for purpose in ("application", "collection", "mail", "inbox"):
+        assert not any(a.startswith("--host-resolver-rules") for a in shared_config.build_browser_kwargs(purpose=purpose)["args"])
 
 
 @pytest.mark.asyncio

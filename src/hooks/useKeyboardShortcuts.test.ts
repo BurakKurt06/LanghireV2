@@ -7,6 +7,12 @@ vi.mock("react-router-dom", () => ({
   useNavigate: () => mockNavigate,
 }));
 
+const fullscreen = vi.hoisted(() => ({ toggle: vi.fn(async () => {}), leave: vi.fn(async () => {}) }));
+vi.mock("../lib/fullscreen", () => ({
+  toggleFullscreen: fullscreen.toggle,
+  leaveFullscreen: fullscreen.leave,
+}));
+
 function press(key: string, opts: Partial<KeyboardEventInit> & { target?: EventTarget } = {}) {
   const ev = new KeyboardEvent("keydown", { key, metaKey: true, bubbles: true, cancelable: true, ...opts });
   if (opts.target) Object.defineProperty(ev, "target", { value: opts.target });
@@ -17,6 +23,40 @@ function press(key: string, opts: Partial<KeyboardEventInit> & { target?: EventT
 describe("useKeyboardShortcuts", () => {
   beforeEach(() => {
     mockNavigate.mockClear();
+    fullscreen.toggle.mockClear();
+    fullscreen.leave.mockClear();
+  });
+
+  it("F11 toggles real fullscreen once per press, even while typing; a held key doesn't flicker", () => {
+    renderHook(() => useKeyboardShortcuts());
+    const typing = document.createElement("input");
+    const ev = press("F11", { metaKey: false, target: typing });
+    expect(ev.defaultPrevented).toBe(true);            // the web view's own F11 never runs
+    expect(fullscreen.toggle).toHaveBeenCalledTimes(1);
+    press("F11", { metaKey: false, repeat: true });
+    press("F11", { metaKey: false, repeat: true });
+    expect(fullscreen.toggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("Esc leaves fullscreen, but only closes a dialog when one is open", () => {
+    renderHook(() => useKeyboardShortcuts());
+    press("Escape", { metaKey: false });
+    expect(fullscreen.leave).toHaveBeenCalledTimes(1);
+
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    document.body.appendChild(dialog);
+    const ev = press("Escape", { metaKey: false });
+    expect(ev.defaultPrevented).toBe(false);           // the dialog still gets its Esc
+    expect(fullscreen.leave).toHaveBeenCalledTimes(1);
+    dialog.remove();
+
+    // A dialog that already handled Esc (and is closing) doesn't take the window out of fullscreen either.
+    const handled = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+    handled.preventDefault();
+    window.dispatchEvent(handled);
+    expect(fullscreen.leave).toHaveBeenCalledTimes(1);
   });
 
   it("navigates to each page on Cmd/Ctrl+1..8", () => {

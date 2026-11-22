@@ -8,27 +8,24 @@ import {
   Brain,
   Settings,
   BookOpen,
-  ScrollText,
-  MessageSquare,
   HelpCircle,
-  BarChart3,
   Mail,
 } from "lucide-react";
 import { checkHealth } from "../../lib/api";
 import RunPanel from "../RunPanel";
 
+// Guide sits at the bottom, directly above Settings. Logs and Send feedback are sections of
+// Settings → App & browser; Analytics is the lower half of the Dashboard. The order matches
+// Ctrl+1..8 (hooks/useKeyboardShortcuts.ts).
 const navItems = [
   { to: "/", icon: LayoutDashboard, labelKey: "nav.dashboard" },
-  { to: "/analytics", icon: BarChart3, labelKey: "nav.analytics" },
-  { to: "/guide", icon: BookOpen, labelKey: "nav.guide" },
   { to: "/profile", icon: User, labelKey: "nav.profile" },
   { to: "/jobs", icon: Briefcase, labelKey: "nav.jobs" },
   { to: "/inbox", icon: Mail, labelKey: "nav.inbox" },
   { to: "/memory", icon: Brain, labelKey: "nav.memory" },
   { to: "/qa", icon: HelpCircle, labelKey: "nav.qa" },
-  { to: "/logs", icon: ScrollText, labelKey: "nav.logs" },
+  { to: "/guide", icon: BookOpen, labelKey: "nav.guide" },
   { to: "/settings", icon: Settings, labelKey: "nav.settings" },
-  { to: "/feedback", icon: MessageSquare, labelKey: "nav.feedback" },
 ];
 
 export default function Sidebar() {

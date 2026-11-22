@@ -82,22 +82,37 @@ def test_unknown_consequential_questions_end_the_job_for_the_user(tmp_path, monk
     assert {"Do you consent to a background check?", "Education start date"} <= unanswered
 
 
-def test_in_a_trial_run_the_user_is_asked_directly(monkeypatch, tmp_path):
+@pytest.mark.parametrize("trial", [True, False])
+def test_the_user_is_asked_directly_and_their_answer_continues_the_run(monkeypatch, tmp_path, trial):
+    """In both modes the run shows the question and waits a few minutes (it used to end a Full auto
+    run at once, and end a Trial run without asking): an answer given in time is saved as the
+    user's and the application goes on."""
     store = MemoryStore(tmp_path / "m.db")
     monkeypatch.setattr(apply_jobs, "get_memory_store", lambda: store)
-    asked = []
-    agent_ref = {}
-    tools = apply_jobs.build_tools({"url": ACME, "title": "Intern", "company": "Acme"}, "acme.example", True, agent_ref, 1)
-
-    async def help(problem, session):
-        asked.append(problem)
-        return apply_jobs.ActionResult(extracted_content="The user answered.")
-
-    agent_ref["wait_for_help"] = help
+    monkeypatch.setattr(apply_jobs, "USER_WAIT_SECONDS", 20)
+    monkeypatch.setattr(apply_jobs, "update_job", lambda url, **fields: True)
+    tools = apply_jobs.build_tools({"url": ACME, "title": "Intern", "company": "Acme"}, "acme.example", trial, {}, 1)
     ask = tools.registry.registry.actions["ask_for_answers"].function
-    params = apply_jobs.UnansweredQuestions(questions=[apply_jobs.UnansweredQuestion(question="Any relatives here?")])
-    result = asyncio.run(ask(params=params, browser_session=object()))
-    assert asked == ["Please answer: Any relatives here?"] and not result.is_done
+    question = "Describe a time you led a team (500 words)."
+    params = apply_jobs.UnansweredQuestions(questions=[apply_jobs.UnansweredQuestion(
+        question=question, section="Essay questions", field_type="text")])
+
+    async def scenario():
+        task = asyncio.ensure_future(ask(params=params, browser_session=object()))
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            waiting = apply_jobs.pending_help()
+            if waiting:
+                break
+        assert waiting[0]["kind"] == "questions" and waiting[0]["questions"][0]["question"] == question
+        assert waiting[0]["questions"][0]["section"] == "Essay questions" and waiting[0]["seconds_left"] > 0
+        assert apply_jobs.answer_help(ACME, "", False, {question: "I led the robotics club."})
+        return await task
+
+    result = asyncio.run(scenario())
+    assert not result.is_done and "I led the robotics club." in result.extracted_content
+    assert store.qa_user_answers()[question] == "I led the robotics club."
+    assert apply_jobs.pending_help() == []
 
 
 def test_a_letter_saved_for_the_job_is_used_as_is(monkeypatch, tmp_path):
@@ -150,7 +165,7 @@ def test_a_pause_change_wins_over_a_saved_answer_for_this_application(tmp_path, 
     monkeypatch.setattr(apply_jobs, "get_memory_store", lambda: store)
     agent = _Agent()
     apply_jobs.keep_user_edits(agent, [(question, "No", "Yes")])
-    assert f'"{question}" = "Yes"' in agent.text and "even where the profile or a saved answer says otherwise" in agent.text
+    assert f'"{question}" = "Yes"' in agent.text and "even where the profile, a saved answer or a default says otherwise" in agent.text
     assert store.qa_user_answers()[question] == "No"
 
 

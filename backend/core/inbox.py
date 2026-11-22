@@ -352,24 +352,46 @@ def extract_verification(kind: str, text: str, links: list[str], allowed: set[st
     return ""
 
 
+# A verification email is minutes old; never look further back than this, whatever `since` says.
+VERIFICATION_MAX_AGE = timedelta(hours=1)
+
+
+def _row_time(text: str) -> datetime | None:
+    """When a listed email arrived, from Gmail's date tooltip ("Sat, Nov 14, 2026, 11:49 PM"); None if unreadable."""
+    text = re.sub(r"\s+", " ", (text or "").replace("\u202f", " ")).strip()
+    for fmt in ("%a, %b %d, %Y, %I:%M %p", "%a, %b %d, %Y %I:%M %p", "%b %d, %Y, %I:%M %p"):
+        try:
+            return datetime.strptime(text, fmt).astimezone()
+        except ValueError:
+            continue
+    return None
+
+
 async def find_verification(kind: str, allowed_domains: set[str], since: datetime, browser_kwargs: dict,
                             wait_seconds: float = 90, *, employer_domains: set[str] | None = None,
-                            employer_names=(), recipient: str = "", link_validator=None) -> dict:
+                            employer_names=(), recipient: str = "", link_validator=None,
+                            link_domains: set[str] | None = None) -> dict:
     """{"code"|"link": value} from the newest matching email since `since`, or {"error": ...}.
 
-    Only emails whose sender address is at one of `allowed_domains` (the site
-    that asked and its application system) count; everything else in the inbox
-    is never read beyond its list row. An email from a shared application system
-    (myworkday.com sends for every Workday employer) also has to name this
-    employer (`employer_names`); one from the employer's own domain
-    (`employer_domains`) doesn't. Its recipients must be readable and match
-    `recipient`; ambiguous matches and unapproved link destinations are refused.
+    An email counts when it is new, addressed to `recipient` (the address the account uses),
+    and tied to the site that asked: its sender's address is at one of `allowed_domains` (the
+    site, its application system's mail domains, the employer's own domain), or the email
+    names this employer (`employer_names`). An email from a shared application system
+    (myworkday.com sends for every Workday employer) has to name the employer too, unless the
+    sender is the employer's own domain (`employer_domains`). Only the newest few emails since
+    `since` that match the verification search are opened; nothing else in the inbox is read. A link must point to one of `link_domains` (default: the
+    allowed domains). When several emails match, the newest is the one just asked for.
     """
     if not recipient:
         return {"error": "No application email is configured for verification."}
     own = {d.lower() for d in employer_domains or set() if d}
     from browser_use import BrowserSession
     allowed = {d.lower() for d in allowed_domains if d}
+    links_to = {d.lower() for d in (link_domains if link_domains is not None else allowed) if d}
+    names = [n for n in employer_names or () if n]
+    since = max(since, datetime.now(timezone.utc) - VERIFICATION_MAX_AGE)
+    checked: set[str] = set()       # emails already opened and found not to be the one: never opened again
+    other = "link" if kind == "code" else "code"
     query = f"after:{int(since.timestamp())} {VERIFY_TERMS}"
     url = GMAIL + "#search/" + quote(query, safe="")
     browser = BrowserSession(**browser_kwargs)
@@ -377,36 +399,47 @@ async def find_verification(kind: str, allowed_domains: set[str], since: datetim
     try:
         await browser.start()
         while True:
-            candidates = set()
             await browser.navigate_to(url)
             listing = await _poll(await browser.get_current_page(), _LIST_JS, f"after:{int(since.timestamp())}")
             if listing.get("signedOut"):
-                return {"error": "Gmail isn't signed in (Settings -> Accounts)."}
-            for row in listing.get("rows", []):
+                return {"error": "Gmail isn't signed in (Settings -> Accounts & email)."}
+            # Gmail lists the newest first. Only the few newest emails of this short window (since the
+            # application began) that look like a verification are opened: a site's email often names
+            # the employer only in its text, and comes from an address nobody could list in advance.
+            for row in listing.get("rows", [])[:MAX_VERIFICATION_EMAILS]:
                 sender = (row.get("sender_email") or "").split("@")[-1]
-                if not row.get("id") or not _domain_ok(sender, allowed):
+                from_site = _domain_ok(sender, allowed)
+                if not row.get("id") or row["id"] in checked:
+                    continue
+                arrived = _row_time(row.get("date", ""))
+                if arrived is not None and arrived < since - timedelta(minutes=1):
+                    checked.add(row["id"])      # older than this application: not opened at all
                     continue
                 await browser.navigate_to(f"{GMAIL}#all/{row['id']}")
                 message = await _poll(await browser.get_current_page(), _VERIFY_JS, row.get("subject", ""), wait=12)
                 if not message.get("ready"):
                     continue
+                checked.add(row["id"])
                 if not addressed_to(message.get("to"), recipient):
                     continue
-                if not _domain_ok(sender, own) and not about_employer(message.get("subject", ""), message.get("text", ""),
-                                                                     employer_names):
-                    continue  # a shared application system's email for another employer
-                value = extract_verification(kind, message.get("text", ""), message.get("links", []), allowed)
-                if value and kind == "link" and (link_validator is None or not link_validator(value)):
+                named = about_employer(message.get("subject", ""), message.get("text", ""), names)
+                # A shared application system's address sends for every employer on it: such an
+                # email, like one from an address this site isn't known for, has to name the employer.
+                shared = _shared_sender(sender) and not _domain_ok(sender, own)
+                if (shared or not from_site) and not named:
                     continue
-                if value:
-                    candidates.add(value)
-                    if len(candidates) > 1:
-                        return {"error": "Multiple verification messages match this application. Choose the correct email yourself."}
-            if candidates:
-                return {kind: next(iter(candidates))}
+                # Sites say "code" for a link and "link" for a code: take what this email really has,
+                # the kind that was asked for first.
+                for wanted in (kind, other):
+                    value = extract_verification(wanted, message.get("text", ""), message.get("links", []), links_to)
+                    if value and wanted == "link" and link_validator is not None and not link_validator(value):
+                        continue
+                    if value:
+                        return {wanted: value}
             if time.monotonic() >= deadline:
-                return {"error": f"No {kind} email from {', '.join(sorted(allowed))} arrived."}
-            await asyncio.sleep(10)  # emails can take a moment to arrive
+                return {"error": f"No verification email for this site arrived within "
+                                 f"{int(wait_seconds)} seconds."}
+            await asyncio.sleep(5)  # emails can take a moment to arrive
     except Exception as e:
         return {"error": f"Couldn't read the verification email: {type(e).__name__}"}
     finally:
@@ -414,6 +447,20 @@ async def find_verification(kind: str, allowed_domains: set[str], since: datetim
             await browser.kill()
         except Exception:
             pass
+
+
+MAX_VERIFICATION_EMAILS = 8
+
+# Mail domains that send for many employers: an email from one says nothing about which employer.
+SHARED_SENDERS = ("myworkday.com", "workday.com", "oracle.com", "oraclecloud.com", "taleo.net", "icims.com",
+                  "greenhouse.io", "lever.co", "ashbyhq.com", "smartrecruiters.com", "successfactors.com",
+                  "successfactors.eu", "sap.com", "sapsf.com", "sapsf.eu", "jobvite.com", "workable.com",
+                  "bamboohr.com", "paylocity.com", "adp.com", "ultipro.com", "ukg.com", "csod.com",
+                  "cornerstoneondemand.com", "eightfold.ai", "avature.net", "brassring.com", "kenexa.com")
+
+
+def _shared_sender(domain: str) -> bool:
+    return _domain_ok(domain, set(SHARED_SENDERS))
 
 
 # ── sorting with the AI ─────────────────────────────────────────────────────

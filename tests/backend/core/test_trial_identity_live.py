@@ -31,7 +31,9 @@ async def run_js(browser, js):
 
 
 @pytest.mark.parametrize('mode',['trial','auto'])
-async def test_icims_auth0_redirect_types_employer_scoped_password_and_blocks_final(wire_site,mode,monkeypatch):
+async def test_icims_auth0_redirect_types_the_job_site_password_and_blocks_final(wire_site,mode,monkeypatch):
+    # Was "...types_employer_scoped_password...": the password is the one saved in Settings now (the
+    # user's decision 5, 2026-11), typed on the sign-in host the job led to; none is made per site.
     local,seen,site=wire_site
     start=authorize();login=AUTH0+'/u/login/password?state=local-state'
     employer=urlsplit(JOB).hostname
@@ -46,7 +48,7 @@ async def test_icims_auth0_redirect_types_employer_scoped_password_and_blocks_fi
         trusted_site=lambda u:request_gate.origin(u)==request_gate.origin(JOB))
     monkeypatch.setattr(apply_jobs,'update_job',lambda *a,**k:True)
     apply_jobs.set_run_mode(mode)
-    ref={'request_gate':gate,'secrets':{'account_email':'fake@example.test'},'secret_masks':{}}
+    ref={'request_gate':gate,'secrets':{'account_email':'fake@example.test','password':'Made-Up-Pass-77'},'secret_masks':{}}
     tools=apply_jobs.build_tools({'url':JOB,'title':'Local','company':'Acme'},'',mode=='trial',ref,1)
     apply_jobs.set_run_mode('auto')
     try:
@@ -57,15 +59,15 @@ async def test_icims_auth0_redirect_types_employer_scoped_password_and_blocks_fi
             idx=next(i for i,n in state.dom_state.selector_map.items() if n.tag_name=='input' and n.attributes.get('name')==name)
             result=await tools.registry.execute_action('input',{'index':idx,'text':'<secret>'+tag+'</secret>'},browser_session=browser)
             assert not result.error,result
-        vault=secret_store.site_password(gate.credential_key(JOB),create=False)
-        assert vault and not secret_store.site_password('https://login.icims.com',create=False)
+        vault='Made-Up-Pass-77'
+        assert secret_store.site_password_entries()==[]
         # Enter uses the primary default submit button, with action=default.
         await run_js(browser,'document.querySelector("button").click()')
         assert await wait_for(lambda:any(r[0]=='POST' and '/u/login/password' in r[1] for r in seen),gate)
         posted=next(r[2] for r in seen if r[0]=='POST' and '/u/login/password' in r[1])
         decoded=parse_qs(posted.decode('utf-8'),strict_parsing=True)
         assert decoded['password']==[vault] and decoded['username']==['fake@example.test']
-        assert ref['credential_site']['site']==apply_jobs._site(JOB)
+        assert 'icims.com' in ref['trail'].typed    # the sign-in host the job led to
         # Provider authentication never grants an application-write permission.
         await browser.navigate_to(JOB.rsplit('/',1)[0]+'/review')
         await run_js(browser,'fetch("/applications/finalize",{method:"POST",body:"PRIVATE FINAL"}).catch(()=>{})')

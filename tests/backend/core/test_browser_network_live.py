@@ -1,4 +1,11 @@
-"""Opt-in: the agent browser's network limits, checked in a real browser (no internet, no accounts).
+"""Opt-in: the collector browser's network limits, checked in a real browser (no internet, no accounts).
+
+Since 2026-11 these limits (everything through the app's local proxy: no local network, no
+WebRTC around it) belong to the job collector's browser only. The application browser
+connects by itself again, by the user's decision: the proxy and request gate broke real
+hiring sites. What still holds for it is tested where it is enforced: Gmail is unreachable
+(test_stealth.py, the rule script), and account details are never typed on a local address
+(test_credentials.py).
 
 Run with:  $env:LANGHIRE_REAL_BROWSER = "1"; uv run pytest tests/backend/core/test_browser_network_live.py
 The browser is started with the app's own settings (shared_config.build_browser_kwargs), a
@@ -31,7 +38,7 @@ def _run_in_agent_browser(tmp_path, monkeypatch, script, *args, wait=0.7, protec
     # The app prepares its own (throwaway) profile folder, as it would before a real run.
     monkeypatch.setattr(shared_config, "selected_browser",
                         lambda settings=None: (conftest.live_browser(), tmp_path / "browser"))
-    kwargs = (shared_config.build_browser_kwargs() if protect else {
+    kwargs = (shared_config.build_browser_kwargs(purpose="collection") if protect else {
         "executable_path": conftest.live_browser(),
         "user_data_dir": str(tmp_path / "browser"), "permissions": []})
     assert kwargs["user_data_dir"].startswith(str(tmp_path))
@@ -266,7 +273,7 @@ def test_one_workers_open_sockets_dont_block_another_workers_pages(tmp_path, mon
     async def go():
         browsers = []
         for worker in (1, 2):
-            kwargs = shared_config.build_browser_kwargs(worker=worker)
+            kwargs = shared_config.build_browser_kwargs(worker=worker, purpose="collection")
             assert kwargs["user_data_dir"].startswith(str(tmp_path))
             kwargs.update(headless=True, enable_default_extensions=False)
             browsers.append(BrowserSession(**kwargs))

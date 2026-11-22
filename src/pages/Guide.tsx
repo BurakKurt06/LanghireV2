@@ -111,7 +111,7 @@ export default function Guide() {
   const allRequiredDone = status?.all_required_done;
 
   return (
-    <div className="max-w-3xl">
+    <div className="page-form">
       <PageHeader title={t("title")} subtitle={t("subtitle")} />
 
       {/* ── How It Works — Visual Pipeline ─────────────────────────────── */}
@@ -332,12 +332,27 @@ export default function Guide() {
             <p>
               {t("sections.applying.intro")}{" "}
               <button
-                onClick={() => navigate("/apply")}
+                onClick={() => navigate("/jobs")}
                 className="text-primary font-medium hover:underline"
               >
                 {t("sections.applying.linkText")}
               </button>{" "}
               {t("sections.applying.introEnd")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.modes")}</strong> {t("sections.applying.modesDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.needsYou")}</strong> {t("sections.applying.needsYouDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.steppingIn")}</strong> {t("sections.applying.steppingInDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.defaults")}</strong> {t("sections.applying.defaultsDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.applying.logs")}</strong> {t("sections.applying.logsDesc")}
             </p>
             <p>
               <strong>{t("sections.applying.easyApply")}</strong> {t("sections.applying.easyApplyDesc")}
@@ -439,9 +454,13 @@ export default function Guide() {
               <code className="bg-secondary px-1.5 py-0.5 rounded text-xs">
                 {t("sections.tips.backendCommand")}
               </code>
+              {t("sections.tips.backendCommandEnd")}
             </p>
             <p>
               <strong>{t("sections.tips.costs")}</strong> {t("sections.tips.costsDesc")}
+            </p>
+            <p>
+              <strong>{t("sections.tips.shortcuts")}</strong> {t("sections.tips.shortcutsDesc")}
             </p>
           </AccordionSection>
         </div>

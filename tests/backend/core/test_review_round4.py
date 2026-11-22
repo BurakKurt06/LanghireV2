@@ -22,8 +22,13 @@ def test_an_unsecured_webrtc_profile_cannot_be_launched(tmp_path, monkeypatch, k
             raise PermissionError("protected preferences")
         monkeypatch.setattr(net_guard.os, "replace", refuse_replace)
     original = prefs.read_bytes()
+    # The collector's browser must not leak past its proxy: it isn't launched on such a profile.
     with pytest.raises(RuntimeError, match="WebRTC"):
-        shared_config.build_browser_kwargs()
+        shared_config.build_browser_kwargs(purpose="collection")
+    assert prefs.read_bytes() == original
+    # A browser that connects by itself (applications, the email reader) has no proxy to leak past,
+    # and a profile problem like this no longer fails the job before it starts.
+    assert shared_config.build_browser_kwargs(purpose="application")["user_data_dir"] == str(profile)
     assert prefs.read_bytes() == original
 
 

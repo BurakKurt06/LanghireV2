@@ -17,7 +17,9 @@ import {
   patchProfile,
   getInbox,
   setInboxSchedule,
+  getRunsWithLogs,
 } from "../lib/api";
+import { SECRET_MASK } from "../lib/secrets";
 import { setTelemetryEnabled } from "../lib/analytics";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
@@ -61,6 +63,10 @@ vi.mock("../lib/api", () => ({
   patchProfile: vi.fn(),
   getInbox: vi.fn(),
   setInboxSchedule: vi.fn(),
+  // Decision 2: App & browser now holds the Logs section (LogsSection) and the saved-secret eye buttons.
+  getRunsWithLogs: vi.fn(async () => []),
+  getRunLogs: vi.fn(async () => []),
+  revealSecret: vi.fn(),
 }));
 
 // The AI model form has its own tests (LLMSettingsForm.test.tsx); here only where it appears.
@@ -172,7 +178,7 @@ describe("SettingsPage", () => {
 
   it("lists installed browsers, marks the default, and saves the choice", async () => {
     const user = userEvent.setup();
-    renderSettings("browser");
+    renderSettings("app");  // Decision 2: the browser choice lives in App & browser
     const select = await screen.findByLabelText("Browser the agent uses");
     expect(within(select).getByRole("option", { name: "Microsoft Edge (your default browser)" })).toBeInTheDocument();
     expect(within(select).getByRole("option", { name: "Google Chrome" })).toBeInTheDocument();
@@ -186,7 +192,7 @@ describe("SettingsPage", () => {
 
   it("custom browser choice reveals a path input that is saved", async () => {
     const user = userEvent.setup();
-    renderSettings("browser");
+    renderSettings("app");  // Decision 2: the browser choice lives in App & browser
     await user.selectOptions(await screen.findByLabelText("Browser the agent uses"), "custom");
     await user.type(screen.getByPlaceholderText(/browser\.exe/), "D:/Opera/opera.exe");
     await user.click(screen.getByRole("button", { name: /Save Settings/ }));
@@ -278,14 +284,17 @@ describe("SettingsPage", () => {
 
   it("toggles a plugin on/off via the API", async () => {
     const user = userEvent.setup();
-    renderSettings("job-sources");
-    await screen.findByText("Acme Jobs");
-
+    renderSettings("job-search");
+    // Decision 2: Job sources merged into Job search, which also has the job-type checkboxes,
+    // so take the toggle from the Acme row itself instead of "the first unchecked checkbox".
+    const acmeRow = (await screen.findByText("Acme Jobs")).closest("div.border") as HTMLElement;
+    const acmeToggle = within(acmeRow).getByRole("checkbox");
     // The community plugin starts disabled (unchecked); toggle it on.
-    const checkboxes = screen.getAllByRole("checkbox");
-    const acmeToggle = checkboxes.find((c) => !(c as HTMLInputElement).checked);
-    await user.click(acmeToggle!);
+    expect(acmeToggle).not.toBeChecked();
+    await user.click(acmeToggle);
     await waitFor(() => expect(mockTogglePlugin).toHaveBeenCalledWith("acme", true));
+    expect(mockTogglePlugin).toHaveBeenCalledTimes(1);
+    expect(acmeToggle).toBeChecked();
   });
 
   it("removes a community plugin", async () => {
@@ -371,10 +380,15 @@ describe("SettingsPage", () => {
       renderSettings("job-sources");
       await screen.findByDisplayValue("/home/me/resume.pdf");
       expect(findSwitch("Job board collection")).toBeChecked();
-      await user.click(screen.getByRole("button", { name: "sections.browser" }));
+      // Decision 2: Browser & automation merged into App & browser.
+      await user.click(screen.getByRole("button", { name: "sections.app" }));
       expect(findSwitch("Stealth mode")).not.toBeChecked();
       expect(findSwitch("Human-like delays")).not.toBeChecked();
-      expect(findSwitch("Solve CAPTCHAs with 2Captcha")).not.toBeChecked();
+      // Decision 2: the CAPTCHA group moved to Applications; with no key saved the solver is off and locked.
+      await user.click(screen.getByRole("button", { name: "sections.applications" }));
+      const captcha = findSwitch("Solve CAPTCHAs with 2Captcha");
+      expect(captcha).not.toBeChecked();
+      expect(captcha).toBeDisabled();
     });
 
     it("reflects saved switch values from the backend", async () => {
@@ -384,25 +398,57 @@ describe("SettingsPage", () => {
         stealth_enabled: true,
         human_delay_enabled: true,
         captcha_solver_enabled: true,
+        captcha_api_key: SECRET_MASK,   // a saved key arrives as dots
       } as never);
       const user = userEvent.setup();
-      renderSettings("job-sources");
+      renderSettings("job-search");     // Decision 2: Job sources merged into Job search
       await screen.findByDisplayValue("/home/me/resume.pdf");
       expect(findSwitch("Job board collection")).not.toBeChecked();
-      await user.click(screen.getByRole("button", { name: "sections.browser" }));
+      await user.click(screen.getByRole("button", { name: "sections.app" }));  // Decision 2
       expect(findSwitch("Stealth mode")).toBeChecked();
       expect(findSwitch("Human-like delays")).toBeChecked();
+      // Decision 2: the solver switch is in Applications and only counts as on with a saved key.
+      await user.click(screen.getByRole("button", { name: "sections.applications" }));
+      const captcha = findSwitch("Solve CAPTCHAs with 2Captcha");
+      expect(captcha).toBeChecked();
+      expect(captcha).toBeEnabled();
+    });
+
+    it("a saved CAPTCHA key with the solver turned off stays off", async () => {
+      // Decision 2: with a key saved the solver is on by default; only an explicit false turns it off.
+      mockGetSettings.mockResolvedValue({
+        ...baseSettings, captcha_solver_enabled: false, captcha_api_key: SECRET_MASK,
+      } as never);
+      renderSettings("applications");
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      const captcha = findSwitch("Solve CAPTCHAs with 2Captcha");
+      expect(captcha).not.toBeChecked();
+      expect(captcha).toBeEnabled();
+    });
+
+    it("a key typed into the empty field turns the solver on, even over an old stored off", async () => {
+      // Decision 4 (review 2026-11-12): older versions stored "off" with no key at all; the
+      // first key saved must turn the solver on, as the screen says.
+      const user = userEvent.setup();
+      mockGetSettings.mockResolvedValue({ ...baseSettings, captcha_solver_enabled: false, captcha_api_key: "" } as never);
+      renderSettings("applications");
+      await screen.findByDisplayValue("/home/me/resume.pdf");
+      expect(findSwitch("Solve CAPTCHAs with 2Captcha")).not.toBeChecked();
+      await user.type(screen.getByLabelText("2Captcha API key"), "made-up-key");
       expect(findSwitch("Solve CAPTCHAs with 2Captcha")).toBeChecked();
+      await user.click(screen.getByRole("button", { name: /Save Settings/ }));
+      await waitFor(() => expect(mockSaveSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ captcha_api_key: "made-up-key", captcha_solver_enabled: true })));
     });
 
     it("persists every switch on save", async () => {
       const user = userEvent.setup();
-      renderSettings("job-sources");
+      renderSettings("job-search");  // Decision 2: Job sources merged into Job search
       await screen.findByDisplayValue("/home/me/resume.pdf");
 
       await user.click(findSwitch("Job board collection"));
       // Edits are kept while switching categories; one Save saves them all.
-      await user.click(screen.getByRole("button", { name: "sections.browser" }));
+      await user.click(screen.getByRole("button", { name: "sections.app" }));  // Decision 2: App & browser
       await user.click(findSwitch("Stealth mode"));
       await user.click(screen.getByRole("button", { name: /Save Settings/ }));
 
@@ -414,7 +460,7 @@ describe("SettingsPage", () => {
 
     it("shows the delay window only when delays are enabled", async () => {
       const user = userEvent.setup();
-      renderSettings("browser");
+      renderSettings("app");  // Decision 2: delays live in App & browser
       await screen.findByDisplayValue("/home/me/resume.pdf");
       expect(screen.queryByLabelText("Min seconds")).not.toBeInTheDocument();
 
@@ -425,7 +471,7 @@ describe("SettingsPage", () => {
 
     it("warns when the delay window is inverted", async () => {
       const user = userEvent.setup();
-      renderSettings("browser");
+      renderSettings("app");  // Decision 2: delays live in App & browser
       await screen.findByDisplayValue("/home/me/resume.pdf");
       await user.click(findSwitch("Human-like delays"));
 
@@ -435,29 +481,43 @@ describe("SettingsPage", () => {
       expect(await screen.findByText(/Max must be at least the min/)).toBeInTheDocument();
     });
 
-    it("shows the CAPTCHA key field only when the solver is on, and masks it", async () => {
+    it("always shows the masked CAPTCHA key field; the solver turns on once a key is typed", async () => {
+      // Decision 2: the 2Captcha key field is always visible (Applications -> CAPTCHAs); the switch needs a key.
       const user = userEvent.setup();
-      renderSettings("browser");
+      renderSettings("applications");
       await screen.findByDisplayValue("/home/me/resume.pdf");
-      expect(screen.queryByLabelText("2Captcha API key")).not.toBeInTheDocument();
+      const key = screen.getByLabelText("2Captcha API key");
+      expect(key).toBeVisible();
+      expect(key).toHaveAttribute("type", "password");
+      const solver = findSwitch("Solve CAPTCHAs with 2Captcha");
+      expect(solver).toBeDisabled();
+      expect(solver).not.toBeChecked();
 
-      await user.click(findSwitch("Solve CAPTCHAs with 2Captcha"));
-      const key = await screen.findByLabelText("2Captcha API key");
+      await user.type(key, "fake-key");
+      expect(solver).toBeEnabled();
+      expect(solver).toBeChecked();
       expect(key).toHaveAttribute("type", "password");
     });
 
-    it("persists the CAPTCHA API key", async () => {
+    it("persists the CAPTCHA API key, and the solver switch turned off", async () => {
       const user = userEvent.setup();
-      renderSettings("browser");
+      renderSettings("applications");  // Decision 2: the CAPTCHA group moved to Applications
       await screen.findByDisplayValue("/home/me/resume.pdf");
-      await user.click(findSwitch("Solve CAPTCHAs with 2Captcha"));
-      await user.type(await screen.findByLabelText("2Captcha API key"), "abc123");
+      await user.type(screen.getByLabelText("2Captcha API key"), "abc123");
       await user.click(screen.getByRole("button", { name: /Save Settings/ }));
 
       await waitFor(() => expect(mockSaveSettings).toHaveBeenCalled());
       const saved = mockSaveSettings.mock.calls.at(-1)![0];
       expect(saved.captcha_api_key).toBe("abc123");
       expect(saved.captcha_solver_enabled).toBe(true);
+
+      await user.click(findSwitch("Solve CAPTCHAs with 2Captcha"));
+      // The button reads "Saved" for a few seconds after the first save.
+      await user.click(screen.getByRole("button", { name: /Saved|Save Settings/ }));
+      await waitFor(() => expect(mockSaveSettings).toHaveBeenCalledTimes(2));
+      const second = mockSaveSettings.mock.calls.at(-1)![0];
+      expect(second.captcha_api_key).toBe("abc123");
+      expect(second.captcha_solver_enabled).toBe(false);
     });
 
     it("keeps the account password field working", async () => {
@@ -465,6 +525,8 @@ describe("SettingsPage", () => {
       await screen.findByDisplayValue("/home/me/resume.pdf");
       const pw = screen.getByDisplayValue("secret");
       expect(pw).toHaveAttribute("type", "password");
+      // Decision 2: the field is labelled "Password for job sites".
+      expect(screen.getByLabelText("Password for job sites")).toBe(pw);
     });
 
     it("hides the language picker in this English-only build", async () => {
@@ -474,14 +536,15 @@ describe("SettingsPage", () => {
     });
   });
 
-  it("saves performance mode, the fit check, cover-letter boxes and other documents", async () => {
+  it("saves the fit check, cover-letter boxes and other documents (performance mode is gone)", async () => {
     const user = userEvent.setup();
     renderSettings();
-    const perf = await screen.findByRole("switch", { name: "Performance mode" });
-    const fit = screen.getByRole("switch", { name: "Fit check before applying" });
+    const fit = await screen.findByRole("switch", { name: "Fit check before applying" });
+    // Decision 2: "Performance mode" was removed completely, so nothing locks the fit check any more.
+    expect(screen.queryByText(/Performance mode/i)).not.toBeInTheDocument();
     expect(fit).toBeChecked();
-    await user.click(perf);
-    expect(fit).toBeDisabled();
+    expect(fit).toBeEnabled();
+    await user.click(fit);
     expect(fit).not.toBeChecked();
     await user.click(screen.getByRole("switch", { name: "Fill cover-letter boxes" }));
     await user.click(screen.getByRole("button", { name: "+ Add document" }));
@@ -490,12 +553,13 @@ describe("SettingsPage", () => {
     await user.click(screen.getByRole("button", { name: /Save Settings/ }));
     await waitFor(() =>
       expect(mockSaveSettings).toHaveBeenCalledWith(expect.objectContaining({
-        performance_mode: true,
-        fit_check_enabled: true,
+        fit_check_enabled: false,
         cover_letter_boxes: true,
         other_documents: [{ label: "Transcript", path: "C:/docs/transcript.pdf" }],
       })),
     );
+    // Decision 2: performance mode is no longer saved at all.
+    expect(mockSaveSettings.mock.calls.at(-1)![0]).not.toHaveProperty("performance_mode");
   });
 
   it("a failed settings load offers Retry, never a form whose defaults could be saved", async () => {
@@ -507,6 +571,41 @@ describe("SettingsPage", () => {
     expect(mockSaveSettings).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("button", { name: /Save Settings/ })).toBeInTheDocument();
+  });
+
+  it("a change saves by itself: 'Jobs at the same time' set to 4 without pressing Save Settings", async () => {
+    // The user's first 1.3.0 run: 4 was chosen, Save wasn't pressed, and every run used 1 worker.
+    const user = userEvent.setup();
+    renderSettings("applications");
+    const select = await screen.findByLabelText("Jobs at the same time");
+    expect(mockSaveSettings).not.toHaveBeenCalled();            // nothing is saved just by opening the page
+    await user.selectOptions(select, "4");
+    await waitFor(() => expect(mockSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ parallel_jobs: 4 })),
+      { timeout: 3000 });
+    expect(screen.getByText("Changes are saved as you make them")).toBeInTheDocument();
+  });
+
+  it("Max Failures Per Job is a labelled field that says what counts as a failure", async () => {
+    // The user's rule (2026-11): blank or no progress for 5 minutes = a failure, retried up to
+    // this number, then skipped with "The page didn't load".
+    renderSettings("applications");
+    const field = await screen.findByLabelText("Max Failures Per Job");
+    expect(field).toHaveAttribute("type", "number");
+    expect(screen.getByText(/no\s+progress for 5 minutes/)).toHaveTextContent(/"The page didn't load"/);
+  });
+
+  it("the logs and Send feedback stay when the settings can't be read (they don't need them)", async () => {
+    // Review 2026-11-12: the old Logs and Feedback pages never depended on the settings; inside
+    // Settings they were hidden behind its load error, just when the user needs them.
+    vi.mocked(getRunsWithLogs).mockClear();
+    mockGetSettings.mockRejectedValue(new Error("boom"));
+    renderSettings("logs");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load your settings");
+    expect(screen.getByRole("heading", { name: "Logs" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Send feedback" })).toBeVisible();
+    await waitFor(() => expect(getRunsWithLogs).toHaveBeenCalledWith(50));
+    expect(screen.queryByRole("button", { name: /Save Settings/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Browser the agent uses")).not.toBeInTheDocument();   // nothing that could save defaults
   });
 
   it("a failed plugin list alone still shows the settings", async () => {
@@ -543,20 +642,51 @@ describe("Settings categories (reorganization, user-approved 11-01)", () => {
     mockSetInboxSchedule.mockResolvedValue({ success: true } as never);
   });
 
-  it("lists the seven categories and shows one at a time", async () => {
+  it("lists the five categories and shows one at a time", async () => {
+    // Decision 2: seven categories became five (Job sources -> Job search; Browser and Appearance -> App & browser).
     const user = userEvent.setup();
     renderSettings("applications");
     const nav = await screen.findByRole("navigation", { name: "Settings categories" });
     expect(within(nav).getAllByRole("button").map((b) => b.textContent)).toEqual([
-      "sections.aiModel", "sections.jobSearch", "sections.applications", "sections.accounts",
-      "sections.jobSources", "sections.browser", "sections.appearance",
+      "sections.aiModel", "sections.jobSearch", "sections.applications", "sections.accounts", "sections.app",
     ]);
     expect(within(nav).getByRole("button", { name: "sections.applications" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("heading", { name: "sections.applications" })).toBeVisible();
-    expect(screen.queryByRole("heading", { name: "sections.browser" })).not.toBeInTheDocument();  // hidden
-    await user.click(within(nav).getByRole("button", { name: "sections.browser" }));
-    expect(screen.getByRole("heading", { name: "sections.browser" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "sections.app" })).not.toBeInTheDocument();  // hidden
+    await user.click(within(nav).getByRole("button", { name: "sections.app" }));
+    expect(within(nav).getByRole("button", { name: "sections.app" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: "sections.app" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "sections.applications" })).not.toBeInTheDocument();  // hidden
     expect(screen.getByLabelText("Browser the agent uses")).toBeVisible();
+  });
+
+  // Decision 2: the old category links open the category they were merged into.
+  it.each([
+    ["job-sources", "sections.jobSearch"],
+    ["browser", "sections.app"],
+    ["appearance", "sections.app"],
+    ["logs", "sections.app"],
+    ["feedback", "sections.app"],
+  ])("the old link ?section=%s opens %s", async (old, label) => {
+    renderSettings(old);
+    const nav = await screen.findByRole("navigation", { name: "Settings categories" });
+    expect(within(nav).getByRole("button", { name: label })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("heading", { name: label, level: 2 })).toBeVisible();
+    expect(within(nav).getAllByRole("button").filter((b) => b.hasAttribute("aria-current"))).toHaveLength(1);
+  });
+
+  it("App & browser has Logs and Send feedback; logs are only fetched while it is open", async () => {
+    // Decision 2/4: Logs and Send feedback left the sidebar for Settings -> App & browser.
+    const user = userEvent.setup();
+    vi.mocked(getRunsWithLogs).mockClear();
+    renderSettings("applications");
+    await screen.findByRole("button", { name: /Save Settings/ });
+    expect(screen.queryByRole("heading", { name: "Logs" })).not.toBeInTheDocument();
+    expect(getRunsWithLogs).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "sections.app" }));
+    expect(screen.getByRole("heading", { name: "Logs" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Send feedback" })).toBeVisible();
+    await waitFor(() => expect(getRunsWithLogs).toHaveBeenCalledWith(50));
   });
 
   it("opens the AI model by default (and for an unknown link); it saves as you change it, without Save Settings", async () => {

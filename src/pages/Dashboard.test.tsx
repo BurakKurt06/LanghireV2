@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import Dashboard from "./Dashboard";
@@ -9,6 +9,7 @@ import {
   getSetupStatus,
   getChromiumStatus,
   getQAStats,
+  getJobs,
 } from "../lib/api";
 import { trackEvent } from "../lib/analytics";
 
@@ -39,6 +40,8 @@ vi.mock("../lib/api", () => ({
   getSetupStatus: vi.fn(),
   getChromiumStatus: vi.fn(),
   getQAStats: vi.fn(),
+  // The Analytics page became <Insights/> on the Dashboard (decision 3); it loads the jobs.
+  getJobs: vi.fn(),
 }));
 
 const mockGetDashboardData = vi.mocked(getDashboardData);
@@ -46,6 +49,7 @@ const mockCheckHealth = vi.mocked(checkHealth);
 const mockGetSetupStatus = vi.mocked(getSetupStatus);
 const mockGetChromiumStatus = vi.mocked(getChromiumStatus);
 const mockGetQAStats = vi.mocked(getQAStats);
+const mockGetJobs = vi.mocked(getJobs);
 const mockTrackEvent = vi.mocked(trackEvent);
 
 const dashboardData = {
@@ -79,6 +83,8 @@ describe("Dashboard page", () => {
     mockGetSetupStatus.mockResolvedValue(setupIncomplete as never);
     mockGetQAStats.mockResolvedValue({ total: 7, answered: 4, unanswered: 3 } as never);
     mockGetChromiumStatus.mockResolvedValue({ state: "ready", message: "" } as never);
+    // No jobs listed → the Insights section renders nothing, so the cards' numbers stay unique.
+    mockGetJobs.mockResolvedValue([] as never);
   });
 
   it("renders the loading spinner header before data resolves", () => {
@@ -92,11 +98,56 @@ describe("Dashboard page", () => {
 
   it("renders stat cards computed from dashboard data after load", async () => {
     renderDashboard();
-    // successRate = applied / (applied + failed) = round(6/7*100) = 86% (same definition as Analytics)
+    // successRate = applied / finished attempts (applied + failed + needs_you + blocked) = round(6/7*100) = 86%
     expect(await screen.findByText("86%")).toBeInTheDocument();
+    expect(screen.getByText("6 of 7 finished attempts")).toBeInTheDocument();
     expect(screen.getByText("10")).toBeInTheDocument(); // total jobs
     expect(screen.getByText("42")).toBeInTheDocument(); // memories
     expect(screen.getByText("cards.applied")).toBeInTheDocument();
+    expect(screen.getByText("cards.pending")).toBeInTheDocument();
+    // Decision 3: the old Analytics page is the Dashboard's lower half and loads the jobs.
+    // (its first load starts right after the cards render)
+    await waitFor(() => expect(mockGetJobs).toHaveBeenCalled());
+  });
+
+  // Decision 3: the "Failed" card counts every attempt that ended without an application
+  // (failed + needs_you + blocked), and the backend's not_successful / finished win when sent.
+  it("counts failed, needs-you and blocked jobs on the not-applied card", async () => {
+    mockGetDashboardData.mockResolvedValue({
+      jobs: { total: 20, pending: 2, applied: 4, failed: 1, needs_you: 3, blocked: 2, in_progress: 0 },
+      memory: { total_memories: 0, unique_domains: 0, by_category: {} },
+    } as never);
+    renderDashboard();
+    // notApplied = 1 + 3 + 2 = 6; finished = 4 + 6 = 10 → 40%.
+    expect(await screen.findByText("40%")).toBeInTheDocument();
+    expect(screen.getByText("4 of 10 finished attempts")).toBeInTheDocument();
+    expect(screen.getByText("6")).toBeInTheDocument();
+    // The detail adds up to the card's number: blocked jobs are named too.
+    expect(screen.getByText("1 failed · 3 need you · 2 blocked")).toBeInTheDocument();
+  });
+
+  it("says how many of the jobs that need you may have been sent", async () => {
+    mockGetDashboardData.mockResolvedValue({
+      jobs: { total: 9, pending: 0, applied: 2, failed: 0, needs_you: 4, blocked: 0, in_progress: 0, outcome_unknown: 1 },
+      memory: { total_memories: 0, unique_domains: 0, by_category: {} },
+    } as never);
+    renderDashboard();
+    expect(await screen.findByText("4 need you (1 may have been sent)")).toBeInTheDocument();
+  });
+
+  it("uses the backend's not_successful and finished counts when present", async () => {
+    mockGetDashboardData.mockResolvedValue({
+      jobs: {
+        total: 30, pending: 0, applied: 5, failed: 1, needs_you: 0, blocked: 0, in_progress: 0,
+        not_successful: 15, finished: 20,
+      },
+      memory: { total_memories: 0, unique_domains: 0, by_category: {} },
+    } as never);
+    renderDashboard();
+    // 5 / 20 = 25%, not 5 / (5 + 1).
+    expect(await screen.findByText("25%")).toBeInTheDocument();
+    expect(screen.getByText("15")).toBeInTheDocument();
+    expect(screen.getByText("5 of 20 finished attempts")).toBeInTheDocument();
   });
 
   it("tracks a dashboard_stats analytics event with aggregated counts", async () => {
@@ -154,7 +205,8 @@ describe("Dashboard page", () => {
     renderDashboard();
     await screen.findByText("quickActions.title");
     // Healthy backend → the connection-error banner stays hidden.
-    expect(screen.queryByText(/Backend not connected/i)).not.toBeInTheDocument();
+    // Decision 3: the banner is plain words now ("The app's engine isn't answering yet").
+    expect(screen.queryByText(/engine isn't answering/i)).not.toBeInTheDocument();
   });
 
   it("renders the Chromium install progress card while installing", async () => {
@@ -174,7 +226,11 @@ describe("Dashboard page", () => {
     expect(await screen.findByText("quickActions.title")).toBeInTheDocument();
     // Stat cards still render their labels with zeroed values.
     expect(screen.getByText("cards.successRate")).toBeInTheDocument();
-    expect(screen.getAllByText("0%").length).toBeGreaterThan(0); // successRate with no jobs
+    // Decision 3: no success rate before any finished attempt ("—"), not "0%".
+    const rateCard = screen.getByText("cards.successRate").parentElement as HTMLElement;
+    expect(within(rateCard).getByText("—")).toBeInTheDocument();
+    expect(within(rateCard).getByText("No finished attempts yet")).toBeInTheDocument();
+    expect(within(rateCard).queryByText("0%")).not.toBeInTheDocument();
   });
 
   it("re-fetches setup status on the langhire:setup-updated event", async () => {

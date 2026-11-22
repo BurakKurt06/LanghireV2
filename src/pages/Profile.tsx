@@ -3,6 +3,7 @@ import { Save } from "lucide-react";
 import { getProfile, patchProfile, getCountries } from "../lib/api";
 import type { CandidateProfile, CountryConfig } from "../lib/types";
 import { PageHeader, LoadingSpinner, Section } from "../components/ui";
+import ProfileResume from "../components/ResumeFile";
 import TagInputShared from "../components/ui/TagInput";
 import { DEFAULT_JOB_SEARCH, withDefaults } from "../lib/jobSearch";
 import { PROFILE_SETTINGS_FIELDS } from "../lib/profileFields";
@@ -155,7 +156,7 @@ export default function Profile() {
 
   if (loadFailed) {
     return (
-      <div className="max-w-3xl">
+      <div className="page-form">
         <div role="alert" className="error-banner flex items-center justify-between gap-3">
           <span>{t("loadError")}</span>
           <button type="button" onClick={retry} className="btn-secondary">{t("retry")}</button>
@@ -165,7 +166,7 @@ export default function Profile() {
   }
 
   return (
-    <div className="max-w-3xl">
+    <div className="page-form">
       <PageHeader
         title={t("title")}
         subtitle={t("subtitle")}
@@ -185,6 +186,11 @@ export default function Profile() {
         {" · "}
         <a href={settingsHref("applications")} className="text-primary font-medium hover:underline">{t("movedInstructions")}</a>
       </p>
+
+      {/* Resume: the same stored value as Settings → Applications → Resume */}
+      <Section title="Resume">
+        <ProfileResume />
+      </Section>
 
       {/* Country Selection */}
       <Section title={t("country.title")}>

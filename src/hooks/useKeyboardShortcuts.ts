@@ -3,24 +3,27 @@
  *
  * - Cmd/Ctrl + 1..8  → navigate to the Nth page (order matches the sidebar)
  * - Cmd/Ctrl + ,     → open Settings
+ * - Cmd/Ctrl + L     → open the logs (Settings → App & browser → Logs)
  * - Cmd/Ctrl + E     → trigger an export (dispatches a `langhire:export` event)
+ * - F11              → real fullscreen on / off; Esc leaves it (works while typing too)
  *
  * Shortcuts are ignored while the user is typing in an input/textarea/select
  * or a contentEditable element, so they never clobber normal text entry.
  */
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { leaveFullscreen, toggleFullscreen } from "../lib/fullscreen";
 
 /** Page order for Cmd/Ctrl+1..N — kept in sync with the sidebar nav. */
 export const SHORTCUT_ROUTES: string[] = [
   "/", // 1 Dashboard
-  "/guide", // 2 Guide
-  "/profile", // 3 Profile
-  "/llm", // 4 AI model (opens Settings → AI model)
-  "/jobs", // 5 Jobs
-  "/memory", // 6 Memory
-  "/qa", // 7 Q&A
-  "/logs", // 8 Logs
+  "/profile", // 2 Profile
+  "/jobs", // 3 Jobs
+  "/inbox", // 4 Inbox
+  "/memory", // 5 Memory
+  "/qa", // 6 Q&A
+  "/guide", // 7 Guide
+  "/settings", // 8 Settings
 ];
 
 function isTypingTarget(el: EventTarget | null): boolean {
@@ -39,6 +42,19 @@ export function useKeyboardShortcuts(): void {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "F11") {
+        e.preventDefault();
+        if (!e.repeat) void toggleFullscreen();   // a held key toggles once
+        return;
+      }
+      if (e.key === "Escape") {
+        // Esc that closes a dialog (it handles the key first, or is still open) only closes the
+        // dialog; Esc anywhere else leaves fullscreen. Nothing is prevented here.
+        if (!e.defaultPrevented && !document.querySelector('[role="dialog"][aria-modal="true"]')) {
+          void leaveFullscreen();
+        }
+        return;
+      }
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
       if (isTypingTarget(e.target)) return;
@@ -47,6 +63,13 @@ export function useKeyboardShortcuts(): void {
       if (e.key === ",") {
         e.preventDefault();
         navigate("/settings");
+        return;
+      }
+
+      // Cmd/Ctrl + L → the logs
+      if (e.key.toLowerCase() === "l") {
+        e.preventDefault();
+        navigate("/settings?section=logs");
         return;
       }
 

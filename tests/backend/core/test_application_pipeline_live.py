@@ -18,13 +18,18 @@ pytestmark = [pytest.mark.real_browser, pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_real_application_startup_installs_the_gate_and_a_trial_never_counts_a_page_claim_as_applied(wire_site, data_dir, monkeypatch):
+async def test_real_application_startup_and_a_trial_never_counts_a_page_claim_as_applied(wire_site, data_dir, monkeypatch):
+    # Was "...startup_installs_the_gate...": since 2026-11 the application browser connects by itself
+    # (the request gate broke real hiring sites and was taken out of applications by the user's
+    # decision), so the application half opens the local page directly. Collection, in the second
+    # half, still runs through the gate.
     import fitz
     from browser_use import Agent, BrowserSession
     from browser_use.llm import ChatOpenAI
     from browser_use.llm.views import ChatInvokeCompletion
     url, seen, source = wire_site
     virtual = "https://acme.test/"
+    posting = url.replace("127.0.0.1", "localhost")      # the application opens the local page itself
     source["html"] = "<title>Application</title><h1>Thank you for applying! Your application has been received.</h1>"
     resume = data_dir / "resume.pdf"
     pdf = fitz.open()
@@ -42,7 +47,7 @@ async def test_real_application_startup_installs_the_gate_and_a_trial_never_coun
         conftest.live_browser(), data_dir / "isolated-browser"))
     monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {"fit_check_enabled": False, "cover_letter_boxes": False})
     monkeypatch.setattr(shared_config, "refresh_posting_details", lambda *a: job_page.Posting(title="Intern", company="Acme"))
-    monkeypatch.setattr(shared_config, "validate_job_url", lambda u: u == virtual)
+    monkeypatch.setattr(shared_config, "validate_job_url", lambda u: u in (virtual, posting))
     monkeypatch.setattr(apply_jobs, "current_settings", lambda: (str(resume), {"email": "candidate@example.com"}, []))
     monkeypatch.setattr(apply_jobs, "refresh_credentials", lambda: None)
     monkeypatch.setattr(shared_config, "get_llm", lambda: ChatOpenAI(model="test-local-model", api_key="unused-local-test-key"))
@@ -62,8 +67,8 @@ async def test_real_application_startup_installs_the_gate_and_a_trial_never_coun
     def gate_factory(*args, **kwargs):
         return real_gate(*args, **kwargs, transport_factory=lambda: httpx.MockTransport(bridge))
     monkeypatch.setattr(request_gate, "RequestGate", gate_factory)
-    job = {"url": virtual, "title": "Intern", "company": "Acme", "status": "pending"}
-    shared_config.write_jobs({virtual: job})
+    job = {"url": posting, "title": "Intern", "company": "Acme", "status": "pending"}
+    shared_config.write_jobs({posting: job})
     apply_jobs.set_run_mode("trial")
     task = asyncio.create_task(apply_jobs.apply_to_job(job, {"name": "Ada Test", "email": "candidate@example.com"}, {}, [], False, 1))
     approvals = []
@@ -78,9 +83,9 @@ async def test_real_application_startup_installs_the_gate_and_a_trial_never_coun
                 break
             await asyncio.sleep(.05)
         result = await asyncio.wait_for(task, 10)
-        assert approvals == [] and ("GET", "/") in seen   # the page loaded through the gate, without questions
+        assert approvals == [] and ("GET", "/") in seen   # the page loaded, without questions
         assert result == "practised"  # even a fake success/receipt can never mark Trial applied
-        saved = shared_config.read_jobs()[virtual]
+        saved = shared_config.read_jobs()[posting]
         assert not saved.get("submit_attempted_at") and "submission_evidence" not in saved
         assert not any(r[0] == "POST" for r in seen)
         # Collection uses the same real SDK and broker, including the newly

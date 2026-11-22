@@ -20,9 +20,9 @@ GOOD_PROFILE = {"name": "Ada Lovelace", "email": "ada@example.com", "address": {
 class TestBuildAgentSecrets:
     def test_valid_profile_and_account_emails(self):
         s = apply_jobs.build_agent_secrets(GOOD_PROFILE, {"email": "login@example.com", "password": "hunter2hunter2"})
-        # The Settings password is only the legacy sign-in password; new accounts get their own per site.
+        # The Settings password is the job-site password: the one used for every account (decision 5, 2026-11).
         assert s == {"email": "ada@example.com", "account_email": "login@example.com",
-                     "previous_password": "hunter2hunter2"}
+                     "password": "hunter2hunter2"}
 
     def test_invalid_profile_email_falls_back_to_account_email(self):
         """A 4-letter typo must never be typed into forms or masked across page text."""
@@ -41,7 +41,7 @@ class TestBuildAgentSecrets:
     @pytest.mark.parametrize("password,kept", [("", False), ("abc", False), ("abcdef", True)])
     def test_short_or_empty_password_is_dropped(self, password, kept):
         s = apply_jobs.build_agent_secrets(GOOD_PROFILE, {"email": "", "password": password})
-        assert ("previous_password" in s) is kept
+        assert ("password" in s) is kept
 
 
 @pytest.mark.parametrize("value,expected", [
@@ -176,18 +176,6 @@ def run(data_dir, monkeypatch):
     monkeypatch.setattr(apply_jobs.config, "get_llm", lambda: object())
     monkeypatch.setattr(apply_jobs.config, "maybe_apply_stealth", no_stealth)
     monkeypatch.setattr(apply_jobs.config, "build_browser_kwargs", lambda **kw: {})
-    class FakeGate:
-        sent = 0
-        failed = False
-        def __init__(self, *args, **kwargs):
-            pass
-        async def start(self):
-            pass
-        async def close(self):
-            pass
-        async def wait_idle(self):
-            pass
-    monkeypatch.setattr(apply_jobs.request_gate, "RequestGate", FakeGate)
     monkeypatch.setattr(apply_jobs.config, "load_runtime_settings", lambda: {"max_failures": 6})
 
     def _run(url=GREENHOUSE, profile=GOOD_PROFILE, easy_apply=False, history=None, job_extra=None):
@@ -306,9 +294,9 @@ def test_prompt_lists_only_same_company_applications(run, monkeypatch):
     captured = {}
     real_build = apply_jobs.build_memory_context
 
-    def spy(profile, qa, applied_labels=None, job_url=None, learnings=True):
+    def spy(profile, qa, applied_labels=None, job_url=None):   # (no "learnings": performance mode is gone)
         captured["labels"] = applied_labels
-        return real_build(profile, qa, applied_labels, job_url=job_url, learnings=learnings)
+        return real_build(profile, qa, applied_labels, job_url=job_url)
 
     monkeypatch.setattr(apply_jobs, "build_memory_context", spy)
     job = {"url": GREENHOUSE, "title": "Intern", "company": "Acme", "location": "Boston"}
@@ -390,9 +378,12 @@ def test_failure_reason(history, expected):
 def test_task_carries_the_form_rules(run):
     _, kwargs, _ = run()
     task = kwargs["task"]
-    assert "How did you hear about us" in task and "LinkedIn. Never an employee referral" in task
+    # "How did you hear about us" is a default answer now: the company's own careers website, never LinkedIn.
+    assert "How did you hear about us" in task and "Never LinkedIn, Indeed, another job board" in task
+    assert "LinkedIn. Never an employee referral" not in task
     assert "type a keyword of the option you want" in task
-    assert "hourly x 2080 = yearly" in task
+    # Salary amounts are worked out by the app (SALARY NUMBERS), not by the agent.
+    assert "SALARY NUMBERS" in task and "hourly x 2080" not in task
     assert "Address Line 1 is the street address" in task
     assert "Never change a field that already holds a valid, sensible value" in task
 
@@ -433,9 +424,12 @@ def test_settings_saved_after_startup_are_used(run, monkeypatch, tmp_path):
         "blocked_domains": ["spam.example"],
     })
     _, kwargs, _ = run()
-    assert kwargs["available_file_paths"] == [new_resume]
+    # The resume, and where a required cover letter would be written (decision 6: written even when
+    # the "Fill cover-letter boxes" switch is off).
+    assert kwargs["available_file_paths"][0] == new_resume and len(kwargs["available_file_paths"]) == 2
+    assert kwargs["available_file_paths"][1].endswith(".pdf") and "cover_letters" in kwargs["available_file_paths"][1]
     assert kwargs["sensitive_data"]["account_email"] == "new-login@example.com"
-    assert kwargs["sensitive_data"]["previous_password"] == "brand-new-password"
+    assert kwargs["sensitive_data"]["password"] == "brand-new-password"
     assert "spam.example" in kwargs["task"]
 
 
@@ -444,7 +438,7 @@ def test_newly_blocked_domain_blocks_the_job(run, monkeypatch):
                         lambda: {"blocked_domains": ["greenhouse.io"]})
     status, kwargs, saved = run()
     assert status == "blocked" and kwargs is None
-    assert saved == [("blocked", "Blocked domain")]
+    assert saved == [("blocked", "This site is on your blocked list (Settings → Applications).")]
 
 
 def test_worker_rereads_the_profile_before_each_job(monkeypatch, tmp_path):
@@ -480,8 +474,11 @@ def test_page_check_rules_always_and_review_rules_only_in_trial_runs(run):
     apply_jobs.set_trial_run(False)
     _, kwargs, _ = run()
     assert "PAGE BY PAGE" in kwargs["task"] and "record_guesses" in kwargs["task"]
-    assert "NEVER GUESS these" in kwargs["task"] and "ask_for_answers" in kwargs["task"]
-    assert "having worked for or applied to this company before" in kwargs["task"]  # one of the never-guess questions
+    # Decision 2 (2026-11) reversed "never guess, always ask": the ordinary answer applies, and the
+    # user is asked only about what can't be inferred.
+    assert "NEVER GUESS these" not in kwargs["task"] and "ask_for_answers" in kwargs["task"]
+    assert "DEFAULT ANSWERS" in kwargs["task"] and "ASKING THE USER is the last resort" in kwargs["task"]
+    assert "Have you worked for this company (or its affiliates) before?: No." in kwargs["task"]
     assert "REVIEW BEFORE SUBMITTING" not in kwargs["task"]
     assert kwargs["step_timeout"] == apply_jobs.REVIEW_STEP_TIMEOUT
     apply_jobs.set_trial_run(True)
@@ -538,7 +535,7 @@ def test_trial_runs_get_more_steps(run):
 
 @pytest.mark.parametrize("agent_words,expected", [
     (True, ("The page shows “Error: we could not save your application” after a timeout. " * 3).strip()),
-    (False, "Operation timed out. The page took too long to respond."),
+    (False, "The site took too long to respond. Apply again later."),
 ])
 def test_agents_own_explanation_is_saved_as_written(monkeypatch, agent_words, expected):
     """Raw exceptions get friendlier text; the agent's explanation doesn't get rewritten."""
@@ -629,11 +626,25 @@ def test_agent_reporting_a_closed_posting_marks_it_closed(run):
     assert saved[-1] == ("closed", "Workday says the job is no longer available.")
 
 
+def _page_shows(monkeypatch, kind, url="https://boards.greenhouse.io/acme/jobs/123"):
+    """The page has a challenge of this kind that nobody has answered (and ticking a box doesn't pass it)."""
+    async def detect(browser):
+        return apply_jobs._captcha.Challenge(type=kind, sitekey="made-up-site-key", page_url=url)
+
+    async def no(*args, **kwargs):
+        return False
+
+    monkeypatch.setattr(apply_jobs._captcha, "detect", detect)
+    monkeypatch.setattr(apply_jobs._captcha, "answered", no)
+    monkeypatch.setattr(apply_jobs._captcha, "solve_human_check", no)
+
+
 def test_a_sites_human_check_is_left_for_the_user(run, monkeypatch):
     async def human_check(browser, settings):
         raise apply_jobs._captcha.HumanCheckNeeded("https://soylent.example")
 
     monkeypatch.setattr(apply_jobs._captcha, "handle", human_check)
+    _page_shows(monkeypatch, apply_jobs._captcha.HUMAN_CHECK, "https://soylent.example")
     monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *a: None)
     _run_fake_agent[0].call_step = True
     status, _, saved = run(history=FakeHistory(success=False, done_text="Blocked by a check."))
@@ -646,6 +657,7 @@ def test_trial_human_check_ends_promptly_and_cannot_be_reported_as_success(run, 
         raise apply_jobs._captcha.HumanCheckNeeded()
 
     monkeypatch.setattr(apply_jobs._captcha, "handle", human_check)
+    _page_shows(monkeypatch, apply_jobs._captcha.HUMAN_CHECK)
     monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *a: None)
     _run_fake_agent[0].call_step = True
     apply_jobs.set_run_mode("trial")
@@ -664,6 +676,7 @@ def test_an_unsolved_captcha_needs_you_and_skips_the_sites_other_jobs(run, monke
         raise apply_jobs._captcha.CaptchaUnsolved("hcaptcha", "2Captcha gave no answer within its time limit")
 
     monkeypatch.setattr(apply_jobs._captcha, "handle", unsolvable)
+    _page_shows(monkeypatch, apply_jobs._captcha.HCAPTCHA)
     monkeypatch.setattr(apply_jobs, "_agent_on_step", lambda *a: None)
     _run_fake_agent[0].call_step = True
     status, _, saved = run(history=FakeHistory(success=False, done_text="Stopped."))
@@ -741,16 +754,29 @@ def test_ai_fit_check_skips_a_hard_mismatch(run, monkeypatch):
     assert status == "skipped" and saved[-1] == ("skipped", "Requires an MBA\nThe posting is for MBA students only.")
 
 
-def test_performance_mode_or_the_switch_turns_the_ai_fit_check_off(run, monkeypatch):
+def test_the_switch_turns_the_ai_fit_check_off(run, monkeypatch):
     _posting_with(monkeypatch, title="MBA Associate", description="MBA only.")
 
     async def boom(*a, **k):
         raise AssertionError("fit check must not run")
 
     monkeypatch.setattr(apply_jobs.ai_extras, "fit_check", boom)
-    for settings in ({"performance_mode": True}, {"fit_check_enabled": False}):
-        _settings(monkeypatch, **settings)
-        assert run()[0] == "applied"
+    _settings(monkeypatch, fit_check_enabled=False)
+    assert run()[0] == "applied"
+
+
+@pytest.mark.parametrize("source", ["pasted", "manual"])
+def test_a_job_the_user_chose_themselves_is_never_fit_checked_or_location_skipped(run, monkeypatch, source):
+    """"I paste job links ... the app submits the application": no AI request is spent deciding
+    whether a link the user pasted is a fit, and it is never skipped for where it is."""
+    _posting_with(monkeypatch, title="MBA Associate", description="MBA only.", locations=["Worcester, MA"])
+
+    async def boom(*a, **k):
+        raise AssertionError("fit check must not run")
+
+    monkeypatch.setattr(apply_jobs.ai_extras, "fit_check", boom)
+    profile = dict(GOOD_PROFILE, address={"zip": "10001"}, search_area={"radius": "25"})
+    assert run(profile=profile, job_extra={"source": source})[0] == "applied"
 
 
 def test_applying_to_a_skipped_job_by_hand_overrides_the_checks(run, monkeypatch):
@@ -819,24 +845,21 @@ def test_worker_retries_a_failure_once_with_its_report(monkeypatch):
     assert len(seen) == 2 and seen[1]["previous_failure"] == "Couldn't select the start date."
 
 
-def test_no_self_retry_in_performance_mode(monkeypatch):
-    assert len(_worker_run(monkeypatch, ["failed"], {"performance_mode": True})) == 1
-
-
 def test_previous_failure_reaches_the_agent():
     text = apply_jobs.previous_failure_instructions("Stopped at Review: Field of Study")
     assert "THE LAST ATTEMPT AT THIS JOB FAILED" in text and "Field of Study" in text
     assert apply_jobs.previous_failure_instructions("") == ""
 
 
-def test_naming_action_only_outside_performance_mode(monkeypatch):
+def test_naming_action_only_for_a_job_without_a_name(monkeypatch):
     job = {"url": GREENHOUSE, "title": "Pasted Link", "company": ""}
     monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {})
     _settings(monkeypatch)
     assert "set_job_details" in apply_jobs.build_tools(job, "x", False, {}, 1).registry.registry.actions
-    _settings(monkeypatch, performance_mode=True)
-    assert "set_job_details" not in apply_jobs.build_tools(job, "x", False, {}, 1).registry.registry.actions
-    _settings(monkeypatch)
+    # A careers system's own name isn't an employer ("Candidate Experience site" was a real one).
+    for generic in ("Candidate Experience site", "UN Careers", "Unknown"):
+        unnamed = {"url": GREENHOUSE, "title": "Data Intern", "company": generic}
+        assert "set_job_details" in apply_jobs.build_tools(unnamed, "x", False, {}, 1).registry.registry.actions
     monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {GREENHOUSE: {"name_source": "user"}})
     assert "set_job_details" not in apply_jobs.build_tools(job, "x", False, {}, 1).registry.registry.actions
 
@@ -852,11 +875,12 @@ def test_set_job_details_names_the_job(monkeypatch):
     assert calls == [(GREENHOUSE, "Data Intern", "Contoso", "agent")] and result.extracted_content == "Noted."
 
 
-def test_cover_letter_action_only_when_turned_on(monkeypatch, tmp_path):
+def test_cover_letter_action_is_always_there_for_a_required_letter(monkeypatch, tmp_path):
+    """Decision 6 (2026-11): a REQUIRED cover letter is written even when the "Fill cover-letter boxes"
+    switch is off (an optional one is skipped; the task says which)."""
     monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {})
     _settings(monkeypatch)
-    assert "write_cover_letter" not in apply_jobs.build_tools({"url": GREENHOUSE}, "x", False, {}, 1).registry.registry.actions
-    _settings(monkeypatch, cover_letter_boxes=True)
+    assert "write_cover_letter" in apply_jobs.build_tools({"url": GREENHOUSE}, "x", False, {}, 1).registry.registry.actions
     ref = {"profile": {"name": "Ada Lovelace"}, "resume_text": "", "posting_description": "", "cover_letter_pdf": tmp_path / "cl.pdf"}
     tools = apply_jobs.build_tools({"url": GREENHOUSE, "title": "Intern", "company": "Acme"}, "x", False, ref, 1)
     calls = []
@@ -1190,3 +1214,45 @@ def test_stop_before_an_outcome_still_releases_the_claim(run, monkeypatch):
     monkeypatch.setattr(apply_jobs, 'save_job_status', save)
     asyncio.run(apply_jobs._release_claim('https://boards.greenhouse.io/acme/jobs/123', 'Role', 'Acme', 1, {}, 'stopped'))
     assert state['https://boards.greenhouse.io/acme/jobs/123']['status'] == 'pending'
+
+
+def test_the_command_line_run_uses_the_ai_model_from_settings(monkeypatch, data_dir):
+    # Seen 2026-11: run from the command line, the app used its old Bedrock default instead of the
+    # user's provider ("The config profile (default) could not be found" on a ChatGPT-plan setup).
+    import core.config as core_config
+    import core.llm_factory as llm_factory
+    made = []
+    monkeypatch.setattr(core_config, "load_llm_settings", lambda: {"provider": "openai", "openai": {"api_key": "made-up"}})
+    monkeypatch.setattr(llm_factory, "create_llm", lambda settings: made.append(settings["provider"]) or "the-model")
+    monkeypatch.setattr(llm_factory, "create_fallback_llm", lambda settings: None)
+    monkeypatch.setattr(apply_jobs.config, "get_llm", apply_jobs.config.get_llm)          # restored after the test
+    monkeypatch.setattr(apply_jobs.config, "get_fallback_llm", apply_jobs.config.get_fallback_llm)
+    assert apply_jobs.use_configured_llm() == "openai"
+    assert apply_jobs.config.get_llm() == "the-model" and made == ["openai"]
+
+
+def test_without_a_provider_the_command_line_run_keeps_its_default(monkeypatch, data_dir):
+    import core.config as core_config
+    monkeypatch.setattr(core_config, "load_llm_settings", lambda: {})
+    before = apply_jobs.config.get_llm
+    assert apply_jobs.use_configured_llm() == ""
+    assert apply_jobs.config.get_llm is before
+
+
+def test_the_chatgpt_model_loads_where_the_command_line_imports_it(tmp_path):
+    # The command-line run imports the backend as "backend.core" (no "core" on its path): the
+    # ChatGPT-plan model's modules imported "core.*" and failed there ("No module named 'core'").
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+    root = _Path(__file__).resolve().parents[3]
+    code = ("import sys; sys.path[:] = [p for p in sys.path if not p.replace(chr(92), '/').rstrip('/').endswith('backend')]; "
+            f"sys.path.insert(0, {str(root)!r}); "
+            "import backend.core.llm_factory as f; "
+            "m = f.create_llm({'provider': 'chatgpt', 'chatgpt': {'model': 'made-up-model'}}); "
+            "print(type(m).__name__, 'core' in sys.modules)")
+    env = {k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"}
+    env["USERPROFILE"] = env["HOME"] = str(tmp_path)
+    out = subprocess.run([_sys.executable, "-c", code], capture_output=True, text=True, cwd=tmp_path, env=env, timeout=120)
+    assert out.returncode == 0, out.stderr[-800:]
+    assert out.stdout.split() == ["ChatChatGPT", "False"]     # loaded, without a second "core" copy of the modules

@@ -501,3 +501,25 @@ def test_a_hostile_page_cannot_stall_the_reader():
     start = time.monotonic()
     job_page.parse("https://jobs.example.com/1", 200, hostile)
     assert time.monotonic() - start < 5
+
+
+@pytest.mark.parametrize("title", [
+    "FILLED: Early Careers: Benefits Co-op - Spring Term 2027",
+    "[Closed] Treasury Analyst - New York",
+    "(Filled) Summer Analyst",
+    "Expired - Summer Intern",
+    "Position Filled | Data Intern",
+])
+def test_a_title_that_says_the_posting_is_done_closes_it(title):
+    # Seen on an Oracle careers site (2026-11): the employer renames a filled posting
+    # "FILLED: ..." and leaves it up; the app kept it as ready to apply.
+    p = job_page.parse("https://jobs.example/job/1", 200, page(OG.format(title)))
+    assert p.closed and "closed" in p.reason and title[:20] in p.reason
+
+
+@pytest.mark.parametrize("title", [
+    "Closed Captioning Editor", "Closed-loop Controls Intern", "Filled Positions Coordinator", "Summer 2027 Internship",
+])
+def test_a_job_whose_name_only_starts_like_that_stays_open(title):
+    p = job_page.parse("https://jobs.example/job/1", 200, page(OG.format(title)))
+    assert not p.closed and p.title == title

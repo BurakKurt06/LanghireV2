@@ -35,7 +35,8 @@
       "yours": "Your answer",
       "fromAI": "AI's answer: check it",
       "guess": "AI's guess: check it",
-      "observed": "Filled in during a paused run: check it"
+      "observed": "Changed on the page while you stepped in: check it",
+      "default": "Default answer (change the list above to change it everywhere)"
     }
   },
   "toast": {

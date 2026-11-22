@@ -468,6 +468,19 @@ def test_profile_instructions_are_sent_as_rules(base_profile, no_op_store):
     assert "USER'S INSTRUCTIONS" not in sc.build_memory_context({**base_profile, "notes": "  "}, qa={})
 
 
+def test_the_users_instructions_come_before_built_in_rules_except_protections(base_profile, no_op_store):
+    # Decision 8 (2026-11): lean toward the user's instructions unless they'd clearly break the
+    # application or a protection; the conflict goes in the job's log.
+    ctx = sc.build_memory_context({**base_profile, "notes": "Never answer optional diversity questions."}, qa={})
+    block = ctx[ctx.index("USER'S INSTRUCTIONS"):]
+    assert "come before the rules above and the DEFAULT ANSWERS" in block
+    for protection in ("the account details", "email site", "final submit in a Trial run", "twice", "inventing facts"):
+        assert protection in block
+    assert "note_conflict" in block
+    # The instructions follow the block's rules, so the agent reads them last, as the final word.
+    assert ctx.index("Never answer optional diversity questions.") > ctx.index("note_conflict")
+
+
 @pytest.mark.parametrize("low,high,period,expected", [
     (20, 30, "hourly", "USD 20-30 (hourly)"),
     (50000, 0, "annual", "USD 50,000+ (no maximum) (annual)"),
@@ -577,11 +590,10 @@ def test_major_alternative_reaches_the_agent(base_profile, no_op_store):
     assert "Field of study if yours isn't listed: Finance" in sc.build_memory_context(base_profile, {})
 
 
-def test_performance_mode_drops_per_step_learning_notes(base_profile, no_op_store):
-    with_notes = sc.build_memory_context(base_profile, {})
-    without = sc.build_memory_context(base_profile, {}, learnings=False)
-    assert "SELF-LEARNING" in with_notes and "SELF-LEARNING" not in without
-    assert "@@QUESTION" in without                                   # Q&A saving stays
+def test_every_run_asks_for_learning_notes_and_saves_questions(base_profile, no_op_store):
+    # Performance mode (which dropped the per-step notes) was removed completely (2026-11).
+    context = sc.build_memory_context(base_profile, {})
+    assert "SELF-LEARNING" in context and "@@QUESTION" in context
 
 
 def _jobs_file(data_dir, monkeypatch, jobs):

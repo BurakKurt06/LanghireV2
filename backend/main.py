@@ -15,6 +15,7 @@ import subprocess
 import sys
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,18 +80,45 @@ async def lifespan(app: FastAPI):
         cleaned = _metrics.cleanup_old_logs(days=30)
         if cleaned:
             _log.info(f"Cleaned up {cleaned} old log entries")
+        # The space of deleted lines goes back to the disk, in the background (a few seconds, once).
+        _start_memory_compaction()
     # Auto-install Chromium if needed (runs in background so /health is available immediately)
     _ensure_chromium_async()
     # Start parent-process watchdog (self-terminate if Tauri app dies)
     _start_parent_watchdog()
     # Scheduled / requested Gmail checks (never during an application run)
     _start_inbox_scheduler()
+    # Saved jobs still without a real title or employer get their names (once, in the background)
+    _start_name_check()
     yield
     # Graceful shutdown: stop running operations
     import traceback
     _log.info(f"Backend shutting down... (trigger: lifespan exit)")
     _log.info(f"Shutdown stack:\n{''.join(traceback.format_stack())}")
     _stop_operations_and_browsers()
+
+
+def _compact_memory_db() -> dict | None:
+    """Compact the memory database when much of it is free space (see MetricsStore.compact)."""
+    import sqlite3
+    metrics = _get_metrics_store()
+    if not metrics:
+        return None
+    try:
+        result = metrics.compact()
+        if result["compacted"]:
+            _log.info(f"Compacted the memory database: {result['before'] / 1e6:.0f} MB -> {result['after'] / 1e6:.0f} MB")
+        return result
+    except sqlite3.OperationalError as e:      # busy (a run started meanwhile): the next start tries again
+        _log.warning(f"Couldn't compact the memory database now: {e}")
+        return None
+    finally:
+        metrics.close()
+
+
+def _start_memory_compaction() -> None:
+    import threading
+    threading.Thread(target=_compact_memory_db, name="memory-compaction", daemon=True).start()
 
 
 def _stop_operations_and_browsers():
@@ -102,7 +130,7 @@ def _stop_operations_and_browsers():
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHireV2 Backend", version="1.2.0", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.3.0", lifespan=lifespan)
 
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
@@ -114,18 +142,19 @@ _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 # basicConfig ignores supplied handlers when a host already configured logging.
 # Constructing a file handler first would still open a file, then discard it
 # without closing it (notably when main is embedded or imported by pytest).
+def _backend_log_handler() -> RotatingFileHandler:
+    """backend.log, in UTF-8: browser-use's logger names and the run's own lines carry emoji, and
+    with Windows' default encoding every such line raised an error whose trace went into the run
+    log (15,000 lines in 15 minutes of the user's first 1.3.0 run)."""
+    return RotatingFileHandler(get_data_dir() / "backend.log", maxBytes=5 * 1024 * 1024, backupCount=3,
+                               encoding="utf-8", errors="replace")
+
+
 if not logging.getLogger().handlers:
     logging.basicConfig(
         level=logging.INFO,
         format=_LOG_FORMAT,
-        handlers=[
-            RotatingFileHandler(
-                get_data_dir() / "backend.log",
-                maxBytes=5 * 1024 * 1024,
-                backupCount=3,
-            ),
-            logging.StreamHandler(),
-        ],
+        handlers=[_backend_log_handler(), logging.StreamHandler()],
     )
 
 
@@ -599,7 +628,7 @@ async def health():
     all_ok = db_ok and chromium_ok and llm_configured
     return {
         "status": "ok" if all_ok else "degraded",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "frozen": getattr(sys, 'frozen', False),
         "checks": {
             "database": db_ok,
@@ -806,9 +835,34 @@ async def get_settings():
 
 @app.get("/credentials/sites")
 async def employer_password_sites():
-    """Employer sites the app made an account password for (names only)."""
+    """Sites whose account uses another password than the one saved in Settings (names only):
+    kind "changed" is the user's password with characters added to meet that site's rules,
+    "generated" one an earlier version of the app made for that site."""
     from core import secret_store
-    return {"sites": secret_store.site_password_sites()}
+    entries = secret_store.site_password_entries()
+    return {"sites": [e["site"] for e in entries], "entries": entries}
+
+
+@app.get("/default-answers")
+async def get_default_answers():
+    """The ordinary answers the agent gives when the profile and notes say nothing special."""
+    from core import default_answers
+    return {"answers": default_answers.answers(load_settings())}
+
+
+@app.put("/default-answers/{answer_id}")
+async def set_default_answer(answer_id: str, body: dict):
+    """Change one default answer (an empty answer puts the built-in one back)."""
+    from core import default_answers
+    if answer_id not in default_answers.IDS:
+        return _api_error("not_found", "No such default answer", 404)
+    answer = body.get("answer")
+    if answer is not None and not isinstance(answer, str):
+        return _api_error("invalid_field", "answer must be text", 400)
+    stored = load_settings()
+    stored["default_answers"] = default_answers.with_edit(stored, answer_id, answer)
+    save_settings(stored)
+    return {"success": True, "answers": default_answers.answers(stored)}
 
 
 @app.post("/credentials/reveal")
@@ -822,6 +876,26 @@ async def reveal_employer_password(body: dict):
     if not password:
         return _api_error("unreadable", "That password can't be read on this Windows account", 409)
     return {"site": site, "password": password}
+
+
+@app.post("/secrets/reveal")
+async def reveal_saved_secret(body: dict):
+    """One saved secret in full, for the eye button next to its field.
+
+    The page only ever gets a row of dots for a saved password or key (SECRET_MASK), so its eye
+    button had nothing to show. Only the fields the app itself stores as secrets can be asked for.
+    """
+    from core.config import LLM_SECRETS, SETTINGS_SECRETS
+    kind = body.get("kind")
+    path = tuple(body.get("path")) if isinstance(body.get("path"), list) else ()
+    allowed, stored = (SETTINGS_SECRETS, load_settings) if kind == "settings" else (
+        (LLM_SECRETS, load_llm_settings) if kind == "llm" else ((), None))
+    if stored is None or path not in [tuple(p) for p in allowed]:
+        return _api_error("not_found", "No such saved secret", 404)
+    value = stored()
+    for key in path:
+        value = value.get(key) if isinstance(value, dict) else None
+    return {"value": value if isinstance(value, str) else ""}
 
 
 @app.get("/browsers")
@@ -856,8 +930,9 @@ _SETTINGS_TYPES = {
     "blocked_domains": list, "other_documents": list, "sensitive_data": dict,
     "max_failures": int, "parallel_jobs": int, "human_delay_min": int, "human_delay_max": int,
     "telemetry_enabled": bool, "job_collection_enabled": bool, "stealth_enabled": bool,
-    "human_delay_enabled": bool, "captcha_solver_enabled": bool, "performance_mode": bool,
+    "human_delay_enabled": bool, "captcha_solver_enabled": bool,
     "fit_check_enabled": bool, "cover_letter_boxes": bool, "onboarding_completed": bool,
+    "default_answers": dict,
 }
 
 
@@ -920,6 +995,19 @@ def _route_std_streams() -> None:
             setattr(sys, name, _RoutedStream(getattr(sys, name)))
 
 
+LOG_BATCH_LINES = 40
+LOG_BATCH_SECONDS = 1.5
+
+
+def _job_of_this_line() -> str | None:
+    """The job the code printing right now is working on (None outside an application)."""
+    try:
+        from cli import apply_jobs
+        return apply_jobs.current_job_url.get() or None
+    except Exception:
+        return None
+
+
 class _LogCapture(io.StringIO):
     """Captures print output and appends to a status log list + persists to DB."""
     _ansi_re = __import__("re").compile(r"\x1b\[[0-9;]*m")
@@ -932,6 +1020,9 @@ class _LogCapture(io.StringIO):
         self._max = max_lines
         self._metrics = metrics_store
         self._run_id = run_id
+        self._pending: list[tuple] = []
+        self._pending_lock = threading.Lock()
+        self._flushed_at = time.monotonic()
 
     def write(self, s):
         import re as _re
@@ -948,13 +1039,33 @@ class _LogCapture(io.StringIO):
                         m = _re.search(r"total this title:\s*(\d+)", line)
                         if m:
                             self._status["collected"] = int(m.group(1))
-                if self._metrics and self._run_id:
-                    try:
-                        level = "ERROR" if "❌" in line else "WARNING" if "⚠️" in line else "INFO"
-                        self._metrics.log(self._run_id, line, level=level)
-                    except Exception:
-                        pass
+                self.persist(line, "ERROR" if "❌" in line else "WARNING" if "⚠️" in line else "INFO")
         return len(s)
+
+    def persist(self, line: str, level: str) -> None:
+        """Keep a line for the run's saved log, tagged with the job it belongs to.
+
+        Lines are written to the database a batch at a time: one database commit per printed line
+        ran on the agent's own thread, hundreds of times per application."""
+        if not (self._metrics and self._run_id):
+            return
+        with self._pending_lock:
+            self._pending.append((self._run_id, _job_of_this_line(), level, line,
+                                  datetime.now(timezone.utc).isoformat()))
+            due = len(self._pending) >= LOG_BATCH_LINES or time.monotonic() - self._flushed_at >= LOG_BATCH_SECONDS
+        if due:
+            self.flush_saved()
+
+    def flush_saved(self) -> None:
+        with self._pending_lock:
+            rows, self._pending = self._pending, []
+            self._flushed_at = time.monotonic()
+        if not rows:
+            return
+        try:
+            self._metrics.log_batch(rows)
+        except Exception:
+            pass
 
     def flush(self):
         pass
@@ -977,11 +1088,16 @@ def _finish_leftover_tasks(loop, timeout: float = 10.0) -> None:
         _log.warning(f"Leftover tasks after the run didn't finish cleanly: {e}")
 
 
+EXECUTOR_WAIT_SECONDS = 100
+
+
 def _finish_executor_work(loop) -> None:
     """Wait for the run's worker threads (asyncio.to_thread: profile copies) as asyncio.run does:
     a cancelled await doesn't stop its thread, and the run keeps the browser profiles until they end."""
     try:
-        loop.run_until_complete(loop.shutdown_default_executor())
+        # The run keeps its browser profiles until these threads end. Bounded all the same: one that
+        # never returns must not block every later run (the Stop button already shows the run as over).
+        loop.run_until_complete(loop.shutdown_default_executor(timeout=EXECUTOR_WAIT_SECONDS))
     except Exception as e:
         _log.warning(f"The run's background threads didn't finish cleanly: {e}")
 
@@ -1020,12 +1136,7 @@ def _run_async_in_thread(coro_factory, status_dict):
                             m = self._collected_re.search(msg)
                             if m:
                                 status_dict["collected"] = max(status_dict.get("collected", 0), int(m.group(1)))
-                    if metrics and run_id:
-                        try:
-                            level = record.levelname
-                            metrics.log(run_id, msg, level=level)
-                        except Exception:
-                            pass
+                    capture.persist(msg, record.levelname)
 
         log_handler = _ListHandler()
         log_handler.setLevel(logging.INFO)
@@ -1062,6 +1173,7 @@ def _run_async_in_thread(coro_factory, status_dict):
         finally:
             logging.getLogger().removeHandler(log_handler)
             _run_captures.pop(run_id, None)
+            capture.flush_saved()
             if metrics:
                 metrics.close()
             _finish_leftover_tasks(loop)
@@ -1073,12 +1185,14 @@ def _run_async_in_thread(coro_factory, status_dict):
                 status_dict["finished_at"] = datetime.now().isoformat()
             status_dict.pop("_loop", None)
             status_dict.pop("_task", None)
+            status_dict.pop("_thread", None)
 
     status_dict["running"] = True
     status_dict["cancel_requested"] = False
     status_dict["error"] = None
     status_dict["finished_at"] = None
     t = threading.Thread(target=_worker, daemon=True)
+    status_dict["_thread"] = t
     t.start()
     return t
 
@@ -1105,6 +1219,10 @@ def _uses_owned_profile(cmdline: list[str], prefixes: tuple[str, ...]) -> bool:
 
 
 STOP_CLEAN_CLOSE_SECONDS = 2.0
+STOP_WAIT_SECONDS = 12.0
+# How long the stopped run's thread may go on finishing (a profile copy, a thread waiting on a
+# site) while new runs are told "the last run is still stopping".
+STOP_FINISH_SECONDS = 120.0
 
 
 def _owned_browser_processes() -> list:
@@ -1220,16 +1338,40 @@ def _force_stop(status_dict):
         cancelled = True
 
     _stopping.set()
+    thread = status_dict.get("_thread")
     try:
         if cancelled:
             # A short, bounded wait for that clean close (user's decision 11-01): the sweep below is a
             # hard kill on Windows and would lose what a site stored in the run's last moments.
             _wait_for_browsers_to_close(STOP_CLEAN_CLOSE_SECONDS)
         _kill_browser_processes()
-    finally:
+    except BaseException:
         _stopping.clear()
+        raise
+    # Stop means stopped, at once: the run is over for the app from here. Its thread still records
+    # each job's state and lets the browser library give up on its closed browser (about ten
+    # seconds); until that is done a new run is told "the last run is still stopping".
     with _status_lock:
         status_dict["log"].append("🛑 Force stopped")
+        if status_dict.get("running"):
+            status_dict["running"] = False
+            status_dict["error"] = "cancelled"
+            status_dict["finished_at"] = datetime.now().isoformat()
+
+    def finish():
+        try:
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(STOP_WAIT_SECONDS)
+                if thread.is_alive():
+                    _kill_browser_processes()       # whatever it was still waiting on: gone now
+                    thread.join(STOP_FINISH_SECONDS)
+        finally:
+            _stopping.clear()
+
+    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        threading.Thread(target=finish, daemon=True, name="stop-finish").start()
+    else:
+        _stopping.clear()
 
 
 # ── Thread-safe status access ─────────────────────────────────────────────
@@ -1470,7 +1612,8 @@ async def start_applying(body: ApplyRequest):
     # Claimed above, before closing browsers; released if starting fails before
     # the run's thread takes over (it resets the flag when the run ends).
     try:
-        _apply_jobs_module.set_run_mode(body.run_mode or "trial")
+        # Full auto unless Trial is chosen ("review" is how older callers asked for a trial).
+        _apply_jobs_module.set_run_mode(body.run_mode or ("trial" if body.review else "auto"))
         # Kill any leftover browser processes from previous runs
         _kill_browser_processes()
         _set_apply_paused(False)
@@ -1681,10 +1824,13 @@ def _pending_help() -> list[dict]:
 
 @app.post("/apply/help")
 async def help_application(body: dict):
-    """Reply to a trial-run agent that is stuck: a message and Continue, or Give up."""
+    """Reply to a run that is waiting for the user: answers to its questions, a message (a
+    verification code, a hint) and Continue, or Give up."""
     from cli import apply_jobs
     give_up = bool(body.get("give_up"))
-    ok = apply_jobs.answer_help(_text(body, "url"), _text(body, "message"), give_up)
+    answers = body.get("answers") if isinstance(body.get("answers"), dict) else {}
+    answers = {str(q)[:600]: str(a)[:2000] for q, a in list(answers.items())[:20] if isinstance(a, (str, int, float))}
+    ok = apply_jobs.answer_help(_text(body, "url"), _text(body, "message"), give_up, answers)
     if ok:
         with _status_lock:
             _apply_status["log"].append("🛑 Gave up on this application." if give_up else "▶️ Continuing with your help.")
@@ -1772,10 +1918,22 @@ async def get_jobs(
 async def get_job_stats():
     jobs = _load_jobs()
     stats = {"total": len(jobs), **{s: 0 for s in JOB_STATUSES}}
+    unknown = 0
     for j in jobs.values():
         s = j.get("status", "pending")
         if s in stats:
             stats[s] += 1
+        if s == "needs_you" and j.get("submit_attempted_at"):
+            unknown += 1
+    # What the Dashboard shows: every attempt that ended, not only the ones that worked. An attempt
+    # ended when the job was applied to, failed, was blocked, or was left for the user (which includes
+    # "outcome unknown"). The success rate is the share of those that were applied.
+    not_successful = stats["failed"] + stats["needs_you"] + stats["blocked"]
+    finished = stats["applied"] + not_successful
+    stats["outcome_unknown"] = unknown
+    stats["not_successful"] = not_successful
+    stats["finished"] = finished
+    stats["success_rate"] = round(100 * stats["applied"] / finished) if finished else None
     return stats
 
 
@@ -1883,6 +2041,44 @@ async def update_job_status(body: dict):
     return {"success": True, "url": url, "status": new_status}
 
 
+@app.post("/jobs/answers")
+async def answer_job_questions(body: dict):
+    """The user's answers to the questions a job is waiting on, given on its card.
+
+    They are saved as the user's own answers (used for every later application too). If the
+    run is waiting for them right now, it continues at once. Otherwise the job goes back to
+    "ready to apply", so the next run tries it again with the answers.
+    """
+    from cli import apply_jobs
+    from core.shared_config import read_jobs, update_job
+    url = _text(body, "url")
+    raw = body.get("answers") if isinstance(body.get("answers"), dict) else {}
+    answers = {str(q).strip()[:600]: str(a).strip()[:2000] for q, a in list(raw.items())[:20]
+               if isinstance(a, (str, int, float)) and str(q).strip() and str(a).strip()}
+    job = read_jobs().get(url)
+    if job is None:
+        return _api_error("not_found", "Job not found", 404)
+    if not answers:
+        return _api_error("invalid_field", "Type an answer first", 400)
+    store = _get_memory_store()
+    if store is not None:
+        for question, answer in answers.items():
+            store.qa_set_answer(question, answer, source="user")
+    if apply_jobs.answer_help(url, _text(body, "message"), False, answers):
+        return {"success": True, "continued": True, "ready": False, "remaining": 0, "may_have_been_sent": False}
+    asked = [q.get("question", "") for q in job.get("pending_questions") or [] if isinstance(q, dict)]
+    left = [q for q in asked if q not in answers]
+    sent = bool(job.get("submit_attempted_at"))      # never tried again by itself (it may have gone out)
+    ready = False
+    if job.get("status") == "needs_you" and not sent:
+        if left:
+            update_job(url, pending_questions=[q for q in job["pending_questions"] if q.get("question") in left])
+        else:
+            update_job(url, status="pending", error=None, pending_questions=None)
+            ready = True
+    return {"success": True, "continued": False, "ready": ready, "remaining": len(left), "may_have_been_sent": sent}
+
+
 @app.put("/jobs/note")
 async def update_job_note(body: dict):
     """A note for the agent on a job, used on its next attempt (e.g. how to get past a failure)."""
@@ -1956,19 +2152,109 @@ async def add_job_manually(body: dict):
     return {"success": True, "url": url}
 
 
+# Jobs whose names are looked for again at most this often (a page may never name its employer).
+NAMES_RECHECK_DAYS = 7
+# The one-off look at saved jobs waits this long after start, so the app opens at full speed.
+NAMES_STARTUP_DELAY_SECONDS = 45
+NAMES_STARTUP_MAX_JOBS = 40
+
+
+def _still_unnamed(url: str) -> bool:
+    from core import job_page
+    from core.shared_config import read_jobs
+    job = read_jobs().get(url) or {}
+    if job.get("status") not in ("pending", "failed", "needs_you", "skipped"):
+        return False
+    return job_page.is_placeholder(job.get("title")) or job_page.is_placeholder_company(job.get("company"))
+
+
+async def _read_posting_names(urls: list[str], rendered: bool = True) -> dict:
+    """Read each link's real title and employer (and whether it's closed).
+
+    First the plain page fetch. Links still without a real title or employer (pages built in the
+    browser, like Oracle's "Candidate Experience" sites) are then opened once in a temporary
+    headless browser (core.posting_reader), which only fills in what is still missing.
+    Returns {"read": n, "rendered": n}.
+    """
+    from datetime import datetime, timezone
+    from core import posting_reader
+    from core.shared_config import fill_missing_names, refresh_posting_details
+    counts = {"read": 0, "rendered": 0}
+    for u in urls:
+        try:
+            if await asyncio.to_thread(refresh_posting_details, u) is not None:
+                counts["read"] += 1
+        except Exception as e:
+            _log.warning(f"Couldn't read posting details for {u[:80]}: {e}")
+    unnamed = [u for u in urls if await asyncio.to_thread(_still_unnamed, u)]
+    if rendered and unnamed:
+        try:
+            postings = await posting_reader.read_rendered_many(unnamed)
+        except Exception as e:
+            _log.warning(f"Couldn't open the job pages in a browser: {e}")
+            postings = {}
+        for u in unnamed:
+            if postings.get(u) is not None:
+                counts["rendered"] += 1
+            try:
+                await asyncio.to_thread(fill_missing_names, u, postings.get(u))
+            except Exception as e:
+                _log.warning(f"Couldn't save posting details for {u[:80]}: {e}")
+    now = datetime.now(timezone.utc).isoformat()
+    for u in urls:
+        try:
+            await asyncio.to_thread(fill_missing_names, u, None, now)
+        except Exception:
+            pass
+    return counts
+
+
 def _schedule_posting_details(urls: list[str]) -> None:
     """Read each new link's real title and company (and whether it's closed) in the background."""
-    from core.shared_config import refresh_posting_details
+    try:
+        asyncio.get_running_loop().create_task(_read_posting_names(list(urls)))
+    except RuntimeError:
+        pass
 
-    async def _run():
-        for u in urls:
-            try:
-                await asyncio.to_thread(refresh_posting_details, u)
-            except Exception as e:
-                _log.warning(f"Couldn't read posting details for {u[:80]}: {e}")
+
+def _unnamed_saved_jobs(now=None) -> list[str]:
+    """Saved jobs still called "Pasted Link", "Candidate Experience site", ... that weren't looked
+    at in the last NAMES_RECHECK_DAYS (names read by older versions are read again once)."""
+    from datetime import datetime, timedelta, timezone
+    from core import job_page
+    from core.shared_config import read_jobs
+    now = now or datetime.now(timezone.utc)
+    urls = []
+    for url, job in read_jobs().items():
+        if job.get("status") not in ("pending", "failed", "needs_you", "skipped"):
+            continue
+        if not (job_page.is_placeholder(job.get("title")) or job_page.is_placeholder_company(job.get("company"))):
+            continue
+        try:
+            checked = datetime.fromisoformat(job.get("names_checked_at") or "")
+        except ValueError:
+            checked = None
+        if checked and now - checked < timedelta(days=NAMES_RECHECK_DAYS):
+            continue
+        urls.append(url)
+    return urls[:NAMES_STARTUP_MAX_JOBS]
+
+
+def _start_name_check() -> None:
+    """Once per start: give saved jobs without a real title or employer their names."""
+    async def _later():
+        await asyncio.sleep(NAMES_STARTUP_DELAY_SECONDS)
+        try:
+            urls = await asyncio.to_thread(_unnamed_saved_jobs)
+            if urls:
+                # The browser reading is left out while applications run (their browsers come first).
+                counts = await _read_posting_names(urls, rendered=not _apply_status.get("running"))
+                _log.info(f"Looked up the names of {len(urls)} saved job(s): {counts}")
+        except Exception as e:
+            _log.warning(f"Couldn't look up saved jobs' names: {e}")
 
     try:
-        asyncio.get_running_loop().create_task(_run())
+        asyncio.get_running_loop().create_task(_later())
     except RuntimeError:
         pass
 
@@ -2176,10 +2462,6 @@ def _inbox_checking() -> bool:
         return False
 
 
-def _performance_mode() -> bool:
-    return bool(load_settings().get("performance_mode"))
-
-
 def _inbox_check_now() -> dict:
     """One full Gmail check (runs in the scheduler thread, with its own event loop)."""
     from core import inbox
@@ -2207,7 +2489,7 @@ def _start_inbox_scheduler() -> None:
 @app.get("/inbox")
 async def get_inbox():
     from core import inbox
-    return {**inbox.status(), "busy": _inbox_busy(), "performance_mode": _performance_mode()}
+    return {**inbox.status(), "busy": _inbox_busy()}
 
 
 @app.post("/inbox/check")
@@ -2234,8 +2516,6 @@ async def make_prep_sheet(body: dict):
     from core import inbox, job_page
     from core.llm_factory import create_llm, _friendly_llm_error
     from core.shared_config import read_jobs
-    if _performance_mode():
-        return _api_error("performance_mode", "Prep sheets are off in performance mode (Settings).", 400)
     email = inbox.find(str(body.get("id") or ""))
     if email is None:
         return _api_error("not_found", "Email not found", 404)
@@ -2728,6 +3008,15 @@ async def get_run_logs(run_id: str, limit: int = Query(500)):
     if metrics:
         return metrics.get_run_logs(run_id, limit=limit)
     return []
+
+
+@app.get("/logs/job")
+async def get_job_logs(url: str = Query(...), limit: int = Query(400, ge=1, le=2000)):
+    """The saved log lines of one job's applications, oldest first (the job card's "View log")."""
+    metrics = _get_metrics_store()
+    if not metrics:
+        return []
+    return list(reversed(metrics.get_job_logs(url, limit=limit)))
 
 
 @app.get("/logs/recent")

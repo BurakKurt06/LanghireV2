@@ -6,7 +6,7 @@ import uuid
 
 import httpx
 
-from core import chatgpt_auth
+from . import chatgpt_auth
 
 # The Codex backend always streams; these events carry the text and the end state.
 _TEXT_DELTA = "response.output_text.delta"

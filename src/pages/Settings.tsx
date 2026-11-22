@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Save, FolderOpen, X, Upload, Trash2, Sun, Moon, Monitor } from "lucide-react";
 import {
   getSettings, saveSettings, getPlugins, togglePlugin, removePlugin, importPlugin, getBrowsers,
-  getEmployerPasswordSites, revealEmployerPassword, getProfile, patchProfile, getInbox, setInboxSchedule,
+  getEmployerPasswordSites, revealEmployerPassword, getProfile, patchProfile, getInbox, setInboxSchedule, revealSecret,
 } from "../lib/api";
 import { setTelemetryEnabled as setAnalyticsTelemetry } from "../lib/analytics";
 import { getStoredTheme, setTheme, type ThemeMode } from "../lib/theme";
@@ -17,7 +17,10 @@ import JobSearchForm from "../components/JobSearchForm";
 import { withDefaults } from "../lib/jobSearch";
 import { INBOX_SCHEDULE_LABELS } from "../lib/inbox";
 import { PROFILE_SETTINGS_FIELDS } from "../lib/profileFields";
-import { SETTINGS_SECTIONS, type SettingsSectionId } from "../lib/settingsSections";
+import { SETTINGS_SECTIONS, resolveSection, type SettingsSectionId } from "../lib/settingsSections";
+import LogsSection from "../components/LogsSection";
+import { ResumePathInput } from "../components/ResumeFile";
+import FeedbackSection from "../components/FeedbackSection";
 import { TAILOR_OPTION_LABELS, loadAutoTailor, loadTailorOptions, saveAutoTailor, saveTailorOptions } from "../lib/tailoring";
 import type {
   PluginConfig, InstalledBrowser, OtherDocument, CandidateProfile, InboxStatus, TailorOptions,
@@ -30,8 +33,9 @@ export default function SettingsPage() {
   const { t: tp } = useTranslation("profile");
   const [params, setParams] = useSearchParams();
   const requested = params.get("section");
-  const section: SettingsSectionId = SETTINGS_SECTIONS.some((s) => s.id === requested)
-    ? (requested as SettingsSectionId) : "ai-model";
+  // Old links (?section=job-sources, browser, appearance, logs, feedback) open the merged category.
+  const section: SettingsSectionId = resolveSection(requested);
+
   const [resumePath, setResumePath] = useState("");
   const [blockedDomains, setBlockedDomains] = useState<string[]>([]);
   const [newDomain, setNewDomain] = useState("");
@@ -57,7 +61,6 @@ export default function SettingsPage() {
   const [browserPath, setBrowserPath] = useState("");
   const [browsers, setBrowsers] = useState<InstalledBrowser[]>([]);
   const [otherDocuments, setOtherDocuments] = useState<OtherDocument[]>([]);
-  const [performanceMode, setPerformanceMode] = useState(false);
   const [fitCheckEnabled, setFitCheckEnabled] = useState(true);
   const [coverLetterBoxes, setCoverLetterBoxes] = useState(false);
   const [parallelJobs, setParallelJobs] = useState(1);
@@ -79,7 +82,6 @@ export default function SettingsPage() {
   const loadSettings = useCallback(() => getSettings().then((data) => {
         setResumePath(data.resume_path || "");
         setOtherDocuments(data.other_documents || []);
-        setPerformanceMode(data.performance_mode === true);
         setFitCheckEnabled(data.fit_check_enabled !== false);
         setCoverLetterBoxes(data.cover_letter_boxes === true);
         setParallelJobs(Math.max(1, Math.min(4, data.parallel_jobs || 1)));
@@ -102,7 +104,8 @@ export default function SettingsPage() {
         setHumanDelayEnabled(data.human_delay_enabled === true);
         setHumanDelayMin(data.human_delay_min ?? 5);
         setHumanDelayMax(data.human_delay_max ?? 15);
-        setCaptchaEnabled(data.captcha_solver_enabled === true);
+        // On by default once a key is saved; off only when the user turned it off.
+        setCaptchaEnabled(data.captcha_solver_enabled !== false);
         setCaptchaApiKey(data.captcha_api_key || "");
         setBrowser(data.browser || "");
         setBrowserPath(data.browser_path || "");
@@ -133,6 +136,10 @@ export default function SettingsPage() {
       loadLists(),
     ]).finally(() => setLoading(false));
   }, [loadSettings, loadProfile, loadLists]);
+  useEffect(() => {
+    const anchor = requested === "logs" ? "settings-logs" : requested === "feedback" ? "settings-feedback" : "";
+    if (anchor && !loading) document.getElementById(anchor)?.scrollIntoView?.({ block: "start" });
+  }, [requested, loading]);
   const retrySettings = () => { void loadSettings(); void loadLists(); };
   const retryProfile = () => { void loadProfile(); };
 
@@ -212,10 +219,8 @@ export default function SettingsPage() {
     setBlockedDomains(blockedDomains.filter((x) => x !== d));
   };
 
-  const handleSave = async () => {
-    try {
-      setSaveError(null);
-      await saveSettings({
+  // Everything this page saves with "Save Settings" (the profile's fields go separately).
+  const settingsPayload = {
         resume_path: resumePath,
         blocked_domains: blockedDomains,
         sensitive_data: { email, password },
@@ -232,11 +237,18 @@ export default function SettingsPage() {
         browser,
         browser_path: browserPath,
         other_documents: otherDocuments.filter((d) => d.path.trim()),
-        performance_mode: performanceMode,
         fit_check_enabled: fitCheckEnabled,
         cover_letter_boxes: coverLetterBoxes,
         parallel_jobs: parallelJobs,
-      });
+  };
+  const payloadKey = JSON.stringify(settingsPayload);
+  const savedKey = useRef<string | null>(null);
+
+  const handleSave = async () => {
+    try {
+      setSaveError(null);
+      await saveSettings(settingsPayload);
+      savedKey.current = payloadKey;
       if (profile && profileChanged) {
         // Only these fields, updated atomically by the backend: what Profile saved meanwhile is kept.
         const own = Object.fromEntries(PROFILE_SETTINGS_FIELDS.map((key) => [key, profile[key]]));
@@ -250,6 +262,23 @@ export default function SettingsPage() {
       console.error("Failed to save settings:", e);
     }
   };
+
+  // Changes save by themselves, a moment after the last one (the AI model, tailoring and Inbox
+  // parts always did; "Jobs at the same time" set to 4 without pressing Save did nothing).
+  const saveNow = useRef(handleSave);
+  useEffect(() => {
+    saveNow.current = handleSave;
+  });
+  useEffect(() => {
+    if (loading || loadFailed) return;
+    if (savedKey.current === null) {
+      savedKey.current = payloadKey;      // what was loaded
+      return;
+    }
+    if (payloadKey === savedKey.current && !profileChanged) return;
+    const timer = setTimeout(() => { void saveNow.current(); }, 800);
+    return () => clearTimeout(timer);
+  }, [payloadKey, profileChanged, loading, loadFailed]);
 
   if (loading) return <LoadingSpinner />;
 
@@ -277,12 +306,12 @@ export default function SettingsPage() {
   );
 
   return (
-    <div className="max-w-4xl">
+    <div className="page-form">
       <PageHeader
         title="Settings"
-        subtitle="General application settings"
+        subtitle="Changes are saved as you make them"
         actions={section !== "ai-model" && !loadFailed ? (
-          <button onClick={handleSave} className="btn-primary">
+          <button onClick={handleSave} className="btn-primary" aria-label="Save Settings">
             <Save className="w-4 h-4" />
             {saved ? "Saved" : "Save Settings"}
           </button>
@@ -315,7 +344,7 @@ export default function SettingsPage() {
           </ul>
         </nav>
 
-        <div className="flex-1 min-w-0 max-w-2xl">
+        <div className="flex-1 min-w-0">
           {panel("ai-model", (
             <>
               <p className="text-[13px] text-muted-foreground mb-4">{t("aiModelHint", "The AI model saves as you change it.")}</p>
@@ -383,6 +412,60 @@ export default function SettingsPage() {
                   <p className="text-[13px] text-muted-foreground mt-2">No blocked domains</p>
                 )}
               </Group>
+              <Group label="Job sources">
+                <SettingSwitch
+                  label="Job board collection"
+                  checked={jobCollectionEnabled}
+                  onChange={setJobCollectionEnabled}
+                  description="Let the agent search job boards (LinkedIn, Indeed, Handshake, Intern Insider and the other plugins) for listings. When off, the Collect controls are disabled and the collect script exits — pasting links still works."
+                  className=""
+                />
+              </Group>
+              <Group label="Job Source Plugins">
+                <p className="text-[13px] text-muted-foreground mb-4">
+                  Manage job source plugins. Built-in plugins provide LinkedIn, Indeed, Glassdoor, Handshake, ZipRecruiter, Intern Insider, Reed, StepStone, SEEK and Naukri.
+                  Import community plugins (.yaml files) for additional job sites.
+                </p>
+                <div className="space-y-3 mb-4">
+                  {plugins.map((plugin) => (
+                    <div key={plugin.name} className="flex items-center justify-between p-3 border border-border rounded-lg">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold text-foreground">{plugin.display_name}</span>
+                          <span className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">
+                            v{plugin.version}
+                          </span>
+                          {plugin.is_builtin && (
+                            <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">Built-in</span>
+                          )}
+                        </div>
+                        <p className="text-[12px] text-muted-foreground mt-0.5">
+                          {plugin.description} &middot; {plugin.countries.join(", ")}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 ml-4">
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={plugin.enabled}
+                            onChange={(e) => handleTogglePlugin(plugin.name, e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-9 h-5 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
+                        </label>
+                        {!plugin.is_builtin && (
+                          <button onClick={() => handleRemovePlugin(plugin.name)} aria-label={`Remove ${plugin.name}`} className="text-destructive hover:text-destructive/80">
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={handleImportPlugin} className="btn-secondary">
+                  <Upload className="w-4 h-4" /> Import Plugin
+                </button>
+              </Group>
             </>
           ))}
           {panel("applications", loadFailed ? loadError : (
@@ -397,19 +480,10 @@ export default function SettingsPage() {
               )}
               <Group first={profileFailed || !profile}>
                 <label htmlFor="resume-path" className="block text-sm font-semibold text-foreground mb-1.5">{t("resume.title", "Resume")}</label>
-                <div className="flex gap-2">
-                  <input id="resume-path" value={resumePath} onChange={(e) => setResumePath(e.target.value)}
-                    placeholder="/path/to/your/resume.pdf"
-                    className="input-base flex-1" />
-                  <button onClick={async () => {
-                      const file = await open({ filters: [{ name: "PDF", extensions: ["pdf"] }] });
-                      if (file) setResumePath(file as string);
-                    }}
-                    className="btn-secondary">
-                    <FolderOpen className="w-4 h-4" /> Browse
-                  </button>
-                </div>
-                <p className="text-[13px] text-muted-foreground mt-2">PDF resume file used for job applications</p>
+                <ResumePathInput id="resume-path" value={resumePath} onChange={setResumePath} />
+                <p className="text-[13px] text-muted-foreground mt-2">
+                  PDF resume file used for job applications. It is the same file as Profile → Resume.
+                </p>
 
                 <div className="mt-5">
                   <p className="text-sm font-semibold text-foreground">Other documents</p>
@@ -468,39 +542,30 @@ export default function SettingsPage() {
                   </p>
                 </div>
                 <div>
-                  <label className="block text-sm font-semibold text-foreground mb-1.5">Max Failures Per Job</label>
-                  <input type="number" value={maxFailures} onChange={(e) => {
+                  <label htmlFor="max-failures" className="block text-sm font-semibold text-foreground mb-1.5">Max Failures Per Job</label>
+                  <input id="max-failures" type="number" value={maxFailures} onChange={(e) => {
                       const val = Number(e.target.value);
                       setMaxFailures(Math.max(1, Math.min(50, isNaN(val) ? 8 : val)));
                     }}
                     min={1} max={50} className="input-base !w-32" />
                   <p className="text-[13px] text-muted-foreground mt-1.5">
-                    Agent stops trying after this many consecutive failures on a single job.
+                    How many times in a row something may go wrong on one job before the app gives it up and moves to the
+                    next one. This covers failed steps and pages that don't respond: a page that is blank or shows no
+                    progress for 5 minutes is reloaded and the job tried again, up to this number, then skipped with
+                    "The page didn't load".
                   </p>
                 </div>
               </Group>
               <Group>
                 <SettingSwitch
-                  label="Performance mode"
-                  checked={performanceMode}
-                  onChange={setPerformanceMode}
-                  description={
-                    "Turns off optional AI work that doesn't change your answers: the fit check, job naming by the agent, " +
-                    "the agent's per-step learning notes and interview prep sheets. Screenshots, form checks and your " +
-                    "saved answers stay on, so applications are filled just as carefully. In a test it saved one AI " +
-                    "request and about 10 seconds per application, and also skips the one automatic retry after a failure."
-                  }
-                />
-                <SettingSwitch
                   label="Fit check before applying"
-                  checked={fitCheckEnabled && !performanceMode}
-                  disabled={performanceMode}
+                  checked={fitCheckEnabled}
                   onChange={setFitCheckEnabled}
                   description={
-                    "Reads each posting first (one small AI request) and skips jobs with a hard requirement you don't meet: " +
-                    "degree level (MBA / Master's / PhD only), graduation year, citizenship or clearance, or location outside " +
-                    "your search area. Skipped jobs show the reason, and you can still apply by hand." +
-                    (performanceMode ? " Off while performance mode is on." : "")
+                    "For jobs the collector found: reads each posting first (one small AI request) and skips jobs with a hard " +
+                    "requirement you don't meet: degree level (MBA / Master's / PhD only), graduation year, citizenship or " +
+                    "clearance, or location outside your search area. Skipped jobs show the reason, and you can still apply by " +
+                    "hand. Links you paste or add yourself are never checked or skipped: you chose them."
                   }
                 />
                 <SettingSwitch
@@ -508,9 +573,40 @@ export default function SettingsPage() {
                   checked={coverLetterBoxes}
                   onChange={setCoverLetterBoxes}
                   description={
-                    "When a form has a cover letter box or upload, write a short letter for that job from your profile, " +
-                    "resume and the posting. Plain text, no formatting, no AI-sounding phrases."
+                    "A required cover letter is always written for the job (from your resume, profile and the posting). " +
+                    "With this on, optional cover letter text boxes are filled too; otherwise optional ones are skipped."
                   }
+                />
+              </Group>
+              <Group label="CAPTCHAs (2Captcha)">
+                <label htmlFor="captcha-key" className="block text-sm font-semibold text-foreground mb-1.5">
+                  2Captcha API key
+                </label>
+                <PasswordInput
+                  id="captcha-key"
+                  value={captchaApiKey}
+                  onChange={(e) => {
+                    // A key typed into an empty field turns the solver on (the user can still switch it off).
+                    if (captchaApiKey.trim() === "" && e.target.value.trim() !== "") setCaptchaEnabled(true);
+                    setCaptchaApiKey(e.target.value);
+                  }}
+                  reveal={() => revealSecret("settings", ["captcha_api_key"]).then((r) => r.value)}
+                  onRevealed={setCaptchaApiKey}
+                  placeholder="Paste your 2Captcha API key"
+                  className="input-base"
+                />
+                <p className="text-[13px] text-muted-foreground mt-1.5 mb-3">
+                  With a key saved, CAPTCHAs are sent to 2Captcha automatically (at most 2 attempts per application). If it
+                  can't solve one, or no key is saved, the run waits up to 5 minutes for you to solve it in the open browser
+                  window, then keeps the job as "Needs you" and moves on. The key is saved encrypted and never shown to the AI.
+                </p>
+                <SettingSwitch
+                  label="Solve CAPTCHAs with 2Captcha"
+                  checked={captchaEnabled && captchaApiKey.trim() !== ""}
+                  disabled={captchaApiKey.trim() === ""}
+                  onChange={setCaptchaEnabled}
+                  description={captchaApiKey.trim() === "" ? "On as soon as a key is saved." : "On by default when a key is saved. Turn it off to always solve CAPTCHAs yourself."}
+                  className=""
                 />
               </Group>
               <Group label="Tailoring Options">
@@ -554,11 +650,11 @@ export default function SettingsPage() {
               </Group>
               <Group label="Account Credentials">
                 <p className="text-[13px] text-muted-foreground mb-4">
-                  The email is used for accounts on employer application sites. Each site the agent
-                  creates an account on gets its own password, made by the app and listed below. The
-                  password here is only used to sign in to accounts you created earlier with it.
-                  Both are saved encrypted for your Windows account. Prefer SSO (Sign in with
-                  LinkedIn/Google) when a site offers it.
+                  The email and password the app uses on hiring sites (Workday, SuccessFactors, iCIMS, Greenhouse, an
+                  employer's own careers site, ...): it signs in when an account exists for this email and creates one
+                  otherwise, with this one password everywhere. If a site rejects the password for its rules (length,
+                  symbols), the app adds characters to the end and lists that site below. Never typed on email sites, job
+                  boards or pages the job link didn't lead to. Saved encrypted for your Windows account.
                 </p>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -567,8 +663,10 @@ export default function SettingsPage() {
                       className="input-base" />
                   </div>
                   <div>
-                    <label htmlFor="account-password" className="block text-sm font-semibold text-foreground mb-1.5">Earlier password (sign-in only)</label>
+                    <label htmlFor="account-password" className="block text-sm font-semibold text-foreground mb-1.5">Password for job sites</label>
                     <PasswordInput id="account-password" value={password} onChange={(e) => setPassword(e.target.value)}
+                      reveal={() => revealSecret("settings", ["sensitive_data", "password"]).then((r) => r.value)}
+                      onRevealed={setPassword}
                       className="input-base" />
                   </div>
                 </div>
@@ -594,66 +692,11 @@ export default function SettingsPage() {
               </Group>
             </>
           ))}
-          {panel("job-sources", loadFailed ? loadError : (
+          {panel("app", (
             <>
-              <Group first>
-                <SettingSwitch
-                  label="Job board collection"
-                  checked={jobCollectionEnabled}
-                  onChange={setJobCollectionEnabled}
-                  description="Let the agent search job boards (LinkedIn, Indeed, Handshake, Intern Insider and the other plugins) for listings. When off, the Collect controls are disabled and the collect script exits — pasting links still works."
-                  className=""
-                />
-              </Group>
-              <Group label="Job Source Plugins">
-                <p className="text-[13px] text-muted-foreground mb-4">
-                  Manage job source plugins. Built-in plugins provide LinkedIn, Indeed, Glassdoor, Handshake, ZipRecruiter, Intern Insider, Reed, StepStone, SEEK and Naukri.
-                  Import community plugins (.yaml files) for additional job sites.
-                </p>
-                <div className="space-y-3 mb-4">
-                  {plugins.map((plugin) => (
-                    <div key={plugin.name} className="flex items-center justify-between p-3 border border-border rounded-lg">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-foreground">{plugin.display_name}</span>
-                          <span className="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground">
-                            v{plugin.version}
-                          </span>
-                          {plugin.is_builtin && (
-                            <span className="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">Built-in</span>
-                          )}
-                        </div>
-                        <p className="text-[12px] text-muted-foreground mt-0.5">
-                          {plugin.description} &middot; {plugin.countries.join(", ")}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2 ml-4">
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={plugin.enabled}
-                            onChange={(e) => handleTogglePlugin(plugin.name, e.target.checked)}
-                            className="sr-only peer"
-                          />
-                          <div className="w-9 h-5 bg-secondary peer-focus:ring-2 peer-focus:ring-primary/20 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-primary"></div>
-                        </label>
-                        {!plugin.is_builtin && (
-                          <button onClick={() => handleRemovePlugin(plugin.name)} aria-label={`Remove ${plugin.name}`} className="text-destructive hover:text-destructive/80">
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <button onClick={handleImportPlugin} className="btn-secondary">
-                  <Upload className="w-4 h-4" /> Import Plugin
-                </button>
-              </Group>
-            </>
-          ))}
-          {panel("browser", loadFailed ? loadError : (
-            <>
+              {/* Logs and Send feedback don't need the settings: they stay when the settings can't be read. */}
+              {loadFailed ? loadError : (
+              <>
               <Group first>
                 <div>
                   <label htmlFor="browser-choice" className="block text-sm font-semibold text-foreground mb-1.5">
@@ -665,7 +708,7 @@ export default function SettingsPage() {
                     onChange={(e) => setBrowser(e.target.value)}
                     className="w-full px-3 py-2 border border-border rounded-lg text-sm bg-card max-w-sm"
                   >
-                    <option value="">Automatic (Chrome if installed)</option>
+                    <option value="">Automatic (the app's own Chromium)</option>
                     {browsers.map((b) => (
                       <option key={b.id} value={b.id}>
                         {b.name}{b.is_default ? " (your default browser)" : ""}
@@ -687,8 +730,9 @@ export default function SettingsPage() {
                   )}
                   <p className="text-[13px] text-muted-foreground mt-1.5">
                     Only Chromium-based browsers (Chrome, Edge, Brave, Vivaldi…) can be automated. The agent opens its own
-                    window with a separate profile for each browser, not your everyday one, so log in to LinkedIn again
-                    after switching.
+                    window with a separate profile for each browser, not your everyday one, so sign in again (Accounts
+                    &amp; email) after switching. In a test on 14 real job sites every one of them loaded the pages equally
+                    well (Chrome was slightly quicker), so keep the one you already signed in with.
                   </p>
                 </div>
               </Group>
@@ -752,33 +796,6 @@ export default function SettingsPage() {
                 )}
               </Group>
               <Group>
-                <SettingSwitch
-                  label="Solve CAPTCHAs with 2Captcha"
-                  checked={captchaEnabled}
-                  onChange={setCaptchaEnabled}
-                  description="When a CAPTCHA appears, send it to 2Captcha (max 2 attempts per application). If solving fails — or this is off — the job is marked Needs you (so you can apply yourself), and the agent moves to the next job. Your API key is never included in prompts or logs."
-                  className=""
-                />
-                {captchaEnabled && (
-                  <div className="mt-4">
-                    <label htmlFor="captcha-key" className="block text-sm font-semibold text-foreground mb-1.5">
-                      2Captcha API key
-                    </label>
-                    <PasswordInput
-                      id="captcha-key"
-                      value={captchaApiKey}
-                      onChange={(e) => setCaptchaApiKey(e.target.value)}
-                      placeholder="Your 2Captcha API key"
-                      className="input-base"
-                    />
-                  </div>
-                )}
-              </Group>
-            </>
-          ))}
-          {panel("appearance", loadFailed ? loadError : (
-            <>
-              <Group first>
                 <label className="block text-sm font-semibold text-foreground mb-2">{t("appearance.theme", "Theme")}</label>
                 <div className="flex gap-2" role="radiogroup" aria-label={t("appearance.theme", "Theme")}>
                   {([
@@ -810,6 +827,19 @@ export default function SettingsPage() {
                   description="Off unless you turn it on. Sends which features you use and error reports (an error message can include a page or file name). Never your profile, resume, answers or job list. Only in builds set up with analytics keys."
                   className=""
                 />
+              </Group>
+              </>
+              )}
+              <Group label="Logs">
+                <div id="settings-logs">
+                  {/* Only loaded while App & browser is open: the other categories never fetch logs. */}
+                  {section === "app" && <LogsSection />}
+                </div>
+              </Group>
+              <Group label="Send feedback">
+                <div id="settings-feedback">
+                  <FeedbackSection />
+                </div>
               </Group>
             </>
           ))}
@@ -858,14 +888,16 @@ function SettingSwitch({ label, description, checked, onChange, disabled = false
 }
 
 
-/** The passwords the app made for employer sites: names listed, each shown only when asked. */
+/** Sites whose account uses another password than the one above: names listed, each shown only when asked. */
 function EmployerPasswords() {
-  const [sites, setSites] = useState<string[]>([]);
+  const [entries, setEntries] = useState<{ site: string; kind: "changed" | "generated" }[]>([]);
   const [shown, setShown] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
 
   useEffect(() => {
-    getEmployerPasswordSites().then((r) => setSites(r.sites || [])).catch(() => {});
+    getEmployerPasswordSites()
+      .then((r) => setEntries(r.entries ?? (r.sites || []).map((site) => ({ site, kind: "generated" as const }))))
+      .catch(() => {});
   }, []);
 
   const toggle = async (site: string) => {
@@ -886,15 +918,23 @@ function EmployerPasswords() {
     }
   };
 
-  if (sites.length === 0) return null;
+  if (entries.length === 0) return null;
   return (
     <div className="mt-5">
-      <h3 className="text-sm font-semibold text-foreground mb-1.5">Passwords the app made for employer sites</h3>
+      <h3 className="text-sm font-semibold text-foreground mb-1">Sites with a different password</h3>
+      <p className="text-[13px] text-muted-foreground mb-2">
+        Use the password shown here to sign in to these sites yourself.
+      </p>
       {error && <p role="alert" className="text-[13px] text-destructive mb-2">{error}</p>}
       <ul className="space-y-1.5">
-        {sites.map((site) => (
+        {entries.map(({ site, kind }) => (
           <li key={site} className="flex items-center justify-between gap-3 text-[13px]">
-            <span className="font-mono truncate">{site}</span>
+            <span className="min-w-0">
+              <span className="font-mono truncate">{site}</span>
+              <span className="ml-2 text-muted-foreground">
+                {kind === "changed" ? "your password with characters added for this site's rules" : "made by an earlier version of the app"}
+              </span>
+            </span>
             <span className="flex items-center gap-2">
               {shown[site] && <code className="font-mono select-all">{shown[site]}</code>}
               <button type="button" className="btn-secondary" onClick={() => toggle(site)}

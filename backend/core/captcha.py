@@ -344,6 +344,35 @@ async def detect(browser_session) -> Challenge | None:
     )
 
 
+# Whether the page already holds an answer for its CAPTCHA: the response field the widget (or
+# the solver's answer) fills in. A challenge with an answer isn't blocking anything, and its
+# answer isn't bought again.
+_ANSWERED_JS = r"""
+(() => {
+  const filled = (selector) => Array.from(document.querySelectorAll(selector)).some((el) => (el.value || '').length > 20);
+  return filled('textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]')
+    || filled('textarea[name="h-captcha-response"], [name="h-captcha-response"]')
+    || filled('input[name="cf-turnstile-response"]');
+})();
+"""
+
+
+async def answered(browser_session) -> bool:
+    """The page's CAPTCHA response field holds an answer (the user's, the widget's or the solver's)."""
+    try:
+        return (await _evaluate(browser_session, _ANSWERED_JS)) is True
+    except Exception:
+        return False
+
+
+def solver_enabled(settings: dict) -> bool:
+    """2Captcha is used whenever a key is saved, unless the switch was turned off explicitly."""
+    settings = settings or {}
+    has_key = bool((settings.get("captcha_api_key") or "").strip())
+    switch = settings.get("captcha_solver_enabled")
+    return bool(switch) if switch is not None and not has_key else (has_key and switch is not False)
+
+
 # ── Token injection ─────────────────────────────────────────────────────────
 def _inject_js(challenge: Challenge, token: str) -> str:
     """Build the JS that writes a solved token into the page."""
@@ -550,6 +579,9 @@ async def handle(browser_session, settings: dict) -> bool:
             return True
         raise HumanCheckNeeded(challenge.page_url)
 
+    if challenge.type in (RECAPTCHA_V2, HCAPTCHA, TURNSTILE) and await answered(browser_session):
+        return False    # already answered: nothing blocks, and no second answer is bought
+
     # A step callback runs repeatedly. Successful token injection is not proof
     # the site accepted it, and must not reset the per-application paid budget.
     state = getattr(browser_session, "_langhire_captcha_state", None)
@@ -560,11 +592,14 @@ async def handle(browser_session, settings: dict) -> bool:
     if challenge.type not in BLOCKING_TYPES and key in state["nonblocking"]:
         return False
 
-    if not settings.get("captcha_solver_enabled"):
+    if not solver_enabled(settings):
         # Only a challenge that actually blocks submission ends the application.
         if challenge.type not in BLOCKING_TYPES:
             return False
-        raise CaptchaUnsolved(challenge.type, "2Captcha solving is turned off in Settings")
+        raise CaptchaUnsolved(challenge.type, "2Captcha solving is turned off in Settings"
+                              if settings.get("captcha_solver_enabled") is False
+                              or (settings.get("captcha_api_key") or "").strip()
+                              else "no 2Captcha key is saved in Settings → Applications")
 
     api_key = (settings.get("captcha_api_key") or "").strip()
     last_reason = "unknown error"

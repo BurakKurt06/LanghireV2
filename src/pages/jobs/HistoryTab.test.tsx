@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import HistoryTab from "./HistoryTab";
 import {
@@ -14,6 +14,7 @@ import {
   getSettings,
   exportJobsCsv,
   saveJobsCsv,
+  getJobLogs,
 } from "../../lib/api";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 
@@ -36,6 +37,7 @@ vi.mock("../../lib/api", () => ({
   getSettings: vi.fn(),
   exportJobsCsv: vi.fn(),
   saveJobsCsv: vi.fn(),
+  getJobLogs: vi.fn(),
 }));
 
 const mockStopApplying = vi.mocked(stopApplying);
@@ -49,6 +51,7 @@ const mockGetMetricRuns = vi.mocked(getMetricRuns);
 const mockGetSettings = vi.mocked(getSettings);
 const mockExportJobsCsv = vi.mocked(exportJobsCsv);
 const mockSaveJobsCsv = vi.mocked(saveJobsCsv);
+const mockGetJobLogs = vi.mocked(getJobLogs);
 
 const idleApply = { running: false, mode: null, workers: 0, log: [], error: null, finished_at: null };
 
@@ -179,51 +182,79 @@ describe("HistoryTab", () => {
     expect(await screen.findByText("controls.pauseHint")).toBeInTheDocument();
   });
 
-  it("shows an application waiting for review, and approves it", async () => {
+  it("leftover review entries show no approve/skip card here", async () => {
+    // Decision 1: Trial "review" approve/skip cards were removed (was: review.title card with approve/skip buttons).
     const review = { url: "https://jobs.example/1", title: "Intern", company: "Acme", summary: "Filled 3 pages." };
-    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], reviews: [review] } as never);
-    mockReviewApplication.mockResolvedValue({ success: true });
-    const user = userEvent.setup();
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["Applying to job..."], reviews: [review] } as never);
     render(<HistoryTab onJobsChanged={onJobsChanged} />);
 
-    expect(await screen.findByText("review.title")).toBeInTheDocument();
-    expect(screen.getByText("Filled 3 pages.")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "review.approve" }));
-    expect(mockReviewApplication).toHaveBeenCalledWith("https://jobs.example/1", true);
+    expect(await screen.findByText("Applying to job...")).toBeInTheDocument();
+    expect(screen.queryByText("review.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("Filled 3 pages.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "review.approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "review.skip" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(mockReviewApplication).not.toHaveBeenCalled();
   });
 
-  it("a stuck trial run shows a help card; the message goes with Continue", async () => {
+  it("a job waiting for help points to the run panel instead of being answered here", async () => {
+    // Decision 5: HistoryTab no longer answers help requests (was: help card with a message box and Continue).
     const help = { url: "https://jobs.example/3", title: "Intern", company: "Cyberdyne", problem: "Save and Continue is disabled." };
     mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], help: [help] } as never);
-    mockAnswerHelp.mockResolvedValue({ success: true });
-    const user = userEvent.setup();
     render(<HistoryTab onJobsChanged={onJobsChanged} />);
 
-    expect(await screen.findByText("help.title")).toBeInTheDocument();
-    expect(screen.getByText("Save and Continue is disabled.")).toBeInTheDocument();
-    await user.type(screen.getByLabelText("help.messageLabel"), "Tick the terms box first");
-    await user.click(screen.getByRole("button", { name: "help.continue" }));
-    expect(mockAnswerHelp).toHaveBeenCalledWith("https://jobs.example/3", "Tick the terms box first", false);
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "A job is waiting for you. Answer it in the run panel on the left.",
+    );
+    expect(screen.queryByText("help.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("Save and Continue is disabled.")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("help.messageLabel")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "help.continue" })).not.toBeInTheDocument();
+    expect(mockAnswerHelp).not.toHaveBeenCalled();
   });
 
-  it("gives up on a stuck trial run", async () => {
-    const help = { url: "https://jobs.example/4", title: "Intern", company: "Cyberdyne", problem: "Stuck." };
-    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], help: [help] } as never);
-    mockAnswerHelp.mockResolvedValue({ success: true });
-    const user = userEvent.setup();
+  it("several jobs waiting for help are counted in the run-panel note, with no give-up button here", async () => {
+    // Decision 5: giving up moved to the run panel's help request (was: help.giveUp button calling answerHelp(url, "", true)).
+    const help = [
+      { url: "https://jobs.example/4", title: "Intern", company: "Cyberdyne", problem: "Stuck." },
+      { url: "https://jobs.example/5", title: "Analyst", company: "Initech", problem: "Needs a code." },
+    ];
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], help } as never);
     render(<HistoryTab onJobsChanged={onJobsChanged} />);
-    await user.click(await screen.findByRole("button", { name: "help.giveUp" }));
-    expect(mockAnswerHelp).toHaveBeenCalledWith("https://jobs.example/4", "", true);
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "2 jobs are waiting for you. Answer them in the run panel on the left.",
+    );
+    expect(screen.queryByRole("button", { name: "help.giveUp" })).not.toBeInTheDocument();
+    expect(mockAnswerHelp).not.toHaveBeenCalled();
   });
 
-  it("skips an application waiting for review", async () => {
-    const review = { url: "https://jobs.example/2", title: "Intern", company: "Acme", summary: "" };
-    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["x"], reviews: [review] } as never);
-    mockReviewApplication.mockResolvedValue({ success: true });
+  it("no run-panel note once the run is not running", async () => {
+    const help = { url: "https://jobs.example/6", title: "Intern", company: "Cyberdyne", problem: "Stuck." };
+    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: false, log: ["Run finished"], help: [help] } as never);
+    render(<HistoryTab onJobsChanged={onJobsChanged} />);
+    expect(await screen.findByText("Run finished")).toBeInTheDocument();
+    expect(screen.queryByText(/waiting for you/)).not.toBeInTheDocument();
+  });
+
+  it("each row's View log opens that job's own log, without expanding the row", async () => {
+    // Decision 5: each history row has a "View log" button (JobLogDialog), on the row itself.
+    mockGetJobLogs.mockResolvedValue([
+      { id: 7, run_id: "r2", job_url: failedJob.url, timestamp: "2026-06-02T10:00:00Z", level: "ERROR",
+        message: "Captcha blocked the form", created_at: "2026-06-02T10:00:00Z" },
+    ]);
     const user = userEvent.setup();
     render(<HistoryTab onJobsChanged={onJobsChanged} />);
-    await user.click(await screen.findByRole("button", { name: "review.skip" }));
-    expect(mockReviewApplication).toHaveBeenCalledWith("https://jobs.example/2", false);
+    const rowToggle = (await screen.findByText("Staff Engineer")).closest("button")!;
+    expect(rowToggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(screen.getByRole("button", { name: "View log for Staff Engineer" }));
+    expect(rowToggle).toHaveAttribute("aria-expanded", "false");   // the log opens; the row stays as it was
+
+    const dialog = await screen.findByRole("dialog", { name: "Log for Staff Engineer" });
+    expect(mockGetJobLogs).toHaveBeenCalledWith(failedJob.url);
+    expect(await within(dialog).findByText("Captcha blocked the form")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("shows the paused state reported by the backend", async () => {

@@ -1298,10 +1298,14 @@ class TestApplyReview:
         assert apply_jobs.is_trial_run()
         main._apply_status["running"] = False
         auth_client.post("/apply/start", json={"mode": "all"})
-        assert apply_jobs.is_trial_run()  # default never grants automatic sending
+        # The user's decision 1 (2026-11): Full auto is the default; Trial is the option to choose.
+        assert not apply_jobs.is_trial_run()
+        main._apply_status["running"] = False
+        auth_client.post("/apply/start", json={"mode": "all", "run_mode": "trial"})
+        assert apply_jobs.is_trial_run()
         main._apply_status["running"] = False
         auth_client.post("/apply/start", json={"mode": "all", "run_mode": "auto"})
-        assert not apply_jobs.is_trial_run()  # only an explicit mode choice
+        assert not apply_jobs.is_trial_run()
         main._apply_status["running"] = False
 
 
@@ -1352,12 +1356,14 @@ class TestHelpAndNotes:
     def test_help_reply_reaches_the_waiting_agent(self, auth_client, monkeypatch):
         from cli import apply_jobs
         replies = []
-        monkeypatch.setattr(apply_jobs, "answer_help", lambda url, msg, give_up: replies.append((url, msg, give_up)) or True)
+        monkeypatch.setattr(apply_jobs, "answer_help",
+                            lambda url, msg, give_up, answers=None: replies.append((url, msg, give_up, answers)) or True)
         main._apply_status.update({"running": True, "log": []})
         try:
-            body = {"url": "u", "message": "Tick the box", "give_up": False}
+            body = {"url": "u", "message": "Tick the box", "give_up": False,
+                    "answers": {"Describe a project you led": "The robotics club's line follower."}}
             assert auth_client.post("/apply/help", json=body).json() == {"success": True}
-            assert replies == [("u", "Tick the box", False)]
+            assert replies == [("u", "Tick the box", False, {"Describe a project you led": "The robotics club's line follower."})]
             assert "Continuing" in main._apply_status["log"][-1]
         finally:
             main._apply_status["running"] = False
@@ -1582,7 +1588,8 @@ class TestInboxApi:
 
     def test_get_inbox(self, auth_client):
         data = auth_client.get("/inbox").json()
-        assert data["emails"] == [] and data["schedule"] == "off" and data["performance_mode"] is False
+        assert data["emails"] == [] and data["schedule"] == "off"
+        assert "performance_mode" not in data      # the setting was removed (2026-11)
         assert data["busy"] is False
 
     def test_check_needs_a_model_then_queues(self, auth_client, monkeypatch):
@@ -1604,13 +1611,6 @@ class TestInboxApi:
         monkeypatch.setitem(main._apply_status, "running", False)
         monkeypatch.setattr(main, "_login_process", None)
         assert main._inbox_busy() is False
-
-    def test_prep_sheet_is_off_in_performance_mode(self, auth_client, monkeypatch):
-        from core import inbox
-        inbox.save({"emails": [{"id": "x", "category": "interview", "company": "Stark", "role": "Quant", "text": "call"}],
-                    "schedule": "off", "last_checked": None})
-        monkeypatch.setattr(main, "load_settings", lambda: {"performance_mode": True})
-        assert auth_client.post("/inbox/prep", json={"id": "x"}).status_code == 400
 
     def test_prep_sheet_is_written_and_stored(self, auth_client, monkeypatch):
         from core import inbox
@@ -1822,7 +1822,8 @@ class TestEmployerPasswords:
         from core import secret_store
         password = secret_store.site_password("acme.wd5.myworkdayjobs.com")
         body = auth_client.get("/credentials/sites").json()
-        assert body == {"sites": ["acme.wd5.myworkdayjobs.com"]} and password not in str(body)
+        assert body["sites"] == ["acme.wd5.myworkdayjobs.com"] and password not in str(body)
+        assert body["entries"] == [{"site": "acme.wd5.myworkdayjobs.com", "kind": "generated", "saved_at": ""}]
         shown = auth_client.post("/credentials/reveal", json={"site": "ACME.wd5.myworkdayjobs.com"}).json()
         assert shown == {"site": "acme.wd5.myworkdayjobs.com", "password": password}
 

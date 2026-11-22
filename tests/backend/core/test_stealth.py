@@ -34,9 +34,14 @@ class TestSettingsDefaults:
         assert s["human_delay_max"] == 15
 
     def test_captcha_is_off_by_default_with_no_key(self, data_dir):
+        # Off because no key is saved, not because of a stored switch: the user's decision
+        # (2026-11) is 2Captcha by default once a key is saved, and a stored False read as
+        # "switched off" kept it off after a key was saved (core.captcha.solver_enabled).
+        from core.captcha import solver_enabled
         s = load_settings()
-        assert s["captcha_solver_enabled"] is False
+        assert "captcha_solver_enabled" not in s
         assert s["captcha_api_key"] == ""
+        assert solver_enabled(s) is False
 
 
 class TestSettingsPersistence:
@@ -80,7 +85,7 @@ class TestStealthLaunchArgs:
         from core import net_guard
         kwargs = shared_config.build_browser_kwargs()
         assert kwargs["ignore_default_args"] == ["--extensions-on-chrome-urls"]
-        assert kwargs["args"] == net_guard.browser_args(block_mail=True, owner="agent:1")
+        assert kwargs["args"] == net_guard.direct_args(block_mail=True)
 
     def test_launch_args_have_no_chrome_warning_flag(self, data_dir, monkeypatch):
         """Chrome shows an 'unsupported command-line flag' bar for --extensions-on-chrome-urls."""
@@ -262,6 +267,43 @@ def test_stealth_keeps_site_isolation():
     assert "IsolateOrigins" not in joined and "site-per-process" not in joined
     assert "--disable-site-isolation-trials" not in joined and "--disable-web-security" not in joined
     assert "--disable-blink-features=AutomationControlled" in stealth.STEALTH_ARGS
+
+
+def test_the_application_browsers_rule_script_keeps_gmail_and_private_addresses_out_of_reach():
+    """The application browser connects by itself (no proxy, no gate); this script is what keeps
+    the agent out of Gmail. Run as a browser runs it (a PAC script), without any name lookups."""
+    import json
+    import shutil
+    import subprocess
+    from core import net_guard
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not installed")
+    helpers = r"""
+    const vm = require('vm');
+    const ctx = { dnsDomainIs: (h, s) => h.endsWith(s),
+      shExpMatch: (h, p) => new RegExp('^' + p.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$').test(h),
+      dnsResolve: () => { throw new Error('no lookups'); }, dnsResolveEx: () => { throw new Error('no lookups'); } };
+    vm.createContext(ctx);
+    """
+    blocked = ["mail.google.com", "MAIL.GOOGLE.COM.", "gmail.com", "inbox.google.com", "x.mail.google.com",
+               "10.0.0.5", "192.168.1.1", "172.16.0.9", "169.254.169.254", "127.0.0.1", "[::1]", "2130706433",
+               "0x7f000001", "intranet", "printer.local", "nas.internal", "localhost"]
+    direct = ["acme.wd5.myworkdayjobs.com", "career4.successfactors.com", "job-boards.greenhouse.io",
+              "accounts.google.com", "www.google.com", "8.8.8.8", "notgmail.com", "mail.google.com.example.org"]
+
+    def run(script, hosts):
+        program = (helpers + "vm.runInContext(" + json.dumps(script) + ", ctx);"
+                   + "console.log(JSON.stringify(" + json.dumps(hosts) + ".map(h => ctx.FindProxyForURL('https://' + h + '/', h))));")
+        return json.loads(subprocess.run([node, "-e", program], capture_output=True, text=True, check=True).stdout)
+
+    agent = net_guard.direct_pac_script(block_mail=True)
+    assert run(agent, blocked) == [net_guard.DEAD_PROXY] * len(blocked)
+    assert run(agent, direct) == ["DIRECT"] * len(direct)
+    # The app's own email reader reaches Gmail; an address the user allowed is reachable.
+    reader = net_guard.direct_pac_script(block_mail=False, allowed_hosts=["nas.internal"])
+    assert run(reader, ["mail.google.com", "nas.internal", "10.0.0.5"]) == ["DIRECT", "DIRECT", net_guard.DEAD_PROXY]
 
 
 def test_the_gmail_rule_ignores_a_trailing_dot():

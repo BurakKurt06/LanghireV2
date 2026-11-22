@@ -29,11 +29,10 @@ class ApplyRequest(BaseModel):
     job_urls: Optional[list[str]] = Field(default=None, description="Specific job URLs to apply to (batch apply)")
     acknowledge_unknown: bool = Field(default=False, strict=True,
         description="The user checked the earlier uncertain submission and explicitly chose to retry")
-    review: bool = Field(default=False, description="Accepted from older callers and ignored: Trial is the default "
-                         "(choose with run_mode)")
+    review: bool = Field(default=False, description="Older callers' way to ask for a trial run (use run_mode)")
     run_mode: Optional[Literal["auto", "trial", "training"]] = Field(
-        default=None, description="auto (submits), or trial, the default (goes through every page like auto but never "
-                    "activates the agent's final Submit; no approval prompts; 'training' is trial's old name)")
+        default=None, description="auto, the default (Full auto: submits), or trial (goes through every page like auto "
+                    "but never activates the agent's final Submit; no approval prompts; 'training' is trial's old name)")
 
 
 class AddJobsBulkRequest(BaseModel):

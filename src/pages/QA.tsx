@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Search, Trash2, Merge, Sparkles, Zap, HelpCircle, X } from "lucide-react";
 import { getQAList, getQAStats, updateQA, deleteQA, mergeQA, autoSquashQA, smartSquashQA, apiErrorMessage } from "../lib/api";
+import DefaultAnswers from "../components/DefaultAnswers";
 import { trackEvent } from "../lib/analytics";
 import type { QAEntry, QAStats } from "../lib/types";
 import { useTranslation } from "react-i18next";
@@ -108,7 +109,7 @@ export default function QA() {
   }
 
   return (
-    <div className="max-w-3xl">
+    <div className="page-form">
       <div className="flex items-start justify-between mb-1">
         <div>
           <h1 className="text-2xl font-bold text-foreground tracking-tight">{t("title")}</h1>
@@ -131,6 +132,8 @@ export default function QA() {
       </div>
 
       {error && <div className="error-banner mt-4 mb-4">{error}</div>}
+
+      <DefaultAnswers />
 
       {toCheck > 0 && (
         <p role="status" className="mt-4 rounded-xl border border-primary/40 bg-primary/5 px-4 py-3 text-[13px] text-foreground">
@@ -241,6 +244,7 @@ function QACard({
   const origin = !entry.answer ? "needsAnswer"
     : entry.source === "user" ? "yours"
     : entry.source === "guess" ? "guess"
+    : entry.source === "default" ? "default"
     : entry.source === "observed" ? "observed"
     : "fromAI";
 

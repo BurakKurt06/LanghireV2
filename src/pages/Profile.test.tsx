@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Profile from "./Profile";
-import { getProfile, patchProfile, getCountries } from "../lib/api";
+import { getProfile, patchProfile, getCountries, getSettings, saveSettings } from "../lib/api";
 import type { CandidateProfile, CountryConfig } from "../lib/types";
 
 // ── i18n: identity translator (returns the raw key) ────────────────────────
@@ -13,10 +13,14 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-vi.mock("../lib/api", () => ({
+vi.mock("../lib/api", async (importOriginal) => ({
+  apiErrorMessage: (await importOriginal<typeof import("../lib/api")>()).apiErrorMessage,
   getProfile: vi.fn(),
   patchProfile: vi.fn(),
   getCountries: vi.fn(),
+  // Profile → Resume shares the one stored resume path with Settings → Applications.
+  getSettings: vi.fn(),
+  saveSettings: vi.fn(),
 }));
 
 const mockGetProfile = vi.mocked(getProfile);
@@ -76,6 +80,36 @@ describe("Profile page", () => {
       notice_period_options: ["Immediate", "1 month", "3 months"],
     } as never);
     mockSaveProfile.mockResolvedValue({ success: true } as never);
+    vi.mocked(getSettings).mockResolvedValue({ resume_path: "C:/Docs/resume-old.pdf" } as never);
+    vi.mocked(saveSettings).mockResolvedValue({ success: true } as never);
+  });
+
+  it("Resume shows the file Settings → Applications uses and saves only that setting", async () => {
+    const user = userEvent.setup();
+    render(<Profile />);
+    const field = await screen.findByLabelText("Resume file (PDF)");
+    expect(field).toHaveValue("C:/Docs/resume-old.pdf");
+    expect(screen.getByText(/same file as in Settings → Applications/)).toBeInTheDocument();
+    await user.clear(field);
+    await user.type(field, "C:/Docs/resume-new.pdf");
+    await user.tab();   // leaving the field saves it
+    await waitFor(() => expect(vi.mocked(saveSettings)).toHaveBeenCalledWith({ resume_path: "C:/Docs/resume-new.pdf" }));
+    expect(vi.mocked(saveSettings)).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Saved")).toBeInTheDocument();
+    expect(mockSaveProfile).not.toHaveBeenCalled();   // the profile itself isn't written for this
+  });
+
+  it("leaving the resume field unchanged saves nothing, and a failed save says so", async () => {
+    vi.mocked(saveSettings).mockRejectedValue(new Error("API Error 500: disk full"));
+    const user = userEvent.setup();
+    render(<Profile />);
+    const field = await screen.findByLabelText("Resume file (PDF)");
+    await user.click(field);
+    await user.tab();
+    expect(vi.mocked(saveSettings)).not.toHaveBeenCalled();
+    await user.type(field, "x");
+    await user.tab();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/disk full|Couldn't save the resume path/);
   });
 
   it("shows a loading spinner before data resolves, then renders the form", async () => {

@@ -203,9 +203,28 @@ export async function fetchProviderModels(provider: string, apiKey = "", baseUrl
   });
 }
 
-/** Employer sites the app made an account password for. */
+/** Sites whose account uses another password than the one saved in Settings (names only). */
 export async function getEmployerPasswordSites() {
-  return request<{ sites: string[] }>("/credentials/sites");
+  return request<{ sites: string[]; entries?: { site: string; kind: "changed" | "generated"; saved_at: string }[] }>("/credentials/sites");
+}
+
+/** A saved secret in full (the page otherwise only has a row of dots for it): for a field's eye button. */
+export async function revealSecret(kind: "settings" | "llm", path: string[]) {
+  return request<{ value: string }>("/secrets/reveal", { method: "POST", body: JSON.stringify({ kind, path }) });
+}
+
+// ── Default answers ───────────────────────────────────────────────────────
+export interface DefaultAnswer { id: string; question: string; answer: string; default: string; changed: boolean }
+
+export async function getDefaultAnswers() {
+  return request<{ answers: DefaultAnswer[] }>("/default-answers");
+}
+
+/** Change one default answer; an empty answer puts the built-in one back. */
+export async function setDefaultAnswer(id: string, answer: string) {
+  return request<{ success: boolean; answers: DefaultAnswer[] }>(`/default-answers/${encodeURIComponent(id)}`, {
+    method: "PUT", body: JSON.stringify({ answer }),
+  });
 }
 
 export async function revealEmployerPassword(site: string) {
@@ -434,10 +453,18 @@ export async function resumeApplying() {
   return request<{ success: boolean; paused: boolean }>("/apply/resume", { method: "POST" });
 }
 
-export async function answerHelp(url: string, message: string, giveUp: boolean) {
+export async function answerHelp(url: string, message: string, giveUp: boolean, answers: Record<string, string> = {}) {
   return request<{ success: boolean }>("/apply/help", {
     method: "POST",
-    body: JSON.stringify({ url, message, give_up: giveUp }),
+    body: JSON.stringify({ url, message, give_up: giveUp, answers }),
+  });
+}
+
+/** Answer the questions a job is waiting on, from its card: the run continues if it is waiting
+ *  right now; otherwise the job goes back to "ready to apply" for the next run. */
+export async function answerJobQuestions(url: string, answers: Record<string, string>) {
+  return request<{ success: boolean; continued: boolean; ready: boolean; remaining?: number; may_have_been_sent?: boolean }>("/jobs/answers", {
+    method: "POST", body: JSON.stringify({ url, answers }),
   });
 }
 
@@ -492,6 +519,11 @@ export async function getMetricRuns(limit = 50) {
 // ── Logs ─────────────────────────────────────────────────────────────────
 export async function getRunLogs(runId: string, limit = 500) {
   return request<RunLog[]>(`/logs/runs/${encodeURIComponent(runId)}?limit=${limit}`);
+}
+
+/** One job's own log lines, oldest first (its card's "View log"). */
+export async function getJobLogs(url: string, limit = 400) {
+  return request<RunLog[]>(`/logs/job?url=${encodeURIComponent(url)}&limit=${limit}`);
 }
 
 export async function getRecentLogs(limit = 100) {

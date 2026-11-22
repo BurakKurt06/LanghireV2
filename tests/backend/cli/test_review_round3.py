@@ -9,7 +9,7 @@ import pytest
 from cli import apply_jobs, apply_jobs_tailored as legacy
 from core import inbox, submit_guard
 from memory.store import MemoryStore
-from tests.backend.cli.test_credentials import JOB, typing, approved_workday
+from tests.backend.cli.test_credentials import JOB, typing  # noqa: F401
 from tests.backend.cli.test_submit_guard import (
     Node, REVIEW_PAGE, Session, fields, make_tools, run,
 )
@@ -61,11 +61,6 @@ def test_an_unreadable_form_blocks_only_the_submit(monkeypatch):
     assert "submission is disabled" in (result.error or "") and ran == [("click", 3)]
 
 
-def test_lookalike_tenant_does_not_get_the_legacy_password(typing):
-    result = typing("https://notacme.wd5.myworkdayjobs.com/apply", "<secret>previous_password</secret>")
-    assert result.error and not typing.typed
-
-
 def test_an_employer_name_is_not_proof_of_a_domain():
     assert not apply_jobs.employer_site("https://careers.acme.evil/login",
                                        "https://www.linkedin.com/jobs/view/1", "Acme")
@@ -111,12 +106,15 @@ def test_invalid_button_type_is_treated_as_native_submit():
     assert submit_guard.Control(text="Search", tag="button", type="menu").is_final_submit
 
 
-def test_field_in_another_document_does_not_receive_secrets(typing, monkeypatch):
-    async def origin(session, index):
-        return "https://collector.evil.example"
-    monkeypatch.setattr(apply_jobs, "field_origin", origin)
-    result = typing("https://acme.wd5.myworkdayjobs.com/apply", "<secret>password</secret>")
-    assert result.error and "another or unreadable document" in result.error and not typing.typed
+def test_field_in_a_document_that_never_gets_account_details_does_not_receive_secrets(typing, monkeypatch):
+    """A frame from another hiring host is part of the application now (decision 5); a frame that is
+    an email site, or isn't https, still gets nothing."""
+    for frame in ("https://mail.google.com", "http://collector.example.net"):
+        async def origin(session, index, frame=frame):
+            return frame
+        monkeypatch.setattr(apply_jobs, "field_origin", origin)
+        result = typing("https://acme.wd5.myworkdayjobs.com/apply", "<secret>password</secret>")
+        assert result.error and "frame the app can't check" in result.error and not typing.typed
 
 
 def test_unreadable_field_origin_does_not_receive_secrets(typing, monkeypatch):
@@ -124,7 +122,7 @@ def test_unreadable_field_origin_does_not_receive_secrets(typing, monkeypatch):
         return ""
     monkeypatch.setattr(apply_jobs, "field_origin", origin)
     result = typing("https://acme.wd5.myworkdayjobs.com/apply", "<secret>password</secret>")
-    assert result.error and "another or unreadable document" in result.error and not typing.typed
+    assert result.error and "frame the app can't check" in result.error and not typing.typed
 
 
 def test_the_actual_input_document_origin_is_read():
@@ -191,7 +189,7 @@ def test_verification_refuses_a_link_to_another_tenant(monkeypatch):
     async def read(*args, **kwargs):
         return {"link": "https://globex.wd1.myworkdayjobs.com/verify"}
     monkeypatch.setattr(inbox, "find_verification", read)
-    ref = {"secrets": {"account_email": "ada.accounts@example.com"}, "request_gate": approved_workday()}
+    ref = {"secrets": {"account_email": "ada.accounts@example.com"}}
     tools = apply_jobs.build_tools(JOB, "", False, ref, 1)
     tool = tools.registry.registry.actions["get_email_verification"].function
     result = asyncio.run(tool(params=apply_jobs.VerificationRequest(kind="link"),
@@ -206,8 +204,7 @@ def test_verification_does_not_release_a_code_after_navigation(monkeypatch):
         session.url = "https://collector.evil.example"
         return {"code": "482913"}
     monkeypatch.setattr(inbox, "find_verification", read)
-    tools = apply_jobs.build_tools(JOB, "", False, {"secrets": {"account_email": "ada@example.com"},
-                                                  "request_gate": approved_workday()}, 1)
+    tools = apply_jobs.build_tools(JOB, "", False, {"secrets": {"account_email": "ada@example.com"}}, 1)
     tool = tools.registry.registry.actions["get_email_verification"].function
     result = asyncio.run(tool(params=apply_jobs.VerificationRequest(kind="code"), browser_session=session))
     assert result.error and "482913" not in (result.extracted_content or "")
@@ -225,7 +222,10 @@ def test_email_reader_refuses_a_message_with_unreadable_recipients(monkeypatch):
     assert "code" not in result
 
 
-def test_email_reader_does_not_guess_between_two_matching_codes(monkeypatch):
+def test_email_reader_takes_the_newest_of_two_matching_codes(monkeypatch):
+    """A code asked for twice arrives twice. Refusing both ("Multiple verification messages")
+    left the application stuck; the newest email is the one the site just sent (Gmail lists it
+    first), and it is the only one opened for its code."""
     import browser_use
     from tests.backend.cli.test_credentials import _FakeGmail
     messages = {key: {**value, "subject": "Acme verification", "text": "Acme code: " + code}
@@ -235,7 +235,7 @@ def test_email_reader_does_not_guess_between_two_matching_codes(monkeypatch):
     from datetime import datetime, timezone
     result = asyncio.run(inbox.find_verification("code", {"myworkday.com"}, datetime.now(timezone.utc), {},
                                                  wait_seconds=0, employer_names=["Acme"], recipient="ada.accounts@example.com"))
-    assert "code" not in result and "Multiple" in result["error"]
+    assert result == {"code": "111111"}
 
 
 def test_an_auto_script_is_recorded_before_it_can_submit(monkeypatch, fields):
@@ -260,11 +260,6 @@ def test_a_script_cannot_run_when_the_attempt_cannot_be_saved(monkeypatch, field
     ref["submit_guard"].on_submit = fail
     result = run(tools, "evaluate", {"code": "document.forms[0].submit()"}, Session())
     assert result.error and not ran
-
-
-def test_the_shared_password_is_not_released_based_on_a_tenant_name(typing):
-    result = typing("https://acme.wd5.myworkdayjobs.com/apply", "<secret>previous_password</secret>")
-    assert result.error and "original employer origin" in result.error and not typing.typed
 
 
 @pytest.mark.parametrize("node", [None, "boom"])

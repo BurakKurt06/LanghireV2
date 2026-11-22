@@ -9,10 +9,7 @@
     "apply": "Apply",
     "memory": "Memory",
     "qa": "Q&A",
-    "logs": "Logs",
-    "settings": "Settings",
-    "feedback": "Feedback",
-    "analytics": "Analytics"
+    "settings": "Settings"
   },
   "app": {
     "title": "LangHireV2",
@@ -42,7 +39,7 @@
     "close": "Close"
   },
   "jobStatus": {
-    "pending": "Pending",
+    "pending": "Ready to apply",
     "applied": "Applied",
     "failed": "Failed",
     "blocked": "Blocked",

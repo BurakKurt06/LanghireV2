@@ -164,9 +164,10 @@ async def test_provider_email_code_keeps_original_employer_sender_and_recipient_
     assert not result.error and '123456' in result.extracted_content
     assert len(calls)==1 and 'icims.com' in calls[0][0]
     assert calls[0][1]['recipient']=='fake@example.test'
-    assert not calls[0][1]['link_validator']('https://login.icims.com/submit')
-    result=await tool(params=apply_jobs.VerificationRequest(kind='code'),browser_session=Session(login.replace('local-state','other')))
-    assert result.error and len(calls)==1
+    # Since 2026-11 (the user's decision 5) the code is read for whichever site the job led to, not
+    # only inside one sign-in transaction; a link from the email may only point back to this
+    # application's own hosts (never to any other tenant of a shared applicant system).
+    assert 'icims.com' not in calls[0][1]['link_domains']   # not the whole shared system: only hosts this application was on
 
 
 def native_case(kind):

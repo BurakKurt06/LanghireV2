@@ -11,14 +11,11 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { Wand2, Loader2 } from "lucide-react";
 
 const Dashboard = lazy(() => import("./pages/Dashboard"));
-const Analytics = lazy(() => import("./pages/Analytics"));
 const Profile = lazy(() => import("./pages/Profile"));
 const Jobs = lazy(() => import("./pages/Jobs"));
 const Memory = lazy(() => import("./pages/Memory"));
 const SettingsPage = lazy(() => import("./pages/Settings"));
-const Logs = lazy(() => import("./pages/Logs"));
 const Guide = lazy(() => import("./pages/Guide"));
-const Feedback = lazy(() => import("./pages/Feedback"));
 const QA = lazy(() => import("./pages/QA"));
 const Inbox = lazy(() => import("./pages/Inbox"));
 
@@ -109,12 +106,13 @@ export default function App() {
     <div className="flex min-h-screen bg-background">
       <Sidebar />
       <AgentAttention />
-      <main className="flex-1 ml-60 px-10 py-8">
+      <main className="flex-1 min-w-0 ml-60 px-10 py-8">
         <ErrorBoundary>
           <Suspense fallback={<PageLoader />}>
             <Routes>
               <Route path="/" element={<Dashboard />} />
-              <Route path="/analytics" element={<Analytics />} />
+              {/* Analytics is the lower half of the Dashboard now. */}
+              <Route path="/analytics" element={<Navigate to="/" replace />} />
               <Route path="/profile" element={<Profile />} />
               {/* The AI model is a Settings category; old links and Ctrl+4 still open it. */}
               <Route path="/llm" element={<Navigate to="/settings?section=ai-model" replace />} />
@@ -122,9 +120,10 @@ export default function App() {
               <Route path="/apply" element={<Navigate to="/jobs" replace />} />
               <Route path="/memory" element={<Memory />} />
               <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/logs" element={<Logs />} />
+              {/* Logs and Send feedback are sections of Settings → App & browser; old links still work. */}
+              <Route path="/logs" element={<Navigate to="/settings?section=logs" replace />} />
               <Route path="/guide" element={<Guide />} />
-              <Route path="/feedback" element={<Feedback />} />
+              <Route path="/feedback" element={<Navigate to="/settings?section=feedback" replace />} />
               <Route path="/qa" element={<QA />} />
               <Route path="/inbox" element={<Inbox />} />
             </Routes>

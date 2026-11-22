@@ -44,6 +44,10 @@ _CLOSED_PHRASES = (
     "no longer accepting applications", "position has been filled", "job has expired",
     "job is closed", "this job has been closed", "requisition is no longer",
 )
+# An employer marking the posting itself as done: "FILLED: Early Careers Co-op", "[Closed] Analyst".
+# (A word alone isn't enough: "Closed Captioning Editor" and "Closed-loop Controls Intern" are jobs.)
+_DONE_TITLE = re.compile(r"^\s*(?:[\[(]\s*(?:filled|closed|expired|position filled)\s*[\])]"
+                         r"|(?:filled|closed|expired|position filled)(?:\s*[:|]|\s+[-\u2013\u2014]|[-\u2013\u2014]\s))", re.I)
 _BOT_CHECK = re.compile(
     r"quick check|just a moment|attention required|access denied|are you a robot|verify you are human|"
     r"security check|captcha|request blocked|forbidden",
@@ -441,6 +445,22 @@ def is_placeholder(title: str | None) -> bool:
     return title.lower() in PLACEHOLDER_TITLES or bool(GENERIC_TITLES.match(title))
 
 
+# What a careers system calls itself, not who the employer is: Oracle's "Candidate Experience
+# site", "UN Careers", "Careers", "Job Search", ... A job saved under one of these still needs
+# its employer's name (the posting data, or the agent on its first look at the page).
+_GENERIC_COMPANIES = re.compile(
+    r"^(unknown|n/?a|none|candidate experience( site| page)?|careers?( site| page| portal| center| home)?|"
+    r"jobs?( site| board| portal)?|job search( description)?|recruit(ing|ment)|talent( acquisition| community| network)?|"
+    r"workday|taleo|icims|greenhouse|successfactors|oracle( cloud)?|external( careers?| site)?|"
+    r"[\w .&-]{0,30} (careers?|jobs)( site| page| portal)?)$", re.I)
+
+
+def is_placeholder_company(name: str | None) -> bool:
+    """No employer name yet: empty, "Unknown", or only the name of a careers system or page."""
+    name = (name or "").strip()
+    return not name or bool(_GENERIC_COMPANIES.match(name))
+
+
 def is_workday(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return _on(host, "myworkdayjobs.com", "myworkdaysite.com")
@@ -547,6 +567,8 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
     if _BOT_CHECK.search(title) or _BOT_CHECK.search(page_title) and not og_title:
         # A bot-check or error page, not the posting: learn nothing from it.
         return Posting()
+    if _DONE_TITLE.match(title):
+        return Posting(closed=True, reason=f'The posting is closed (its title says "{title[:80]}").')
 
     slug = tenant(asked)
     org = _org_name(ld)
@@ -560,7 +582,7 @@ def parse(url: str, status_code: int, page: str, original_url: str | None = None
         company = clean_company(linkedin_title.group("company"))
     if not company:
         company = clean_company(_company_from_titles(page_title, _meta(page, "og:site_name") or ""))
-    if company and is_placeholder(company):
+    if company and (is_placeholder(company) or is_placeholder_company(company)):
         company = ""
 
     locations, remote = _ld_locations(ld)

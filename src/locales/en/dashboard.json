@@ -4,8 +4,8 @@
   "cards": {
     "totalJobs": "Total Jobs",
     "applied": "Applied",
-    "failed": "Failed",
-    "pending": "Pending",
+    "failed": "Not applied (errors, needs you)",
+    "pending": "Ready to apply",
     "successRate": "Success Rate",
     "memories": "Memories"
   },

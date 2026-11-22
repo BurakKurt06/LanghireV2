@@ -3,6 +3,7 @@ import { TestTube, CheckCircle, XCircle, Loader2, ChevronDown, ChevronUp, Extern
 import {
   getLLMSettings, saveLLMSettings, testLLMConnection, fetchOllamaModels, fetchProviderModels,
   startChatGPTLogin, getChatGPTStatus, chatGPTLogout, getChatGPTModels,
+  revealSecret,
 } from "../../lib/api";
 import { trackEvent } from "../../lib/analytics";
 import type { ChatGPTModel, ChatGPTStatus, LLMProvider, LLMSettings } from "../../lib/types";
@@ -720,7 +721,7 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f1`}>{t("labels.apiKey")}</label>
-              <PasswordInput id={`${uid}-f1`} value={settings.openai?.api_key || ""} onChange={(e) => updateOpenAI("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
+              <PasswordInput id={`${uid}-f1`} value={settings.openai?.api_key || ""} onChange={(e) => updateOpenAI("api_key", e.target.value)} reveal={() => revealSecret("llm", ["openai", "api_key"]).then((r) => r.value)} onRevealed={(v) => updateOpenAI("api_key", v)} placeholder="sk-..." className="input-base font-mono" />
             </div>
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f2`}>
@@ -741,7 +742,7 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f3`}>{t("labels.apiKey")}</label>
-              <PasswordInput id={`${uid}-f3`} value={settings.anthropic?.api_key || ""} onChange={(e) => updateAnthropic("api_key", e.target.value)} placeholder="sk-ant-..." className="input-base font-mono" />
+              <PasswordInput id={`${uid}-f3`} value={settings.anthropic?.api_key || ""} onChange={(e) => updateAnthropic("api_key", e.target.value)} reveal={() => revealSecret("llm", ["anthropic", "api_key"]).then((r) => r.value)} onRevealed={(v) => updateAnthropic("api_key", v)} placeholder="sk-ant-..." className="input-base font-mono" />
             </div>
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f4`}>
@@ -762,7 +763,7 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f5`}>{t("labels.apiKey")}</label>
-              <PasswordInput id={`${uid}-f5`} value={settings.gemini?.api_key || ""} onChange={(e) => updateGemini("api_key", e.target.value)} placeholder="AIza..." className="input-base font-mono" />
+              <PasswordInput id={`${uid}-f5`} value={settings.gemini?.api_key || ""} onChange={(e) => updateGemini("api_key", e.target.value)} reveal={() => revealSecret("llm", ["gemini", "api_key"]).then((r) => r.value)} onRevealed={(v) => updateGemini("api_key", v)} placeholder="AIza..." className="input-base font-mono" />
             </div>
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f6`}>
@@ -797,11 +798,11 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f8`}>{t("labels.accessKey")}</label>
-                  <PasswordInput id={`${uid}-f8`} value={settings.bedrock?.access_key || ""} onChange={(e) => updateBedrock("access_key", e.target.value)} placeholder="AKIA..." className="input-base font-mono" />
+                  <PasswordInput id={`${uid}-f8`} value={settings.bedrock?.access_key || ""} onChange={(e) => updateBedrock("access_key", e.target.value)} reveal={() => revealSecret("llm", ["bedrock", "access_key"]).then((r) => r.value)} onRevealed={(v) => updateBedrock("access_key", v)} placeholder="AKIA..." className="input-base font-mono" />
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f9`}>{t("labels.secretKey")}</label>
-                  <PasswordInput id={`${uid}-f9`} value={settings.bedrock?.secret_key || ""} onChange={(e) => updateBedrock("secret_key", e.target.value)} className="input-base font-mono" />
+                  <PasswordInput id={`${uid}-f9`} value={settings.bedrock?.secret_key || ""} onChange={(e) => updateBedrock("secret_key", e.target.value)} reveal={() => revealSecret("llm", ["bedrock", "secret_key"]).then((r) => r.value)} onRevealed={(v) => updateBedrock("secret_key", v)} className="input-base font-mono" />
                 </div>
               </div>
             )}
@@ -855,7 +856,7 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f12`}>{t("labels.apiKey")}</label>
-              <PasswordInput id={`${uid}-f12`} value={settings.openrouter?.api_key || ""} onChange={(e) => updateOpenRouter("api_key", e.target.value)} placeholder="sk-or-v1-..." className="input-base font-mono" />
+              <PasswordInput id={`${uid}-f12`} value={settings.openrouter?.api_key || ""} onChange={(e) => updateOpenRouter("api_key", e.target.value)} reveal={() => revealSecret("llm", ["openrouter", "api_key"]).then((r) => r.value)} onRevealed={(v) => updateOpenRouter("api_key", v)} placeholder="sk-or-v1-..." className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">
                 {t("openrouter.keyHint")}{" "}
                 <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary font-semibold hover:underline">openrouter.ai/keys</a>
@@ -929,7 +930,7 @@ export default function LLMSettingsForm({ onSaved, compact }: LLMSettingsFormPro
             </div>
             <div>
               <label className="block text-sm font-semibold text-foreground mb-1.5" htmlFor={`${uid}-f15`}>{t("labels.apiKey")} <span className="text-muted-foreground font-normal">({t("openaiCompatible.optional")})</span></label>
-              <PasswordInput id={`${uid}-f15`} value={settings.openai_compatible?.api_key || ""} onChange={(e) => updateOpenAICompatible("api_key", e.target.value)} placeholder="sk-..." className="input-base font-mono" />
+              <PasswordInput id={`${uid}-f15`} value={settings.openai_compatible?.api_key || ""} onChange={(e) => updateOpenAICompatible("api_key", e.target.value)} reveal={() => revealSecret("llm", ["openai_compatible", "api_key"]).then((r) => r.value)} onRevealed={(v) => updateOpenAICompatible("api_key", v)} placeholder="sk-..." className="input-base font-mono" />
               <p className="text-xs text-muted-foreground mt-1">{t("openaiCompatible.apiKeyHint")}</p>
             </div>
             <div>

@@ -21,7 +21,8 @@ vi.mock("../../lib/api", () => ({
   stopApplying: vi.fn(),
   skipJob: vi.fn(),
   answerHelp: vi.fn(),
-  reviewApplication: vi.fn(),
+  // Decision 1: Trial review cards were removed (no reviewApplication); the panel can stop a collection.
+  stopJobCollection: vi.fn(),
 }));
 
 const mockCheckHealth = vi.mocked(checkHealth);
@@ -50,19 +51,22 @@ describe("Sidebar", () => {
     expect(screen.getByText("app.title")).toBeInTheDocument();
     expect(screen.getByText("app.tagline")).toBeInTheDocument();
 
+    // Decision 4: new order; Analytics, Logs and Feedback left the sidebar (Logs and Feedback
+    // are Settings → App & browser sections, Analytics is the Dashboard's lower half).
     const expectedNav = [
       "nav.dashboard",
-      "nav.guide",
       "nav.profile",
       "nav.jobs",
+      "nav.inbox",
       "nav.memory",
       "nav.qa",
-      "nav.logs",
+      "nav.guide",
       "nav.settings",
-      "nav.feedback",
     ];
-    for (const key of expectedNav) {
-      expect(screen.getByText(key)).toBeInTheDocument();
+    const links = screen.getAllByRole("link");
+    expect(links.map((a) => a.textContent)).toEqual(expectedNav);
+    for (const removed of ["nav.logs", "nav.feedback", "nav.analytics"]) {
+      expect(screen.queryByText(removed)).not.toBeInTheDocument();
     }
     // The AI model is a Settings category now (/llm still opens it).
     expect(screen.queryByText("nav.llmSettings")).not.toBeInTheDocument();
@@ -73,6 +77,8 @@ describe("Sidebar", () => {
     expect(screen.getByRole("link", { name: "nav.dashboard" })).toHaveAttribute("href", "/");
     expect(screen.getByRole("link", { name: "nav.jobs" })).toHaveAttribute("href", "/jobs");
     expect(screen.getByRole("link", { name: "nav.settings" })).toHaveAttribute("href", "/settings");
+    expect(screen.getByRole("link", { name: "nav.inbox" })).toHaveAttribute("href", "/inbox");
+    expect(screen.getByRole("link", { name: "nav.guide" })).toHaveAttribute("href", "/guide");
   });
 
   it("marks the active route's NavLink (aria-current) based on the current location", () => {

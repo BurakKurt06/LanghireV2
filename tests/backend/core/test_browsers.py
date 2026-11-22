@@ -206,8 +206,12 @@ def test_build_browser_kwargs_limits_webrtc(monkeypatch, installed):
     seen = []
     monkeypatch.setattr(shared_config, "load_runtime_settings", lambda: {})
     monkeypatch.setattr(net_guard, "limit_webrtc", lambda path: seen.append(path) or True)
-    kwargs = shared_config.build_browser_kwargs(purpose="mail")
+    kwargs = shared_config.build_browser_kwargs(purpose="collection")
     assert [str(p) for p in seen] == [kwargs["user_data_dir"]]
+    # Only the collector's browser sits behind the proxy that this protects.
+    shared_config.build_browser_kwargs(purpose="mail")
+    shared_config.build_browser_kwargs(purpose="application")
+    assert len(seen) == 1
 
 
 def test_no_site_gets_standing_permissions(monkeypatch, installed):
@@ -228,11 +232,13 @@ def test_every_automation_browser_really_starts_with_the_guards(monkeypatch, ins
     session = BrowserSession(chromium_sandbox=True, **shared_config.build_browser_kwargs(purpose=purpose))
     profile = session.browser_profile
     assert profile.block_ip_addresses is True and profile.permissions == []
-    assert profile.args == net_guard.browser_args(block_mail=blocks_mail, owner=f"{purpose}:1")
+    assert profile.args == net_guard.direct_args(block_mail=blocks_mail)
     assert str(profile.user_data_dir).endswith("browser_profile_msedge" + profile_suffix)
     launch = " ".join(profile.get_args())
-    assert "--proxy-server=socks5://127.0.0.1:" in launch and "MAP localhost ~NOTFOUND" in launch
-    assert "--proxy-pac-url=" not in launch and "--disable-quic" in launch
+    # These browsers connect by themselves again (2026-11): one rule script names what is off limits,
+    # and nothing Chrome warns about is passed ("--host-resolver-rules" showed a warning on every launch).
+    assert "--proxy-pac-url=data:application/x-ns-proxy-autoconfig" in launch
+    assert "--proxy-server=" not in launch and "--host-resolver-rules" not in launch
 
 
 @pytest.mark.parametrize("value, expected", [(None, 1), (0, 1), (1, 1), (3, 3), (4, 4), (9, 4), ("2", 2), ("x", 1)])
@@ -290,9 +296,11 @@ def test_the_network_guard_script():
     assert "var BLOCK_MAIL = false" in inbox and 'var ALLOWED = ["nas.home"]' in inbox
     for rule in ('"10.0.0.0"', '"127.0.0.0"', '"192.168.0.0"', '"172.16.0.0"', '"169.254.0.0"', '"100.64.0.0"'):
         assert rule in agent
-    # Allowing a loopback service also keeps localhost resolvable.
-    assert net_guard.NO_LOCALHOST_NAMES not in net_guard.browser_args(True, ["localhost"])
-    assert net_guard.NO_LOCALHOST_NAMES in net_guard.browser_args(True, [])
+    # No launch passes "--host-resolver-rules" any more: the proxy (collection) and the rule script
+    # (every other browser) refuse this computer's names themselves.
+    assert not any(a.startswith("--host-resolver-rules") for a in net_guard.browser_args(True, []) + net_guard.direct_args(True, []))
+    direct = net_guard.direct_pac_script(block_mail=True, allowed_hosts=["Nas.Home."])
+    assert "var BLOCK_MAIL = true" in direct and 'var ALLOWED = ["nas.home"]' in direct and "dnsResolve" not in direct
 
 
 def test_the_mail_profile_copies_only_the_sign_in_cookies(tmp_path, monkeypatch):

@@ -2,11 +2,12 @@ import { useState, useEffect } from "react";
 import { ScrollText, ChevronRight, Loader2, RefreshCw, CheckCircle, XCircle } from "lucide-react";
 import { getRunsWithLogs, getRunLogs } from "../lib/api";
 import type { RunWithLogs, RunLog } from "../lib/types";
-import LogLine from "../components/LogLine";
-import { PageHeader, LoadingSpinner } from "../components/ui";
+import LogLine from "./LogLine";
+import { LoadingSpinner } from "./ui";
 import { useTranslation } from "react-i18next";
 
-export default function Logs() {
+/** The saved logs of past runs (Settings → App & browser → Logs). One job's own log is on its job card. */
+export default function LogsSection() {
   const { t } = useTranslation("logs");
   const [runs, setRuns] = useState<RunWithLogs[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
@@ -14,19 +15,20 @@ export default function Logs() {
   const [loading, setLoading] = useState(true);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
-  useEffect(() => {
+  const load = () => {
+    setLoading(true);
     getRunsWithLogs(50)
       .then((data) => setRuns(data || []))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  };
+  useEffect(load, []);
 
   const selectRun = async (runId: string) => {
     setSelectedRunId(runId);
     setLoadingLogs(true);
     try {
-      const logs = await getRunLogs(runId);
-      setRunLogs(logs || []);
+      setRunLogs((await getRunLogs(runId)) || []);
     } catch {
       setRunLogs([]);
     } finally {
@@ -34,39 +36,25 @@ export default function Logs() {
     }
   };
 
-  const refresh = () => {
-    setLoading(true);
-    getRunsWithLogs(50)
-      .then((data) => setRuns(data || []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
-
   if (loading) return <LoadingSpinner />;
 
   return (
-    <div className="max-w-6xl">
-      <PageHeader
-        title={t("title")}
-        subtitle={t("subtitle")}
-        actions={
-          <button onClick={refresh} className="btn-secondary">
-            <RefreshCw className="w-4 h-4" /> {t("refresh")}
-          </button>
-        }
-      />
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-[13px] text-muted-foreground">{t("subtitle")}</p>
+        <button onClick={load} className="btn-secondary">
+          <RefreshCw className="w-4 h-4" /> {t("refresh")}
+        </button>
+      </div>
 
-      <div className="grid grid-cols-3 gap-4" style={{ minHeight: 500 }}>
-        {/* Left: Run list */}
+      <div className="grid grid-cols-3 gap-4" style={{ minHeight: 360 }}>
         <div className="col-span-1 border border-border rounded-2xl overflow-hidden bg-card shadow-sm">
           <div className="px-4 py-3 bg-secondary border-b border-border text-sm font-medium text-foreground">
             {t("runs.title", { count: runs.length })}
           </div>
-          <div className="overflow-y-auto" style={{ maxHeight: 600 }}>
+          <div className="overflow-y-auto" style={{ maxHeight: 480 }}>
             {runs.length === 0 ? (
-              <div className="p-4 text-sm text-muted-foreground text-center">
-                {t("runs.empty")}
-              </div>
+              <div className="p-4 text-sm text-muted-foreground text-center">{t("runs.empty")}</div>
             ) : (
               runs.map((run) => (
                 <button
@@ -106,29 +94,22 @@ export default function Logs() {
           </div>
         </div>
 
-        {/* Right: Log detail */}
         <div className="col-span-2 border border-border rounded-2xl overflow-hidden bg-card shadow-sm">
           <div className="px-4 py-3 bg-secondary border-b border-border text-sm font-medium text-foreground flex items-center gap-2">
             <ScrollText className="w-4 h-4" />
             {selectedRunId ? t("detail.runTitle", { id: selectedRunId }) : t("detail.selectPrompt")}
           </div>
-          <div className="log-viewer !max-h-none" style={{ maxHeight: 600 }}>
+          <div className="log-viewer !max-h-none" style={{ maxHeight: 480 }}>
             {!selectedRunId ? (
-              <div className="text-muted-foreground text-center mt-16">
-                {t("detail.selectFromPanel")}
-              </div>
+              <div className="text-muted-foreground text-center mt-16">{t("detail.selectFromPanel")}</div>
             ) : loadingLogs ? (
               <div className="flex items-center justify-center h-32">
                 <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
               </div>
             ) : runLogs.length === 0 ? (
-              <div className="text-muted-foreground text-center mt-16">
-                {t("detail.noLogs")}
-              </div>
+              <div className="text-muted-foreground text-center mt-16">{t("detail.noLogs")}</div>
             ) : (
-              runLogs.map((log) => (
-                <LogLine key={log.id} line={log.message} />
-              ))
+              runLogs.map((log) => <LogLine key={log.id} line={log.message} />)
             )}
           </div>
         </div>

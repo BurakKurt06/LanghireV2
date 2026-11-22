@@ -100,6 +100,29 @@ describe("Guide", () => {
     expect(await screen.findByText("sections.profile.essential")).toBeInTheDocument();
   });
 
+  it("explains the run as it works now and links to Jobs, where links are pasted", async () => {
+    const user = userEvent.setup();
+    render(<Guide />);
+    await waitFor(() => expect(mockGetSetupStatus).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: /sections\.applying\.title/ }));
+    for (const key of ["modes", "needsYou", "steppingIn", "defaults", "logs"]) {
+      expect(screen.getByText(`sections.applying.${key}`)).toBeInTheDocument();
+    }
+    await user.click(screen.getByRole("button", { name: "sections.applying.linkText" }));
+    expect(mockNavigate).toHaveBeenCalledWith("/jobs");
+    await user.click(screen.getByRole("button", { name: /sections\.tips\.title/ }));
+    expect(screen.getByText("sections.tips.shortcuts")).toBeInTheDocument();
+  });
+
+  it("the Guide's own words match the app (English text)", async () => {
+    const en = (await import("../locales/en/guide.json")).default;
+    expect(en.sections.applying.modesDesc).toMatch(/Full auto \(the default\) submits/);
+    expect(en.sections.applying.needsYouDesc).toMatch(/up to 5 minutes/);
+    expect(en.sections.login.firstTimeDesc).toMatch(/Password for job sites/);
+    expect(en.sections.login.firstTimeDesc).not.toMatch(/its own password made by the app/);
+    expect(en.sections.tips.shortcutsDesc).toMatch(/Dashboard, Profile, Jobs, Inbox, Memory, Q&A, Guide, Settings/);
+  });
+
   it("dispatches the open-setup-wizard event from the re-run wizard button", async () => {
     const listener = vi.fn();
     window.addEventListener("open-setup-wizard", listener);
