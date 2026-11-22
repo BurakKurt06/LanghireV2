@@ -5,7 +5,8 @@ The user presses Start and walks away, so whatever would stop the run is said th
 * THE CHECK. The AI sign-in and the room left on its plan, Gmail (verification codes and
   confirmation emails), the CAPTCHA solver's balance, the resume, the job-site password. One
   message lists what is missing, and the run doesn't start (the alternative: jobs failing one
-  after another, as many did once when the AI plan's limit ran out).
+  after another, as many did once when the AI plan's limit ran out). A full AI plan is said but isn't a
+  reason to refuse: the run waits for the reset like a pause and goes on by itself.
 * THE QUESTIONS. What the queued jobs' sites are known to ask that nothing answers yet: asked
   together, before the run. An answer is saved as the user's own (Q&A page) and used on every
   site in every later run: nothing is asked twice.
@@ -179,8 +180,10 @@ def start_problems(*, llm_ready: bool, provider: str, settings: dict, profile: d
             else "ChatGPT isn't signed in (Settings → AI model).", True)
     else:
         stop = usage_meter.stop_reason()
-        if stop is not None and not usage_meter.resets_soon(stop):      # one that resets within minutes is waited for
-            add("ai_limit", stop["message"][0].upper() + stop["message"][1:] + ".", True)
+        if stop is not None and not usage_meter.resets_soon(stop):      # one that resets within minutes isn't worth saying
+            # Not a reason to refuse: the run waits for the reset and goes on by itself.
+            add("ai_limit", stop["message"][0].upper() + stop["message"][1:] + ". The run will wait and start "
+                "by itself when it resets (or press Continue now if your limit was reset earlier).", False)
     if not resume_ok:
         add("resume", "No resume is chosen (Settings → Applications).", True)
     if not (profile.get("name") or "").strip():

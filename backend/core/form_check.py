@@ -83,6 +83,13 @@ _SCAN_JS = r"""() => {
   };
   const clean = (label) => label.replace(/\s*\*\s*/g, ' ').replace(/\s+(Select One\s*)?Required$/i, '')
     .replace(/\s+Select One$/i, '').replace(/\s+/g, ' ').trim();
+  // A Workday choice shown as a pill. Seen 2026-11-20: Workday's newer pills are
+  // <div id="pill-..." role="option" aria-label="Corporate Website, press delete to clear value.">,
+  // and answered Source / Phone code fields were reported unanswered.
+  const PILLS = '[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"] li, [id^="pill-"][role="option"], ' +
+    '[role="option"][aria-label$="press delete to clear value."]';
+  const pillText = (pill) => text(pill) ||
+    String(pill.getAttribute('aria-label') || '').replace(/,?\s*press delete to clear value\.?\s*$/i, '').trim();
 
   const add = (el, root) => {
     const tag = el.tagName, type = (el.getAttribute('type') || '').toLowerCase();
@@ -128,8 +135,17 @@ _SCAN_JS = r"""() => {
       // Workday's searchable lists show the choice as a pill next to the input.
       if (!value) {
         const box = el.closest('[data-automation-id^="formField"]') || el.parentElement;
-        const pill = box && box.querySelector('[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"] li');
-        if (pill && text(pill)) value = text(pill);
+        const pill = box && box.querySelector(PILLS);
+        if (pill && pillText(pill)) value = pillText(pill);
+      }
+      // A react-select list (Greenhouse, many others) shows the choice beside its search input, which
+      // stays empty. Seen 2026-11-20: every answered one was reported unanswered and Submit held back.
+      if (!value && tag === 'INPUT') {
+        const control = el.closest('[class*="__control"], [class*="-control"]') || (el.parentElement && el.parentElement.parentElement);
+        const chosen = control && Array.from(control.querySelectorAll(
+          '[class*="single-value"], [class*="singleValue"], [class*="multi-value__label"], [class*="multiValue"] > div:first-child'))
+          .map(text).filter(Boolean);
+        if (chosen && chosen.length) value = chosen.join('; ');
       }
     } else {
       value = (el.value || '').trim();
@@ -140,9 +156,9 @@ _SCAN_JS = r"""() => {
     const workday = el.closest('[data-automation-id^="formField"]');
     if (workday && (el.getAttribute('role') === 'combobox' ||
         el.getAttribute('data-automation-id') === 'searchBox')) {
-      const pills = Array.from(workday.querySelectorAll('[data-automation-id="selectedItem"], [data-automation-id="selectedItemList"] li'));
+      const pills = Array.from(workday.querySelectorAll(PILLS));
       kind = 'dropdown';
-      value = pills.map(text).filter(Boolean).join('; ');
+      value = Array.from(new Set(pills.map(pillText).filter(Boolean))).join('; ');
       if (!value && el.value) options = ['Select a matching option; typed search text is not saved'];
     }
     label = clean(label);

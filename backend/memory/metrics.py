@@ -300,6 +300,12 @@ class MetricsStore:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def job_log_says(self, job_url: str, text: str) -> bool:
+        """Some line ever logged for this job contains `text`."""
+        conn = self._get_conn()
+        return conn.execute("SELECT 1 FROM run_logs WHERE job_url = ? AND instr(message, ?) > 0 LIMIT 1",
+                            (job_url, text)).fetchone() is not None
+
     def get_job_logs(self, job_url: str, limit: int = 200) -> list[dict]:
         conn = self._get_conn()
         rows = conn.execute(

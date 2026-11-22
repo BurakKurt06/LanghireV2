@@ -103,13 +103,13 @@ describe("PendingTab: before a run starts", () => {
 
   it("does not start when something required is missing, and says everything in one message", async () => {
     mockCheck.mockResolvedValue({ ok: false, jobs: 2, questions: [], problems: [
-      { id: "ai_limit", message: "ChatGPT limit: 98% of the 5-hour limit is used, resets in about 2 hours.", required: true },
+      { id: "resume", message: "No resume is chosen (Settings → Applications).", required: true },
       { id: "gmail", message: "Gmail isn't connected (Settings → Accounts & email).", required: false },
     ] } as never);
     const user = userEvent.setup();
     await pressStart(user);
     const dialog = await screen.findByRole("dialog", { name: "The run can't start yet" });
-    expect(within(dialog).getByText(/98% of the 5-hour limit is used/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/No resume is chosen/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Gmail isn't connected/)).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "Start anyway" })).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Close" }));

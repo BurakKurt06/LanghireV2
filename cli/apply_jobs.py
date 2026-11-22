@@ -113,7 +113,11 @@ TRIAL_UNCONFIRMED_NOTE = (
 )
 _CONFIRMATION = re.compile(
     r"thank(s| you) for (applying|your application|submitting)|application (has been |was )?(submitted|received|sent|complete)"
-    r"|(we('ve| have)|we) received your application|successfully (submitted|applied)|you('ve| have) applied",
+    r"|(we('ve| have)|we) received your application|successfully (submitted|applied)"
+    # "You have applied", but not the small print of a form: "if you have applied to a specific opening
+    # ..." was read as a confirmation on 2026-11-20 and a job never sent was saved Applied.
+    r"|(?<!\bif )(?<!\bonce )(?<!\bwhen )(?<!\bafter )(?<!\bwhether )(?<!\bunless )\byou('ve| have) (successfully |now )?"
+    r"applied\b(?! before)(?! to a specific)(?! or not)",
     re.I)
 _NOT_SENT = re.compile(
     r"\bnot (been |yet )?(submitted|sent|received|complete)|(could ?n[o']t|cannot|unable to|failed to) (be )?(submit|sen[dt]|process)"
@@ -132,7 +136,10 @@ def confirms_submission(text: str) -> bool:
 # explicit "ALREADY APPLIED:" report (the user's rule, 2026-11: "already applied" means Applied,
 # never Failed and never tried again).
 _ALREADY_APPLIED = re.compile(
-    r"\balready (applied|submitted|been submitted|have an application)\b|\byou(?:'ve| have)? applied (to|for|on)\b"
+    r"\balready (applied|submitted|been submitted|have an application)\b"
+    # Not a form's small print: "if you have applied to a specific opening ..." (seen 2026-11-20).
+    r"|(?<!\bif )(?<!\bonce )(?<!\bwhen )(?<!\bafter )(?<!\bwhether )(?<!\bunless )\byou(?:'ve| have)? applied (to|for|on)\b"
+    r"(?! a specific)"
     r"|\bduplicate application\b|\bapplication (received|submitted|under review|in review|in progress|status)\b"
     r"|\bunder (review|consideration)\b|\bapplied on\b", re.I)
 ALREADY_APPLIED_PREFIX = "ALREADY APPLIED:"
@@ -558,7 +565,7 @@ def new_run(run_id: str | None = None) -> None:
     _site_failures.clear()
     _site_trouble.clear()
     _asked_this_run.clear()
-    _run_notice.update(text="", kind="")
+    _run_notice.update(text="", kind="", resets_at=None)
 
 
 # ── A site where this run keeps failing the same way ─────────────────────────
@@ -622,49 +629,71 @@ _asked_this_run: set[str] = set()
 
 
 # ── What the run panel says about the run as a whole ─────────────────────────
-_run_notice = {"text": "", "kind": ""}       # kind: "" | "limit_wait" | "limit_stop"
+# kind: "" | "limit_wait" (the run waits for the ChatGPT limit) | "limit_stop" (from older runs only)
+# resets_at: when the limit resets (Unix seconds), for the run panel's countdown.
+_run_notice = {"text": "", "kind": "", "resets_at": None}
 
 
 def run_notice() -> dict:
-    """{"text", "kind"} for the run panel: why the run is waiting or has stopped starting jobs.
+    """{"text", "kind", "resets_at"} for the run panel: why the run is waiting.
 
-    The reset time in it is worked out now, not when the run stopped (it stays on the panel after
-    the run, until the next one starts)."""
+    The reset time in it is worked out now, not when the wait began."""
     notice = dict(_run_notice)
-    if notice["kind"] == "limit_stop":
+    if notice["kind"] in ("limit_stop", "limit_wait"):
         stop = usage_meter.stop_reason()
-        notice["text"] = (f"Stopped: {stop['message']}" if stop is not None else
-                          "Stopped earlier by the ChatGPT limit. It has reset since: press Start to go on.")
+        if stop is not None:
+            notice["text"] = ("Waiting: " if notice["kind"] == "limit_wait" else "Stopped: ") + stop["message"]
+            notice["resets_at"] = stop.get("resets_at")
+        elif notice["kind"] == "limit_stop":
+            notice["text"] = "Stopped earlier by the ChatGPT limit. It has reset since: press Start to go on."
     return notice
 
 
 async def _hold_for_limit(name: str, cancel_flag: dict | None) -> bool:
-    """Before a worker takes a job: is there room for it on the AI plan? True to go on.
+    """Before a worker takes a job: is there room for it on the AI plan? True to go on, False only
+    when the run is stopped.
 
-    No room, and the limit resets within minutes: wait for it. No room for longer: this worker
-    stops; the jobs it would have taken stay ready."""
+    No room: the run waits (the user's wish, 2026-11-20: like Pause, not the end of the run). It goes
+    on by itself once the limit resets, or at once when the user presses Continue now
+    (continue_after_limit). The jobs not started yet stay in this run's queue."""
     announced = False
     while True:
-        stop = usage_meter.stop_reason(running_jobs=len(_current))
-        if stop is None:
-            if announced:
-                _run_notice.update(text="", kind="")
-            return True
-        if not usage_meter.resets_soon(stop):
-            if _run_notice["kind"] != "limit_stop":
-                print(f"  🛑 Stopped: {stop['message']}. The jobs not started stay ready.")
-            _run_notice.update(text=f"Stopped: {stop['message']}", kind="limit_stop")
-            return False
-        if not announced:
-            announced = True
-            print(f"  ⏳ [{name}] Waiting: {stop['message']}")
-        _run_notice.update(text=f"Waiting: {stop['message']}", kind="limit_wait")
         if cancel_flag and cancel_flag.get("cancel_requested"):
             return False
+        stop = usage_meter.stop_reason(running_jobs=_jobs_using_the_plan())
+        if stop is None:
+            if announced or _run_notice["kind"] == "limit_wait":
+                _run_notice.update(text="", kind="", resets_at=None)
+                print(f"  ▶️ [{name}] Room on the ChatGPT plan again: going on")
+            reading = usage_meter.describe()
+            if reading:
+                print(f"  📊 [{name}] {reading} ({len(_current)} job(s) running)")
+            return True
+        if not announced and _run_notice["kind"] != "limit_wait":
+            print(f"  ⏸️  Waiting for the ChatGPT limit: {stop['message']}. The run goes on by itself when it "
+                  "resets; press Continue now to go on earlier.")
+        announced = True
+        _run_notice.update(text=f"Waiting: {stop['message']}", kind="limit_wait", resets_at=stop.get("resets_at"))
         await asyncio.sleep(LIMIT_POLL_SECONDS)
 
 
 LIMIT_POLL_SECONDS = 5
+
+
+def _jobs_using_the_plan() -> int:
+    """Running jobs that need room on the AI plan: not those waiting for the user (a wait spends no AI
+    request). Seen 2026-11-19: jobs in a 5-minute wait each held a whole job's room."""
+    return sum(1 for job in list(_current.values()) if (job or {}).get("url") not in _help_requests)
+
+
+def continue_after_limit() -> bool:
+    """The user's Continue now while the run waits for the ChatGPT limit (called from the app). The
+    next AI reply decides again: if the plan is still full, the run waits once more."""
+    if _run_notice["kind"] != "limit_wait":
+        return False
+    usage_meter.continue_anyway()
+    print("  ▶️ Continuing now, as you asked (if the ChatGPT plan is still full, the run waits again)")
+    return True
 
 
 def take_job(queue: asyncio.Queue, worker_id: int):
@@ -1067,6 +1096,11 @@ async def wait_for_user_reply(agent_ref: dict, job: dict, kind: str, problem: st
     """
     url = job["url"]
     seconds = USER_WAIT_SECONDS if seconds is None else seconds
+    if agent_ref.get("user_away"):
+        # An earlier wait on this job went unanswered: the user is away. One wait per job; the job
+        # keeps what it needs on its card. Seen 2026-11-20: one job waited three times (16 minutes).
+        print(f"  ⏭️  Not waiting again on this job (the last wait went unanswered): {config.redact_secrets(problem)[:120]}")
+        return None
     loop = asyncio.get_running_loop()
     future = loop.create_future()
     _help_requests[url] = {"title": job.get("title", ""), "company": job.get("company", ""),
@@ -1092,6 +1126,7 @@ async def wait_for_user_reply(agent_ref: dict, job: dict, kind: str, problem: st
                             return {"resolved": True, "message": "", "answers": {}, "give_up": False}
                     except Exception:
                         pass
+            agent_ref["user_away"] = True
             return None
         finally:
             if hold is not None:
@@ -1112,16 +1147,58 @@ def address_answer(question: str, section: str, profile: dict | None) -> str | N
     Seen 2026-11-19: a site asked the ZIP code of every past employer, and the run waited five minutes
     for the user. An employer's or school's ZIP follows from its city (that city's main one); the
     candidate's own is in the profile."""
+    address = (profile or {}).get("address") or {}
+    own = str(address.get("zip") or "").strip()
+    where = ", ".join(str(address.get(k) or "").strip() for k in ("city", "state", "zip", "country")
+                      if str(address.get(k) or "").strip())
+    history = _HISTORY_SECTION.search(f"{section or ''} {question or ''}")
+    remote = (f" For a remote job with no city of its own, it is where the candidate worked from: {where} "
+              "(profile)." if where else "")
     if not _POSTAL.search(question or ""):
+        # The city, state or country of a past employer or school. Seen 2026-11-20: a remote employer's
+        # City was put to the user (5-minute wait).
+        if history and _PLACE.match(question or ""):
+            return ("Not asked: an employer's or school's city, state and country are in the resume or profile." + remote
+                    + " Log it with record_guesses (basis 'guess', source '<where it came from>').")
         return None
-    if _HISTORY_SECTION.search(f"{section or ''} {question or ''}"):
+    if history:
         return ("Not asked: an employer's or school's ZIP / postal code follows from its city in the resume or "
-                "profile: use that city's main ZIP code. Log it with record_guesses (basis 'guess', source "
-                "'<city> in the resume').")
-    own = str(((profile or {}).get("address") or {}).get("zip") or "").strip()
+                "profile: use that city's main ZIP code." + remote + " Log it with record_guesses (basis 'guess', "
+                "source '<city> in the resume').")
     if own:
         return f"Not asked: the candidate's ZIP / postal code is {own} (profile)."
     return None
+
+
+# A question that only asks where: "City", "State / Province", "Country", "Location (city)".
+_PLACE = re.compile(r"\s*(?:city|town|state|province|region|county|country|location)\b[\w\s/()&,-]{0,30}\??\s*$", re.I)
+
+# "Are you a U.S. citizen?", "Are you a citizen of the United States?", "US citizenship: ..."
+_US_CITIZEN = re.compile(r"\b(?:u\.?\s?s\.?|united\s+states|american)\s+citizen(?:ship)?\b"
+                         r"|\bcitizen(?:ship)?\s+of\s+the\s+(?:u\.?\s?s\.?|united\s+states)\b", re.I)
+_NOT_A_CITIZEN = re.compile(r"green\s*card|permanent\s+resident|\bvisa\b|\bh-?1b\b|\bopt\b|\bcpt\b|\bead\b|\btn\b|\bl-?1\b"
+                            r"|\bf-?1\b|\bj-?1\b|\bo-?1\b|non-?citizen|not\s+a\s+(?:u\.?s\.?\s+)?citizen", re.I)
+
+
+def citizenship_answer(question: str, profile: dict | None) -> str | None:
+    """What to tell the agent instead of asking "Are you a U.S. citizen?" (None: not that question, or
+    nothing in the profile to go on).
+
+    The answer follows from Profile → Work authorization when it names citizenship, or a visa or
+    residence status that isn't citizenship; it used to be put to the user (a 5-minute wait)."""
+    if not _US_CITIZEN.search(question or ""):
+        return None
+    status = str((profile or {}).get("work_authorization") or "").strip()
+    if not status:
+        return None
+    if re.search(r"\b(?:u\.?\s?s\.?|united\s+states|american)\s+citizen\b", status, re.I) and not _NOT_A_CITIZEN.search(status):
+        answer = "Yes"
+    elif _NOT_A_CITIZEN.search(status):
+        answer = "No"
+    else:
+        return None
+    return (f"Not asked: Profile → Work authorization says '{status[:80]}'. Answer {answer}. Log it with record_guesses "
+            "(basis 'guess', source 'profile: work authorization').")
 
 
 class UnansweredQuestion(BaseModel):
@@ -1137,6 +1214,35 @@ class UnansweredQuestions(BaseModel):
 
 class VerificationRequest(BaseModel):
     kind: Literal["code", "link"] = Field(description="'code' for a code to type in, 'link' for an email with a link to open")
+
+
+class StuckDropdownChoice(BaseModel):
+    index: int = Field(description="The element index of the 'Make a Selection' box that doesn't open")
+    option: str = Field(description="The option to choose, worded as in the list")
+
+
+# An iCIMS "Make a Selection" box is a link drawn over the form's own hidden <select> (its id without
+# "_icimsDropdown"). Seen 2026-11-20: such boxes never opened for the agent (clicked 8 times; Enter on
+# one sent the page), and two jobs ended "Needs you"; choosing in the select behind it worked.
+ICIMS_CHOICE_JS = r"""function(option) {
+  const start = this.nodeType === 1 ? this : this.parentElement;
+  const box = (start && start.closest && start.closest('[id$="_icimsDropdown"]')) || start;
+  const id = String((box && box.id) || '').replace(/_icimsDropdown$/, '');
+  if (!box || !id || id === box.id) return JSON.stringify({error: "that isn't an iCIMS 'Make a Selection' box"});
+  const select = box.ownerDocument.getElementById(id);
+  if (!select || select.tagName !== 'SELECT') return JSON.stringify({error: "the list behind that box wasn't found"});
+  const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const want = norm(option), options = Array.from(select.options).filter((o) => norm(o.text));
+  const pick = options.find((o) => norm(o.text) === want) || (want && options.find((o) => norm(o.text).includes(want)));
+  if (!pick) return JSON.stringify({error: "no such option", options: options.map((o) => o.text.trim()).slice(0, 30)});
+  select.value = pick.value;
+  pick.selected = true;
+  select.dispatchEvent(new Event('input', {bubbles: true}));
+  select.dispatchEvent(new Event('change', {bubbles: true}));
+  const label = box.querySelector('span') || box;
+  if (/make a selection/i.test(box.textContent || '') || !norm(box.textContent)) label.textContent = pick.text.trim();
+  return JSON.stringify({chosen: pick.text.trim()});
+}"""
 
 
 # One verification-email reader at a time (they share the mail profile).
@@ -1230,6 +1336,20 @@ async def _advance_captcha(agent_ref: dict, browser_session):
     return None
 
 
+def _posting_apply(node, label: str) -> bool:
+    """A posting's own "Apply" button outside any form: it opens or scrolls to the application, it
+    sends nothing. Seen 2026-11-20 on Greenhouse: held back for the form's 15 unanswered questions
+    below it, a wasted AI step on every job there."""
+    if node is None or not re.match(r"\s*apply\b", label or "", re.I):
+        return False
+    current, depth = node, 0
+    while current is not None and depth < 60:
+        if str(getattr(current, "tag_name", "") or "").lower() == "form":
+            return False
+        current, depth = getattr(current, "parent_node", None), depth + 1
+    return True
+
+
 def guard_next_clicks(tools: Tools, agent_ref: dict, worker_id: int) -> None:
     """Don't let Next / Continue / Submit be clicked while required questions are unanswered.
 
@@ -1245,7 +1365,7 @@ def guard_next_clicks(tools: Tools, agent_ref: dict, worker_id: int) -> None:
             if node is not None:
                 label = (node.get_all_children_text() or node.attributes.get("aria-label")
                          or node.attributes.get("value") or "").strip()
-            if form_check.is_advance_button(label):
+            if form_check.is_advance_button(label) and not _posting_apply(node, label):
                 data = await form_check.scan(browser_session)
                 missing = form_check.missing_required(data)
                 key = tuple(f["label"] for f in missing)
@@ -1254,8 +1374,9 @@ def guard_next_clicks(tools: Tools, agent_ref: dict, worker_id: int) -> None:
                     names = "; ".join(form_check._describe(f) for f in missing)
                     print(f"  ✋ [W{worker_id}] Held back '{label[:30]}': {len(missing)} required question(s) unanswered")
                     return ActionResult(error=(
-                        f"Not clicked '{label[:40]}': these required questions on this page are still unanswered "
-                        f"(top to bottom): {names}. Answer them, then click it again."))
+                        f"Not clicked '{label[:40]}': these required questions on this page look unanswered "
+                        f"(top to bottom): {names}. Answer the ones that are empty, then click it again; if the "
+                        "page already shows an answer in each, just click it again."))
                 if not agent_ref.get("captcha_checked_for_click"):       # the submit guard already checked this click
                     stopped = await _advance_captcha(agent_ref, browser_session)
                     if stopped is not None:
@@ -1305,6 +1426,10 @@ async def account_memory_note(agent) -> str:
         return (f"ACCOUNT MEMORY: the app already has an account on this site ({entry['site']}: "
                 f"{site_accounts.describe(entry)}). SIGN IN with the account email and password; never create "
                 "another account here.")
+    if agent_ref.get("verification_read") and _host_of(agent_ref["verification_read"]) == _host_of(url):
+        return (f"ACCOUNT MEMORY: you are creating the account on this site ({site_accounts.account_key(url)}) and "
+                "its emailed verification was read in this run. Finish creating it from where the page is now (type "
+                "the code if it isn't in yet, set the password, continue); don't start over. Then call account_result.")
     if not has_password_field:
         return ""
     return (f"ACCOUNT MEMORY: the app has no account on this site ({site_accounts.account_key(url)}) yet. "
@@ -1571,6 +1696,8 @@ async def _settle_tentative_submit(agent_ref: dict, guard, browser_session) -> N
 
 
 CUT_SETTLE_SECONDS = 10
+# The longest a job's browser may take to start (with its page helpers set up).
+BROWSER_START_SECONDS = 90
 
 
 async def settle_after_cut(agent_ref: dict, browser_session) -> None:
@@ -1637,7 +1764,7 @@ def enforce_submit_policy(tools: Tools, guard: "submit_guard.SubmitGuard", worke
                 control, page_url, fingerprint, text = None, "", "", params_dict.get("keys") or params_dict.get("text") or ""
             decision = guard.decide(action_name, control, page_url, fingerprint, text)
             if action_name == "click" and decision.allowed and session is not None \
-                    and submit_guard.is_account_creation(control):
+                    and submit_guard.is_account_creation(control, clicked=True):
                 # "Create Account" pressed with a password typed in: the site may now hold an account
                 # that waits for its emailed verification (see account_memory_note).
                 try:
@@ -1687,7 +1814,7 @@ _APP_ONLY_ACTIONS = {"done", "ask_for_answers", "ask_user_for_help", "record_gue
                      "write_cover_letter", "request_submit_review", "password_rejected", "note_conflict",
                      "get_email_verification", "wait", "screenshot", "extract", "search_page", "find_elements",
                      "account_result"}
-_FIELD_ACTIONS = {"input", "select_dropdown", "click", "upload_file", "dropdown_options"}
+_FIELD_ACTIONS = {"input", "select_dropdown", "click", "upload_file", "dropdown_options", "choose_in_stuck_dropdown"}
 
 
 def watch_actions(tools: Tools, agent_ref: dict, worker_id: int = 0) -> None:
@@ -1773,9 +1900,34 @@ def _submit_recorder(url: str):
 
 class ApplicationTools(Tools):
     async def act(self, *args, **kwargs):
-        # One action may wait for the user (USER_WAIT_SECONDS); nothing may wait longer.
-        kwargs.setdefault("action_timeout", USER_WAIT_SECONDS + 90)
+        # One action may wait for the user (USER_WAIT_SECONDS); nothing may wait longer. Reading the
+        # verification email comes before that wait: seen 2026-11-20, reading it took 90-110 s, the
+        # time limit then cut the 5-minute wait short, the agent asked again and one job waited three
+        # times (16 minutes).
+        action = args[0] if args else kwargs.get("action")
+        try:
+            names = set((action.model_dump(exclude_unset=True) or {}).keys())
+        except Exception:
+            names = set()
+        kwargs.setdefault("action_timeout", VERIFICATION_ACTION_SECONDS if "get_email_verification" in names
+                          else USER_WAIT_SECONDS + 90)
         return await super().act(*args, **kwargs)
+
+
+# The longest the app's own reading of a verification email may take (waiting for another job's
+# reading included), and so the whole verification step: that, then the wait for the user.
+MAIL_READ_LIMIT_SECONDS = 4 * 60
+VERIFICATION_ACTION_SECONDS = USER_WAIT_SECONDS + MAIL_READ_LIMIT_SECONDS + 60
+# Is the page still asking for a code, a password or the emailed link? (Read in code, no AI request.)
+_ASKS_FOR_VERIFICATION_JS = r"""() => {
+  if (document.readyState !== 'complete') return true;
+  const text = ((document.body && document.body.innerText) || '').slice(0, 6000);
+  if (text.trim().length < 80) return true;            // still loading or blank: not moved on
+  if (document.querySelector('input[type=password], input[autocomplete="one-time-code"], input[name*=code i], ' +
+      'input[id*=code i], input[name*=otp i], input[id*=otp i], input[name*=passcode i], input[id*=passcode i], ' +
+      'input[name*=pin i][maxlength], input[inputmode=numeric][maxlength]')) return true;
+  return /\b(verif\w*|confirm (?:your )?email|check your (?:e-?mail|inbox)|we(?:'ve| have)? (?:just )?(?:sent|emailed)|activation)\b/i.test(text);
+}"""
 
 
 def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id: int) -> Tools:
@@ -1848,7 +2000,8 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         told, remaining = [], []
         for q in questions:
             own = (dates.own_answer(q["question"], q["field_type"], agent_ref.get("profile"))
-                   or address_answer(q["question"], q["section"], agent_ref.get("profile")))
+                   or address_answer(q["question"], q["section"], agent_ref.get("profile"))
+                   or citizenship_answer(q["question"], agent_ref.get("profile")))
             earlier = ""
             if own is None:
                 try:
@@ -1907,6 +2060,29 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         return ActionResult(is_done=True, success=False, extracted_content=text, long_term_memory=text)
 
     @tools.action(
+        "Choose an option in an iCIMS 'Make a Selection' box that doesn't open when clicked: the app picks it "
+        "in the form's own list behind the box.",
+        param_model=StuckDropdownChoice,
+    )
+    async def choose_in_stuck_dropdown(params: StuckDropdownChoice, browser_session: _BrowserSessionType):
+        node = await browser_session.get_element_by_index(params.index)
+        if node is None:
+            return ActionResult(error=f"No element with index {params.index} on this page. Look at the page again.")
+        try:
+            answer = json.loads(await browser_policy.call_on_node(browser_session, node, ICIMS_CHOICE_JS,
+                                                                  params.option) or "{}")
+        except Exception as e:
+            return ActionResult(error=f"Couldn't choose in that box ({type(e).__name__}). Try clicking it once more.")
+        if answer.get("chosen"):
+            print(f"  📋 [W{worker_id}] Chose '{answer['chosen'][:60]}' in a list that didn't open")
+            return ActionResult(extracted_content=f"Chose '{answer['chosen']}' in that box. Check it shows the choice, "
+                                                  "then go on.")
+        if answer.get("options"):
+            return ActionResult(error=f"'{params.option}' isn't in that list. Its options: "
+                                      + "; ".join(answer["options"]) + ". Call it again with one of them.")
+        return ActionResult(error=f"Couldn't choose in that box: {answer.get('error') or 'unknown reason'}.")
+
+    @tools.action(
         "Get the verification code, or open the verification link, that the site you're on just emailed. "
         "The app reads it from the user's email itself; you never open an email site.",
         param_model=VerificationRequest,
@@ -1938,12 +2114,17 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         hold = watch.hold() if watch is not None else None
         if hold is not None:
             hold.__enter__()
-        try:
+        async def read_mail() -> dict:
             async with _mail_lock:
-                result = await inbox.find_verification(params.kind, senders, since - timedelta(minutes=2),
-                                                       config.build_browser_kwargs(purpose="mail"),
-                                                       employer_names=names, recipient=recipient,
-                                                       link_domains=link_hosts)
+                return await inbox.find_verification(params.kind, senders, since - timedelta(minutes=2),
+                                                     config.build_browser_kwargs(purpose="mail"),
+                                                     employer_names=names, recipient=recipient,
+                                                     link_domains=link_hosts)
+
+        try:
+            result = await asyncio.wait_for(read_mail(), MAIL_READ_LIMIT_SECONDS)
+        except asyncio.TimeoutError:
+            result = {"error": "The email couldn't be read in time."}
         finally:
             if hold is not None:
                 hold.__exit__(None, None, None)
@@ -1951,7 +2132,15 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
             return ActionResult(error="The page changed while the verification email was being read. Look at the "
                                       "page again and request the verification once more if it is still needed.")
         if result.get("code") or result.get("link"):
-            await asyncio.to_thread(site_accounts.record, page_url, recipient, "verified")
+            # The account is noted as verified when it exists: the app knows it, or Create Account was
+            # pressed in this run (the email confirms that account). A code that comes BEFORE any
+            # account was sent (an email-first sign-up) isn't an account yet: noted then, the next
+            # step said "an account exists, never create another", and the agent started the sign-up
+            # over and gave the job up (seen 2026-11-20). account_result notes it once it exists.
+            if agent_ref.get("registered_at") or await asyncio.to_thread(site_accounts.known, page_url, recipient):
+                await asyncio.to_thread(site_accounts.record, page_url, recipient, "verified")
+            else:
+                agent_ref["verification_read"] = page_url
         if result.get("code"):
             print(f"  📧 [W{worker_id}] Verification code read from the email for {_host_of(page_url)}")
             return ActionResult(extracted_content=f"The verification code is {result['code']}. Type it into the code field.")
@@ -1967,11 +2156,24 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
                                                   "Continue from the page now shown.")
         reason = result.get("error", "No verification email found.")
         what = "code" if params.kind == "code" else "link"
+
+        async def moved_on() -> bool:
+            # The site went on by itself (signed the user in, opened the application): nothing to
+            # verify. Seen 2026-11-20: 6.5 minutes waited for an email after the page had moved on.
+            now = await browser_session.get_current_page_url()
+            if _host_of(now) != _host_of(page_url):
+                return False            # another site: not this verification's business
+            return not await browser_policy.evaluate(browser_session, _ASKS_FOR_VERIFICATION_JS)
+
         reply = await wait_for_user_reply(
             agent_ref, job, "verification",
             f"{_host_of(page_url)} emailed a verification {what} and the app couldn't read it ({reason}) "
             + ("Type the code here, or enter it in the browser window yourself and press Continue."
-               if params.kind == "code" else "Open the link from that email in the browser window, then press Continue."))
+               if params.kind == "code" else "Open the link from that email in the browser window, then press Continue."),
+            until=moved_on)
+        if reply and reply.get("resolved"):
+            return ActionResult(extracted_content="The page has moved on by itself and no longer asks for a "
+                                                  "verification. Continue from the page now shown.")
         if reply and not reply.get("give_up"):
             code = (reply.get("message") or "").strip()
             if params.kind == "code" and code:
@@ -2038,6 +2240,8 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         email = secrets.get("account_email") or secrets.get("email") or ""
         if await asyncio.to_thread(site_accounts.record, page_url, email, params.result):
             print(f"  🔑 [W{worker_id}] Remembered: an account on {site_accounts.account_key(page_url)} ({params.result.replace('_', ' ')})")
+            if agent_ref.get("verification_read") and _host_of(agent_ref["verification_read"]) == _host_of(page_url):
+                await asyncio.to_thread(site_accounts.record, page_url, email, "verified")   # its email, read in this run
         return ActionResult(extracted_content="Noted: the app remembers this account.")
 
     @tools.action(
@@ -2552,6 +2756,8 @@ FORM_RULES = (
     "matching option. If the list shows categories, open the one that fits (e.g. 'Company Website', "
     "'Careers Page') and pick inside it. Check the field shows your choice. After 2 failed "
     "attempts, pick the closest reasonable option and move on.\n"
+    "- A 'Make a Selection' box (iCIMS) that doesn't open when clicked: call choose_in_stuck_dropdown with its "
+    "index and the option; the app picks it in the form's own list behind the box. Never press Enter on it.\n"
     "- Salary fields: use the SALARY NUMBERS above exactly (the row for the period the field asks for). A "
     "number-only field gets digits only: no currency sign, range or words.\n"
     "- Address fields: copy them from the profile's Address line. Address Line 1 is the street address "
@@ -2774,7 +2980,8 @@ def _unsolved_reason(e) -> str:
 INTERRUPTED_NOTE = "Interrupted: the run was stopped during this application. It will be tried again on the next run."
 PENDING_QUESTIONS_NOTE = "Your answer is needed"
 # A job the AI plan's limit cut off, or one not started because of it: ready again, never Failed.
-LIMIT_NOTE = ("Stopped by the ChatGPT limit, not by this job. It is ready again and will be tried on the next run.")
+LIMIT_NOTE = ("Stopped by the ChatGPT limit, not by this job. It is ready again: the run goes on with it when the "
+              "limit resets (or on the next run).")
 # A job on a site where two other jobs of this run already failed the same way.
 SITE_TROUBLE_NOTE = ("Skipped this run: two other jobs on {site} already ended the same way ({reason}). "
                      "It is ready again and will be tried on the next run.")
@@ -3252,11 +3459,13 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         challenge = await _captcha.detect(session)
         if challenge is None or not challenge.type:
             return
-        if challenge.type == _captcha.HCAPTCHA_INVISIBLE:
+        if challenge.type in (_captcha.HCAPTCHA_INVISIBLE, _captcha.RECAPTCHA_V3):
             # It runs by itself when the form is sent, and usually passes: the answer it makes in
             # this browser is the one the site trusts most. Only when the same form is being sent
             # again (the first time didn't get it through) does 2Captcha's answer take its place.
             # Seen 2026-11 on Lever: an answer bought before the first try was refused by the site.
+            # Seen 2026-11-20: an invisible reCAPTCHA was bought at the first step of every Greenhouse
+            # and Ashby job (one step stalled 62 s), and both of a job's solver tries went on it.
             if when != "advance" or not _captcha.solver_enabled(settings):
                 return
             # The same widget on the same site: a form the site shows again after refusing it may
@@ -3412,6 +3621,8 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
             f"- If the posting itself is gone (page not found, job closed, no longer accepting applications), call done with success=false and text starting with '{POSTING_CLOSED_PREFIX}'.\n"
             f"- Something only the user can provide or do (a document you don't have, a sign-in that is refused): call done with success=false and text starting with '{NEEDS_YOU_PREFIX}', saying exactly what is needed.\n"
             f"- You have a maximum of {MAX_STEPS} steps total. Budget your steps wisely.\n"
+            f"- Once the site confirms the application was received, call done with success=true, even if an "
+            f"answer is worth the user's check: put that in the text.\n"
             f"- When you report a failure (done with success=false), start the text with a short title of at most "
             f"8 words on its own line (e.g. 'Stopped at Review: Field of Study'), then say in plain words what "
             f"happened and what the user should do, if anything. Never mention @@ tracking markers in it.\n\n"
@@ -3479,10 +3690,17 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
 
     side_tasks: list = []
     try:
-        await config.maybe_apply_stealth(browser)
-        await browser.start()  # no-op when stealth already started it
-        watch.has_init_scripts(getattr(browser, "agent_focus_target_id", None))
-        await watch.prime()     # the page helpers are in the first tab before the job's page opens
+        async def start_browser():
+            await config.maybe_apply_stealth(browser)
+            await browser.start()  # no-op when stealth already started it
+            watch.has_init_scripts(getattr(browser, "agent_focus_target_id", None))
+            await watch.prime()     # the page helpers are in the first tab before the job's page opens
+
+        try:
+            # Nothing else watches this part. Seen 2026-11-19: a worker hung here for 38 minutes.
+            await asyncio.wait_for(start_browser(), BROWSER_START_SECONDS)
+        except asyncio.TimeoutError:
+            raise run_watch.PageStalled("the browser didn't start", url) from None
         run_task = asyncio.ensure_future(agent.run(max_steps=MAX_STEPS, on_step_start=before_step))
         stall_task = asyncio.ensure_future(watch.stalled())
         limit_task = asyncio.ensure_future(asyncio.sleep(ATTEMPT_LIMIT_SECONDS))
@@ -3547,7 +3765,10 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         # 2. LLM-based: use the configured LLM to summarise the run into procedural
         # learnings. It costs a request, so only for runs with something to learn:
         # failures, and long flows (e.g. multi-page Workday forms).
-        if not success or len(result.history) >= LEARN_FROM_RUNS_OVER_STEPS:
+        # Not while the plan's limit is used up: the request would only be refused (seen 2026-11-20:
+        # four refused right after the limit cut jobs off, each up to 90 s).
+        if (not success or len(result.history) >= LEARN_FROM_RUNS_OVER_STEPS) \
+                and not (_agent_ref.get("limit_stop") or usage_meter.blocked()):
             try:
                 def _llm_call(prompt):
                     """Use the user's configured LLM for memory extraction.
@@ -3647,6 +3868,21 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
                         print(f"  ✅ [W{worker_id}] Applied (confirmed by the site): {title} at {company}")
                         return "applied"
                     return await unknown_or_confirmed("the agent then reported: " + strip_markers(error_msg)[:300])
+                if _agent_ref.get("receipt_text_seen"):
+                    # The last page says the application was received (the employer's word), whatever the
+                    # agent reported next. Seen 2026-11-20: "Application submitted!", then done(success=False)
+                    # only to flag one answer; saved Failed, a select-all run would have applied again.
+                    if review:
+                        await save_job_status(url, "needs_you", TRIAL_UNCONFIRMED_NOTE, agent_words=True)
+                        print(f"  🙋 [W{worker_id}] Not confirmed (no approved Submit in this trial run): {title} at {company}")
+                        return "needs_you"
+                    update_job(url, submission_evidence={"kind": "confirmation_page", "observed_at":
+                               datetime.now(timezone.utc).isoformat()})
+                    await save_job_status(url, "applied")
+                    update_job(url, submit_attempted_at=None, pending_questions=None)
+                    print(f"  ✅ [W{worker_id}] Applied (confirmed by the site; the agent then said: "
+                          f"{strip_markers(error_msg)[:120]}): {title} at {company}")
+                    return "applied"
                 if _agent_ref.get("limit_stop") or usage_meter.is_limit_error(error_msg):
                     # Cut off by the AI plan's limit, not by the job: back to ready, never Failed.
                     await save_job_status(url, "pending", LIMIT_NOTE, agent_words=True)
@@ -3685,7 +3921,10 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
                 step_count=len(result.history),
                 memories_injected=memories_injected_count,
                 memories_extracted=memories_extracted_count,
-                error_message=None if reached else (failure_reason(result) if not success
+                # The reason the job's card gives, not a step error from earlier in the run (a job the
+                # limit cut off showed "Not clicked 'Apply' ..." on the Logs page).
+                error_message=None if reached else (LIMIT_NOTE if outcome == "limit"
+                                                    else failure_reason(result) if not success
                                                     else f"Agent finished; outcome: {outcome}")[:2000],
                 run_type="practice" if review else "apply",
                 run_id=_current_run["id"],
@@ -3793,6 +4032,9 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
             status = "failed"
         finally:
             _busy_sites.pop(worker_id, None)
+            # This worker's next lines (a wait for the ChatGPT limit, say) aren't that job's: they
+            # were filed under the last job on the Logs page.
+            current_job_url.set("")
         stats[status] = stats.get(status, 0) + 1
         stopping = bool(cancel_flag and cancel_flag.get("cancel_requested"))
         if status in ("failed", "needs_you") and not (status == "failed" and job.get("_retry_with")):
@@ -3807,8 +4049,9 @@ async def worker(name: str, worker_id: int, queue: asyncio.Queue, profile: dict,
         if status not in ("closed", "skipped", "limit") and not stopping:
             await config.maybe_human_delay("the next application")
 
-        # On retry, put back in queue (never after Stop: the run is over)
-        if status == "retry" and not stopping:
+        # On retry, put back in queue (never after Stop: the run is over). A job the ChatGPT limit
+        # cut off (or kept from starting) goes back too: this run waits for the limit and does it then.
+        if status in ("retry", "limit") and not stopping:
             queue.put_nowait(job)
         # Self-retry: one more attempt that reads the failure report first.
         elif status == "failed" and job.get("_retry_with") and not stopping:

@@ -1,7 +1,7 @@
 """A job posting's title and employer as a browser shows the page.
 
 Many application sites build their pages in the browser (Oracle's "Candidate Experience" sites,
-the UN's careers site, Phenom, some iCIMS and Workday pages): the app's plain page fetch
+some large organizations' own careers sites, Phenom, some iCIMS and Workday pages): the app's plain page fetch
 (job_page.fetch) sees only a shell titled "Candidate Experience site" or "Careers", so a pasted
 link kept a placeholder name until the agent opened it. For such links this opens the page once,
 headless, in a fresh temporary browser profile (no cookies, no sign-in, deleted afterwards), with

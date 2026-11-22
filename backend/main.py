@@ -74,6 +74,13 @@ async def lifespan(app: FastAPI):
     _kill_browser_processes()
     # Reset any jobs stuck in "in_progress" from a previous crash
     _recover_stale_jobs()
+    # Jobs an older version marked Failed only because the ChatGPT limit ran out are ready again
+    try:
+        ready = _ready_again_after_limit()
+        if ready:
+            _log.info(f"{ready} job(s) failed only by the ChatGPT limit are ready again")
+    except Exception as e:
+        _log.warning(f"Couldn't check for jobs failed by the ChatGPT limit: {e}")
     # Clean up old run logs (>30 days)
     _metrics = _get_metrics_store()
     if _metrics:
@@ -135,7 +142,7 @@ def _stop_operations_and_browsers():
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHireV2 Backend", version="1.3.4", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.3.5", lifespan=lifespan)
 
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
@@ -420,6 +427,50 @@ def _recover_stale_jobs():
         _log.info(f"Recovered {recovered} stale in_progress jobs")
 
 
+def _ready_again_after_limit(sent_before=None) -> int:
+    """Jobs an older version (1.3.2 and before) saved as Failed only because the ChatGPT plan's limit
+    refused its requests: ready again, in one write. Such jobs stayed Failed with the limit's
+    message, and Start never picks a Failed job by itself.
+
+    A job that may have been sent stays as it is (never applied to twice by itself): one with a
+    submit mark, and one whose log ever said "Submission outcome unknown" (such a mark can have
+    been cleared by a retry by hand). Without the log nothing is changed.
+    `sent_before(url)`: that check (the run log, unless a test gives another)."""
+    from core.shared_config import mutate_jobs, read_jobs
+    from core import usage_meter
+    from cli.apply_jobs import LIMIT_NOTE
+
+    metrics = None
+    if sent_before is None:
+        metrics = _get_metrics_store()
+        if not metrics:
+            return 0
+        sent_before = lambda url: metrics.job_log_says(url, "Submission outcome unknown")
+    candidates = {url for url, job in read_jobs().items()
+                  if job.get("status") == "failed" and not job.get("submit_attempted_at")
+                  and usage_meter.is_limit_error(str(job.get("error") or ""))}
+    try:
+        safe = {url for url in candidates if not sent_before(url)}
+    finally:
+        if metrics is not None:
+            metrics.close()
+
+    if not safe:
+        return 0                        # nothing to do: the job list isn't rewritten
+
+    def ready(jobs):
+        changed = 0
+        for url, job in jobs.items():
+            # Checked again under the lock: the job may have changed since.
+            if (url in safe and job.get("status") == "failed" and not job.get("submit_attempted_at")
+                    and usage_meter.is_limit_error(str(job.get("error") or ""))):
+                job["status"], job["error"] = "pending", LIMIT_NOTE
+                changed += 1
+        return changed
+
+    return mutate_jobs(ready)
+
+
 def _api_error(code: str, message: str, status_code: int = 400) -> JSONResponse:
     """Return a structured error response."""
     return JSONResponse(
@@ -633,7 +684,7 @@ async def health():
     all_ok = db_ok and chromium_ok and llm_configured
     return {
         "status": "ok" if all_ok else "degraded",
-        "version": "1.3.4",
+        "version": "1.3.5",
         "frozen": getattr(sys, 'frozen', False),
         "checks": {
             "database": db_ok,
@@ -1622,12 +1673,8 @@ async def start_applying(body: ApplyRequest):
     problem = _start_problem(apply=True)
     if problem:
         return {"success": False, "message": problem}
-    from core import usage_meter
-    no_room = usage_meter.stop_reason()
-    if no_room is not None and not usage_meter.resets_soon(no_room):
-        # Every job would be cut off (or never start): say so instead of starting. (A limit that
-        # resets within minutes doesn't stop a start: the run waits for it.)
-        return {"success": False, "message": f"Not started: {no_room['message']}."}
+    # A full ChatGPT plan doesn't stop a start (the user's wish, 2026-11-20): the run waits for the
+    # limit to reset and goes on by itself, like a pause (cli/apply_jobs._hold_for_limit).
     requested = ([body.job_url] if body.job_url else body.job_urls or [])
     jobs_before_start = _load_jobs()
     if not body.acknowledge_unknown and any((jobs_before_start.get(url) or {}).get("submit_attempted_at") for url in requested):
@@ -1819,6 +1866,16 @@ def _run_notice() -> dict:
         return _aj.run_notice()
     except Exception:
         return {"text": "", "kind": ""}
+
+
+@app.post("/apply/limit/continue")
+async def continue_after_limit():
+    """Continue now, while the run waits for the ChatGPT limit (it went on by itself at the reset).
+    If the plan is still full, the next reply says so and the run waits again."""
+    if not _apply_status.get("running"):
+        return {"success": False}
+    from cli import apply_jobs as _aj
+    return {"success": _aj.continue_after_limit()}
 
 
 @app.post("/apply/check")

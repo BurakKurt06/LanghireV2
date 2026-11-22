@@ -522,7 +522,7 @@ export interface ApplyStatus {
   finished_at: string | null;
   /** Why the run is waiting or stopped starting jobs ("Stopped: ChatGPT limit ..., resets in about
    *  2 hours"). It stays after the run ends, until the next one starts. */
-  notice?: { text: string; kind: "" | "limit_wait" | "limit_stop" };
+  notice?: { text: string; kind: "" | "limit_wait" | "limit_stop"; resets_at?: number | null };
 }
 
 /** What Start found missing ("required": a run can't work at all without it). */

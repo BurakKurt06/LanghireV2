@@ -26,7 +26,7 @@ def test_title_and_company_from_og_and_json_ld():
 
 
 def test_workday_legal_entity_codes_are_dropped():
-    p = job_page.parse("https://msd.wd5.myworkdayjobs.com/SearchJobs/job/X_R1", 200,
+    p = job_page.parse("https://acme.wd5.myworkdayjobs.com/SearchJobs/job/X_R1", 200,
                        page(OG.format("Data Science Intern"), LD.format("1000 Wayne Tech &amp; Sons LLC")))
     assert p.company == "Wayne Tech & Sons"
 
@@ -113,8 +113,8 @@ def test_fetch_never_raises(monkeypatch):
 
 
 def test_greenhouse_link_that_lands_on_the_job_board_is_closed():
-    asked = "https://job-boards.greenhouse.io/stateaffairs/jobs/4437430009"
-    p = job_page.parse("https://job-boards.greenhouse.io/stateaffairs", 200, page(OG.format("State Affairs")), original_url=asked)
+    asked = "https://job-boards.greenhouse.io/globexmedia/jobs/1000000001"
+    p = job_page.parse("https://job-boards.greenhouse.io/globexmedia", 200, page(OG.format("Globex Media")), original_url=asked)
     assert p.closed and "job board" in p.reason
 
 
@@ -504,7 +504,7 @@ def test_a_hostile_page_cannot_stall_the_reader():
 
 
 @pytest.mark.parametrize("title", [
-    "FILLED: Early Careers: Benefits Co-op - Spring Term 2027",
+    "FILLED: Early Careers: Finance Co-op - Spring Term 2027",
     "[Closed] Treasury Analyst - New York",
     "(Filled) Summer Analyst",
     "Expired - Summer Intern",

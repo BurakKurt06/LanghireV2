@@ -454,6 +454,11 @@ export async function startApplying(params: { workers?: number; mode?: string; l
   });
 }
 
+/** Continue now, while the run waits for the ChatGPT limit to reset. */
+export async function continueAfterLimit() {
+  return request<{ success: boolean }>("/apply/limit/continue", { method: "POST" });
+}
+
 export async function stopApplying() {
   return request<{ success: boolean }>("/apply/stop", { method: "POST" });
 }

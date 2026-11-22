@@ -60,14 +60,19 @@ def test_what_is_missing_is_listed_in_one_answer(auth_client, all_set):
     assert "2Captcha balance is empty" in answer["problems"][2]["message"]
 
 
-def test_no_room_on_the_ai_plan_is_said_before_starting(auth_client, all_set):
+def test_no_room_on_the_ai_plan_is_said_before_starting_but_does_not_stop_the_start(auth_client, all_set):
+    """The run waits for the reset like a pause (the user's wish, 2026-11-20), so Start may go ahead."""
     usage_meter.note_reply(headers(primary=99, secondary=40, primary_reset=9000))
     jobs(**{"https://boards.example/jobs/1": {"status": "pending"}})
     answer = auth_client.post("/apply/check", json={}).json()
-    assert [p["id"] for p in answer["problems"]] == ["ai_limit"]
+    assert [(p["id"], p["required"]) for p in answer["problems"]] == [("ai_limit", False)]
     assert "99% of the 5-hour limit is used" in answer["problems"][0]["message"]
-    started = auth_client.post("/apply/start", json={"mode": "all"}).json()
-    assert started["success"] is False and started["message"].startswith("Not started: ChatGPT limit: 99%")
+    assert "The run will wait and start by itself when it resets" in answer["problems"][0]["message"]
+    assert main._start_problem(apply=True) == ""
+
+
+def test_continue_now_is_refused_without_a_run(auth_client, all_set):
+    assert auth_client.post("/apply/limit/continue", json={}).json() == {"success": False}
 
 
 def test_the_check_asks_what_the_queued_jobs_sites_are_known_to_need(auth_client, all_set):
@@ -150,7 +155,7 @@ def test_removing_a_job_or_marking_it_applied_deletes_its_picture(auth_client, a
 def test_the_run_panel_is_told_why_a_run_stopped(auth_client, all_set):
     from cli import apply_jobs
     apply_jobs.new_run()
-    assert auth_client.get("/apply/status").json()["notice"] == {"text": "", "kind": ""}
+    assert auth_client.get("/apply/status").json()["notice"] == {"text": "", "kind": "", "resets_at": None}
     usage_meter.limit_reached(3 * 3600)
     apply_jobs._run_notice.update(text="Stopped: ChatGPT limit reached, resets in about 3 hours", kind="limit_stop")
     notice = auth_client.get("/apply/status").json()["notice"]

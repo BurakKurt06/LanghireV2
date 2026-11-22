@@ -117,7 +117,7 @@
       "alreadyApplied": "Already applied:",
       "alreadyAppliedDesc": "When the site itself says you already applied to that job, it counts as Applied and isn't tried again. A company can list the same job twice, so every link you paste gets its own application.",
       "aiLimit": "Your ChatGPT limit:",
-      "aiLimitDesc": "The app reads how much of your plan's 5-hour and weekly limits is used from the replies it already gets (no extra requests). When the next job wouldn't fit, no new job starts, the ones running finish, and the rest stay ready. The run panel says when the limit resets. Your own ChatGPT and Codex use counts toward the same limits.",
+      "aiLimitDesc": "The app reads how much of your plan's 5-hour and weekly limits is used from the replies it already gets (no extra requests). When the next job wouldn't fit, the run waits like a pause: the jobs running finish, no new one starts, and the run panel counts down to the reset. The run goes on by itself when the limit resets; if your limit was reset early (a free reset), press Continue now. A job the limit cut off is tried again in the same run. Your own ChatGPT and Codex use counts toward the same limits.",
       "sameSite": "A site that keeps failing:",
       "sameSiteDesc": "When two jobs on one site end the same way in a run, that site's other jobs wait for the next run (they stay ready, with the reason on their cards).",
       "retries": "Trying again:",

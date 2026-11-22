@@ -56,7 +56,8 @@ correctly and submits the application."). These are the current ones:
   the agent's final Submit application control. No approval prompts. A possibly-sent
   application is never submitted again automatically.
 - **Waiting for the user**: at most 5 minutes (a question nothing answers, an unsolved CAPTCHA,
-  an unread verification code), then the run moves on; the job stays "Needs you" with the exact
+  an unread verification code), then the run moves on; one wait per job (after one nobody
+  answered, that job doesn't wait again); the job stays "Needs you" with the exact
   question saved, answerable on its card; the answer is remembered and the job is tried again
   on the next run.
 - **Answers**: resume/profile/saved answers/memory first, then the AI, the user last. Ordinary
@@ -71,14 +72,16 @@ correctly and submits the application."). These are the current ones:
   -> the 15th; only a year -> June 15, May 15 for a graduation); never invent experience, skills,
   credentials, or dates with no basis.
 - **CAPTCHAs**: every CAPTCHA goes to 2Captcha once a key is saved, including invisible ones and
-  ones after Submit (an invisible one is first left to pass by itself; the solver takes over when
+  ones after Submit (an invisible one, hCaptcha or reCAPTCHA v3, is first left to pass by itself; the solver takes over when
   the form is refused or a puzzle opens); on failure or without a key, the user solves it in the
   open browser (within the 5-minute wait).
 - **Runs** (user, 2026-11-16): "already applied" / "application received" on the site itself =
   Applied, never retried. Only problems that might go away (page didn't load, timeout, crash) are
   retried. Two jobs on one site ending the same way skip that site's other jobs for the run
   (they stay ready). The ChatGPT usage meters in each reply decide whether the next job fits; jobs
-  the limit cuts off go back to ready, never Failed; no reserve setting. A failed/Needs-you job
+  the limit cuts off go back to ready, never Failed; no reserve setting. A full plan pauses the run
+  (user, 2026-11-20): the run panel counts down to the reset, the run goes on by itself then, and
+  "Continue now" goes on at once (a free or early reset); cut-off jobs are tried again in the same run. A failed/Needs-you job
   keeps one picture of its last page (at most 500). Not wanted: one job per site at a time as a new
   rule (the existing one stays), stopping a job that repeats itself, skipping a link because it
   looks like an earlier application, a Windows notification, fewer screenshots per step.
@@ -104,8 +107,8 @@ correctly and submits the application."). These are the current ones:
   addresses and Gmail are always blocked. Imported plugins keep exact-host limits.
 - Notes-driven AI matching. Jobs below the minimum pay aren't collected; with a minimum set,
   jobs without pay need a higher match (halfway from the bar to 10).
-- The user's AI provider is the ChatGPT plan (sign-in; each AI step counts toward the plan's
-  usage limits). The user is cost-sensitive: avoid extra AI calls.
+- AI calls are costly (with the ChatGPT sign-in provider each AI step counts toward the plan's
+  usage limits): avoid extra AI calls.
 
 ## Setup
 
@@ -118,15 +121,15 @@ npm ci
 
 ```bash
 .venv/Scripts/python -B -m pytest tests/backend -p no:cacheprovider   # Linux: .venv/bin/python
-LANGHIRE_REAL_BROWSER=1 .venv/Scripts/python -B -m pytest tests/backend -k "collect or trial_action_mode or user_steps_in or whole_application or second_run or posting_reader"
+LANGHIRE_REAL_BROWSER=1 .venv/Scripts/python -B -m pytest tests/backend -k "collect or trial_action_mode or user_steps_in or whole_application or second_run or fourth_run or posting_reader"
 npx vitest run && npx tsc -b --noEmit && npx eslint .
 ```
 
 pyproject already adds `-q`; a second `-q` hides pytest's final pass/fail count.
 
 `uv run python scripts/run-ci-locally.py` runs every step of the Windows CI job (`test.yml`) on this
-computer, in order (the user doesn't pay for GitHub-hosted minutes on the private repository; its
-Actions runs don't start). Full output goes to `tmp/ci-local.log`.
+computer, in order (useful where hosted Actions minutes aren't available). Full output goes to
+`tmp/ci-local.log`.
 
 The Windows installer (`scripts/build-windows.ps1`) only builds on Windows. In the cloud, use
 the GitHub Actions `build.yml` workflow. Packaged checks: `scripts/smoke-backend.py` and

@@ -12,9 +12,11 @@ import {
   reviewApplication,
   decideBrowserRequests,
   stopJobCollection,
+  continueAfterLimit,
 } from "../lib/api";
 
 vi.mock("../lib/api", () => ({
+  continueAfterLimit: vi.fn(async () => ({ success: true })),
   getApplyStatus: vi.fn(),
   pauseApplying: vi.fn(async () => ({ success: true, paused: true })),
   resumeApplying: vi.fn(async () => ({ success: true, paused: false })),
@@ -279,10 +281,37 @@ describe("RunPanel", () => {
     expect(screen.getByText("Data Intern")).toBeInTheDocument();
   });
 
-  it("says while running that it is waiting for a limit that resets within minutes", async () => {
-    mockStatus.mockResolvedValue(running({ notice: { text: "Waiting: ChatGPT limit reached, resets in about 6 minutes", kind: "limit_wait" } }) as never);
+  // A full plan pauses the run (the user's wish, 2026-11-20): a countdown to the reset, the run
+  // goes on by itself then, and Continue now for a limit that was reset early.
+  const WAIT = "Waiting: ChatGPT limit: 98% of the 5-hour limit is used and the next job needs about 5%, resets in about 2 hours";
+
+  it("while the run waits for the limit it counts down to the reset and offers Continue now", async () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 2 * 3600 + 5 * 60 + 30;
+    mockStatus.mockResolvedValue(running({ current: [], notice: { text: WAIT, kind: "limit_wait", resets_at: resetsAt } }) as never);
+    const user = userEvent.setup();
     render(<RunPanel />);
-    expect(await screen.findByText("Waiting: ChatGPT limit reached, resets in about 6 minutes")).toBeInTheDocument();
+    const box = await screen.findByRole("status", { name: "Waiting for the ChatGPT limit" });
+    expect(within(box).getByText(/^Waiting: ChatGPT limit: 98%/)).toBeInTheDocument();
+    expect(within(box).getByText(/^2 h 5 min$/)).toBeInTheDocument();
+    expect(screen.getByText("Waiting for the ChatGPT limit", { selector: "span" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    await user.click(within(box).getByRole("button", { name: "Continue now" }));
+    expect(continueAfterLimit).toHaveBeenCalled();
+  });
+
+  it("a weekly limit is counted down in days", async () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 3 * 86400 + 4 * 3600 + 120;
+    mockStatus.mockResolvedValue(running({ current: [], notice: { text: WAIT, kind: "limit_wait", resets_at: resetsAt } }) as never);
+    render(<RunPanel />);
+    const box = await screen.findByRole("status", { name: "Waiting for the ChatGPT limit" });
+    expect(within(box).getByText(/^3 d 4 h$/)).toBeInTheDocument();
+  });
+
+  it("control: a run with room on the plan shows no limit box and no Continue now", async () => {
+    render(<RunPanel />);
+    expect(await screen.findByText("Data Intern")).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Waiting for the ChatGPT limit" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Continue now" })).not.toBeInTheDocument();
   });
 
   it("keeps the reason on screen after a run the limit stopped", async () => {

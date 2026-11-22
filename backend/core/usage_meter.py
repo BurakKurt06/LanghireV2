@@ -54,7 +54,8 @@ def reset() -> None:
     with _lock:
         _state.clear()
         _state.update({"meters": {}, "moves": {w: [] for w in WINDOWS}, "requests": 0, "by_session": {},
-                       "job_requests": [], "blocked_until": 0.0, "blocked_reason": "", "loaded": False})
+                       "job_requests": [], "blocked_until": 0.0, "blocked_reason": "", "loaded": False,
+                       "override": False})
 
 
 reset()
@@ -158,6 +159,9 @@ def note_reply(headers, session_id: str = "") -> None:
                     _state["by_session"].pop(key, None)
         if not meters:
             return
+        # A reply with meters is the plan's own word again: whatever the user decided with
+        # continue_anyway() gives way to it (the run waits again if the plan is still full).
+        _state["override"] = False
         for window, meter in meters.items():
             before = _state["meters"].get(window)
             if before is not None and meter["used"] >= before["used"] and (
@@ -187,13 +191,23 @@ def limit_reached(resets_in_seconds=None) -> None:
             until = time.time() + seconds
         _state["blocked_until"] = until
         _state["blocked_reason"] = "limit"
+        _state["override"] = False
+    _save()
+
+
+def continue_anyway() -> None:
+    """The user says go on now (a plan reset early, a free weekly reset). The next reply decides
+    again: its meters (or a "limit reached" refusal) put the wait back if the plan is still full."""
+    with _lock:
+        _state["blocked_until"], _state["blocked_reason"] = 0.0, ""
+        _state["override"] = True
     _save()
 
 
 def blocked() -> bool:
     """A "limit reached" reply came, and the limit hasn't reset since."""
     with _lock:
-        return _state["blocked_until"] > time.time()
+        return _state["blocked_until"] > time.time() and not _state.get("override")
 
 
 def _per_request(window: str) -> float | None:
@@ -259,10 +273,12 @@ def stop_reason(running_jobs: int = 0) -> dict | None:
     now = time.time()
     with _lock:
         _load_saved()
+        if _state.get("override"):
+            return None                     # the user said go on; the next reply decides again
         if _state["blocked_until"] > now:
             seconds = _state["blocked_until"] - now
             return {"message": f"ChatGPT limit reached, resets in about {_minutes(seconds)}", "resets_in": seconds,
-                    "window": "limit"}
+                    "resets_at": _state["blocked_until"], "window": "limit"}
         tight = []
         for window in WINDOWS:
             meter = _state["meters"].get(window)
@@ -284,7 +300,7 @@ def stop_reason(running_jobs: int = 0) -> dict | None:
         when = f", resets in about {_minutes(seconds)}" if seconds is not None else ""
         return {"message": (f"ChatGPT limit: {meter['used']:.0f}% of the {_name(window, meter)} limit is used and "
                             f"the next job needs about {job:.0f}%{when}"),
-                "resets_in": seconds, "window": window}
+                "resets_in": seconds, "resets_at": meter.get("resets_at"), "window": window}
 
 
 def resets_soon(stop: dict | None) -> bool:
@@ -297,6 +313,38 @@ def _minutes(seconds: float) -> str:
     if minutes >= 120:
         return f"{round(minutes / 60)} hours"
     return f"{minutes} minute" + ("" if minutes == 1 else "s")
+
+
+def _clock(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    days, hours = divmod(minutes // 60, 24)
+    if days:
+        return f"{days} d {hours} h"
+    return f"{minutes // 60} h {minutes % 60} min" if minutes >= 60 else f"{minutes} min"
+
+
+def describe() -> str:
+    """The meters in one line for the run's log ("" when none has been read): 'ChatGPT plan: 72% of
+    the 5-hour limit used (resets in 3 h 10 min), 16% of the weekly limit; a job takes about 5%'.
+
+    Seen 2026-11-20: the readings were never in the log, so a run that hit the limit early couldn't
+    be checked afterwards."""
+    now = time.time()
+    with _lock:
+        _load_saved()
+        parts = []
+        for window in WINDOWS:
+            meter = _state["meters"].get(window)
+            if meter is None or (meter.get("resets_at") and meter["resets_at"] <= now):
+                continue
+            when = (f" (resets in {_clock(meter['resets_at'] - now)})" if meter.get("resets_at") and window == "primary"
+                    else "")
+            parts.append(f"{meter['used']:.0f}% of the {_name(window, meter)} limit{' used' if not parts else ''}{when}")
+        if not parts:
+            return ""
+        each = _per_request("primary")
+        job = DEFAULT_JOB_PERCENT["primary"] if each is None else max(0.2, each * _requests_per_job())
+    return "ChatGPT plan: " + ", ".join(parts) + f"; a job takes about {job:.0f}%"
 
 
 def snapshot() -> dict:

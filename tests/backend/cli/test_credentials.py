@@ -300,7 +300,7 @@ def test_no_email_is_read_for_a_site_the_agent_opened_by_itself(monkeypatch):
 
 
 @pytest.mark.parametrize("page", [WORKDAY, SUCCESSFACTORS,
-                                  "https://ezzx.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/1"])
+                                  "https://abcd.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/1"])
 def test_the_verification_tool_reads_the_code_for_any_site_the_job_led_to(monkeypatch, data_dir, page):
     """A real failure: a code was emailed, and the app refused to fetch it because the page wasn't
     "the recognized employer origin and tenant". The app reads it, through its own reader."""

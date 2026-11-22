@@ -706,10 +706,10 @@ def test_users_answers_come_first_in_the_prompt(store):
 def test_a_reworded_copy_reinforces_instead_of_adding(store):
     """Agents rewrote the same tip run after run; a near-copy for the same site/category is one memory."""
     assert store.add("The salary prompt requires an annual or monthly expectation, while the profile only provides an hourly range",
-                     "jj.wd5.myworkdayjobs.com", "form_strategy") is True
+                     "globex.wd5.myworkdayjobs.com", "form_strategy") is True
     assert store.add("The salary prompt asks annual or monthly figures while the profile states only an hourly range",
-                     "jj.wd5.myworkdayjobs.com", "form_strategy") is False
-    assert len(store.search(website_domain="jj.wd5.myworkdayjobs.com", success_only=False)) == 1
+                     "globex.wd5.myworkdayjobs.com", "form_strategy") is False
+    assert len(store.search(website_domain="globex.wd5.myworkdayjobs.com", success_only=False)) == 1
 
 
 def test_different_tips_or_sites_stay_separate(store):

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Pause, Play, SkipForward, Square, CircleAlert, Hand } from "lucide-react";
-import { pauseApplying, resumeApplying, stopApplying, skipJob, answerHelp } from "../lib/api";
+import { pauseApplying, resumeApplying, stopApplying, skipJob, answerHelp, continueAfterLimit } from "../lib/api";
 import { APPLY_MODE_LABELS, type ApplyMode } from "../lib/applyMode";
 import { answeredOnly, minutesSeconds } from "../lib/questions";
 import { refreshApplyStatus, useApplyStatus } from "../hooks/useApplyStatus";
@@ -9,6 +9,23 @@ import type { HelpRequest } from "../lib/types";
 
 function elapsed(startedAt: string, now: number): string {
   return minutesSeconds((now - new Date(startedAt).getTime()) / 1000);
+}
+
+/** "3 h 12 min", "8 min 05 s": the time left until the ChatGPT limit resets. */
+function untilReset(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d) return `${d} d ${h} h`;           // the weekly limit
+  if (h) return `${h} h ${m} min`;
+  if (m >= 10) return `${m} min`;
+  return `${m} min ${String(s % 60).padStart(2, "0")} s`;
+}
+
+/** The local clock time of a moment ("9:40 PM", or "Tue 9:40 PM" when it isn't today). */
+function clockTime(ms: number): string {
+  const at = new Date(ms);
+  const time = at.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return at.toDateString() === new Date().toDateString() ? time : `${at.toLocaleDateString([], { weekday: "short" })} ${time}`;
 }
 
 const HELP_TITLES: Record<NonNullable<HelpRequest["kind"]>, string> = {
@@ -155,6 +172,9 @@ export default function RunPanel() {
   const helpRequests = status.help ?? [];
   const paused = Boolean(status.paused);
   const userActive = jobs.some((j) => j.user_active);
+  // The run waits for the ChatGPT limit (like a pause): it goes on by itself at the reset.
+  const limitWait = notice?.kind === "limit_wait" ? notice : null;
+  const resetsAt = limitWait?.resets_at ? limitWait.resets_at * 1000 : null;
   const mode = APPLY_MODE_LABELS[(status.run_mode || "auto") as ApplyMode] || APPLY_MODE_LABELS.auto;
 
   const act = async (fn: () => Promise<unknown>) => {
@@ -174,13 +194,34 @@ export default function RunPanel() {
     <section aria-label="Run controls" className="mx-3 mb-3 max-h-[70vh] overflow-y-auto rounded-xl border border-border bg-secondary/40 p-3 text-[12px]">
       <div className="flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-1.5 font-semibold text-foreground">
-          <span className={`h-2 w-2 rounded-full ${paused || userActive ? "bg-amber-500" : "animate-pulse bg-success"}`} />
-          {paused ? "Paused" : userActive ? "Waiting for you" : "Applying"}
+          <span className={`h-2 w-2 rounded-full ${paused || userActive || limitWait ? "bg-amber-500" : "animate-pulse bg-success"}`} />
+          {paused ? "Paused" : userActive ? "Waiting for you" : limitWait && !jobs.length ? "Waiting for the ChatGPT limit" : "Applying"}
         </span>
         <span className="rounded-full bg-background px-2 py-0.5 text-[10px] font-semibold text-muted-foreground">{mode}</span>
       </div>
 
-      {notice && (
+      {limitWait ? (
+        <div role="status" aria-label="Waiting for the ChatGPT limit"
+          className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-foreground">
+          <p className="flex items-start gap-1.5">
+            <CircleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-600" />
+            <span>
+              {limitWait.text}.{" "}
+              {resetsAt !== null && resetsAt > now
+                ? <>Goes on by itself in <strong>{untilReset(resetsAt - now)}</strong> (at {clockTime(resetsAt)}).</>
+                : <>Goes on by itself as soon as it resets.</>}
+              {jobs.length ? " Jobs already running finish first." : ""}
+            </span>
+          </p>
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            If your limit was reset early (a free reset, a new plan), press Continue now. If it's still full, the run waits again.
+          </p>
+          <button disabled={busy} onClick={() => act(continueAfterLimit)}
+            className="btn-primary mt-1.5 w-full !px-2 !py-1 !text-[11px]">
+            <Play className="h-3.5 w-3.5" /> Continue now
+          </button>
+        </div>
+      ) : notice && (
         <p role="status" className="mt-2 flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-foreground">
           <CircleAlert className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-600" />
           <span>{notice.text}{notice.kind === "limit_stop" ? ". Jobs already running finish; the rest stay ready." : ""}</span>

@@ -1,7 +1,7 @@
 """Pasted links get their real title and employer, also from pages built in the browser.
 
-Seen in the user's list (2026-11): 9 of 90 jobs, all pasted, still called "Pasted Link" or with
-the careers system's name ("Candidate Experience site") as the employer. The plain page fetch
+Seen 2026-11: some pasted jobs were still called "Pasted Link" or had the careers system's name
+("Candidate Experience site") as the employer. The plain page fetch
 of today's parser already finds most of them (they were saved by older versions and never read
 again); pages built in the browser (a large employer's own careers site) need the page as a browser shows it. A
 second reading only fills in what is still a placeholder: on one site it named a building as

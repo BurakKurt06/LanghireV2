@@ -2,8 +2,9 @@
 
 The agent used to guess on every visit whether an account existed (sign in, fail, register...).
 Now the app remembers each account it made or used: the agent reports a created account or a
-working sign-in (the account_result tool), and a verification email the app read for a site
-proves an account there too. Each step tells the agent what the app knows about the site it is on.
+working sign-in (the account_result tool), and a verification email the app read for an account
+it sent or already knew proves that account too. Each step tells the agent what the app knows
+about the site it is on.
 
 Kept per account system, not per applicant-tracking vendor: an Acme Workday account does not
 sign in on Globex's Workday. The key is the host, plus the company id where one host serves many

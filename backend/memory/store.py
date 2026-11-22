@@ -905,10 +905,37 @@ class MemoryStore:
 
         A question the user answered once is never asked again: on any site, in any run.
         """
-        row = self._find_qa(self._get_conn(), self._normalize_qa(question))
+        conn = self._get_conn()
+        row = self._find_qa(conn, self._normalize_qa(question))
         if row is not None and (row["source"] or "agent") == "user" and (row["answer"] or "").strip():
             return row["answer"]
-        return ""
+        return self._answer_inside(conn, question)
+
+    # A saved question this long, found whole as a sentence of a longer one, is the same question.
+    CONTAINED_MIN_WORDS = 8
+
+    def _answer_inside(self, conn, question: str) -> str:
+        """The user's answer to a question that the new one repeats word for word as a sentence of its
+        own, with more text around it. Seen 2026-11-20: a site asked the same question again with a
+        note added ("Please note ... does not provide relocation assistance") and the run waited five
+        minutes, although the user had answered it. A question merely starting the same way ("Do you
+        have a degree" / "... in nursing?") doesn't count: the saved one must end where a sentence ends."""
+        import re as _re
+        flat = lambda s: _re.sub(r"\s+", " ", (s or "").lower()).strip()
+        asked = flat(question)
+        best, best_len = "", 0
+        for row in conn.execute("SELECT question, answer FROM qa_repository WHERE merged_into_id IS NULL "
+                                "AND answer != '' AND source = 'user'").fetchall():
+            saved = flat(row["question"]).rstrip("?.!: ")
+            if len(saved.split()) < self.CONTAINED_MIN_WORDS or len(saved) <= best_len or saved == asked.rstrip("?.!: "):
+                continue
+            at = asked.find(saved)
+            if at < 0:
+                continue
+            before, after = asked[:at].rstrip(), asked[at + len(saved):]
+            if (not before or before[-1] in ".?!:)") and (not after.strip() or after[:1] in "?.!:)"):
+                best, best_len = row["answer"], len(saved)
+        return best
 
     def qa_update(self, qa_id: int, answer: str) -> bool:
         """An answer edited in the app: it counts as the user's."""

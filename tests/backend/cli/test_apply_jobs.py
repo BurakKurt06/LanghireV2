@@ -881,7 +881,7 @@ def test_naming_action_only_for_a_job_without_a_name(monkeypatch):
     _settings(monkeypatch)
     assert "set_job_details" in apply_jobs.build_tools(job, "x", False, {}, 1).registry.registry.actions
     # A careers system's own name isn't an employer ("Candidate Experience site" was a real one).
-    for generic in ("Candidate Experience site", "UN Careers", "Unknown"):
+    for generic in ("Candidate Experience site", "Acme Careers", "Unknown"):
         unnamed = {"url": GREENHOUSE, "title": "Data Intern", "company": generic}
         assert "set_job_details" in apply_jobs.build_tools(unnamed, "x", False, {}, 1).registry.registry.actions
     monkeypatch.setattr(apply_jobs, "read_jobs", lambda: {GREENHOUSE: {"name_source": "user"}})

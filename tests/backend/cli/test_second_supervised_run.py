@@ -12,6 +12,7 @@ that went wrong, with made-up jobs and pages:
 * an application the site confirmed was called "outcome unknown".
 """
 import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -89,15 +90,91 @@ def _worker(monkeypatch, urls, outcomes=None, errors=None):
     return started, stats, queue.qsize()
 
 
-def test_no_job_starts_when_the_next_one_would_not_fit_and_the_rest_stay_ready(monkeypatch):
+QUIET = {"text": "", "kind": "", "resets_at": None}
+
+
+def _waiting_worker(monkeypatch, urls, apply):
+    """worker() over `urls` in a background task, with `apply` standing in for apply_to_job."""
+    monkeypatch.setattr(apply_jobs, "load_json", lambda path, default=None: default)
+    monkeypatch.setattr(apply_jobs, "apply_to_job", apply)
+    monkeypatch.setattr(apply_jobs, "_busy_sites", {})
+    monkeypatch.setattr(apply_jobs, "LIMIT_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(apply_jobs.config, "maybe_human_delay", lambda *a: asyncio.sleep(0))
+    queue, stats, flag = asyncio.Queue(), {}, {"cancel_requested": False}
+    for url in urls:
+        queue.put_nowait({"url": url, "title": "Intern"})
+    return queue, stats, flag
+
+
+async def test_a_full_plan_makes_the_run_wait_like_a_pause_and_it_goes_on_at_the_reset(monkeypatch):
+    """The user, 2026-11-20: when the limit is reached, don't end the run; wait for the reset (showing
+    when it comes) and go on by itself."""
     apply_jobs.new_run()
     usage_meter.note_reply(headers(primary=98, secondary=30, primary_reset=7200))
-    started, stats, left = _worker(monkeypatch, [f"https://site{i}.example/1" for i in range(3)])
-    assert started == [] and stats == {} and left == 3      # never claimed: still ready, nothing marked failed
+    started = []
+
+    async def apply(job, *a, **k):
+        started.append(job["url"])
+        return "applied"
+
+    urls = [f"https://site{i}.example/1" for i in range(3)]
+    queue, stats, flag = _waiting_worker(monkeypatch, urls, apply)
+    task = asyncio.ensure_future(apply_jobs.worker("W1", 1, queue, {}, {}, [], False, stats, cancel_flag=flag))
+    await asyncio.wait({task}, timeout=0.3)
+    assert not task.done() and started == [] and queue.qsize() == 3            # waiting, not ended
     notice = apply_jobs.run_notice()
-    assert notice["kind"] == "limit_stop"
-    assert notice["text"].startswith("Stopped: ChatGPT limit: 98% of the 5-hour limit is used")
-    assert "resets in about 2 hours" in notice["text"]
+    assert notice["kind"] == "limit_wait" and notice["text"].startswith("Waiting: ChatGPT limit: 98% of the 5-hour")
+    assert 7000 < notice["resets_at"] - time.time() <= 7200                     # the panel's countdown
+    usage_meter.reset()                                                        # ... the 5-hour window resets
+    usage_meter._state["loaded"] = True
+    await asyncio.wait_for(task, 5)
+    assert started == urls and stats == {"applied": 3} and apply_jobs.run_notice() == QUIET
+
+
+async def test_continue_now_goes_on_before_the_reset(monkeypatch):
+    """A free or early reset: the user presses Continue now. The next reply decides again."""
+    apply_jobs.new_run()
+    usage_meter.limit_reached(5 * 86400)                                       # the weekly one, days away
+    started = []
+
+    async def apply(job, *a, **k):
+        started.append(job["url"])
+        usage_meter.note_reply(headers(primary=2, secondary=1))                # the plan was reset: room again
+        return "applied"
+
+    queue, stats, flag = _waiting_worker(monkeypatch, ["https://a.example/1", "https://b.example/1"], apply)
+    task = asyncio.ensure_future(apply_jobs.worker("W1", 1, queue, {}, {}, [], False, stats, cancel_flag=flag))
+    await asyncio.wait({task}, timeout=0.2)
+    assert started == [] and apply_jobs.run_notice()["kind"] == "limit_wait"
+    assert apply_jobs.continue_after_limit() is True
+    await asyncio.wait_for(task, 5)
+    assert len(started) == 2 and stats == {"applied": 2}
+
+
+async def test_continue_now_with_the_plan_still_full_waits_again(monkeypatch):
+    apply_jobs.new_run()
+    usage_meter.limit_reached(3600)
+    tries = []
+
+    async def apply(job, *a, **k):
+        tries.append(job["url"])
+        usage_meter.limit_reached(3600)                                        # the first request is refused again
+        return "limit"
+
+    queue, stats, flag = _waiting_worker(monkeypatch, ["https://a.example/1"], apply)
+    task = asyncio.ensure_future(apply_jobs.worker("W1", 1, queue, {}, {}, [], False, stats, cancel_flag=flag))
+    await asyncio.wait({task}, timeout=0.15)
+    apply_jobs.continue_after_limit()
+    await asyncio.wait({task}, timeout=0.4)
+    assert tries == ["https://a.example/1"] and not task.done()               # tried once, waiting again
+    assert queue.qsize() == 1 and apply_jobs.run_notice()["kind"] == "limit_wait"   # the job is kept for later
+    flag["cancel_requested"] = True                                            # Stop ends the wait at once
+    await asyncio.wait_for(task, 2)
+
+
+def test_continue_now_does_nothing_when_the_run_is_not_waiting():
+    apply_jobs.new_run()
+    assert apply_jobs.continue_after_limit() is False and not usage_meter._state.get("override")
 
 
 def test_control_with_room_on_the_plan_every_job_starts(monkeypatch):
@@ -105,12 +182,13 @@ def test_control_with_room_on_the_plan_every_job_starts(monkeypatch):
     usage_meter.note_reply(headers(primary=20, secondary=30))
     started, stats, left = _worker(monkeypatch, [f"https://site{i}.example/1" for i in range(3)])
     assert len(started) == 3 and stats == {"applied": 3} and left == 0
-    assert apply_jobs.run_notice() == {"text": "", "kind": ""}
+    assert apply_jobs.run_notice() == QUIET
 
 
-def test_the_run_stops_starting_jobs_as_soon_as_one_is_cut_off(monkeypatch):
+async def test_a_job_the_limit_cut_off_is_done_in_the_same_run_after_the_reset(monkeypatch):
     apply_jobs.new_run()
     urls = [f"https://site{i}.example/1" for i in range(4)]
+    seen = []
 
     async def apply(job, *a, **k):
         seen.append(job["url"])
@@ -119,17 +197,15 @@ def test_the_run_stops_starting_jobs_as_soon_as_one_is_cut_off(monkeypatch):
             return "limit"
         return "applied"
 
-    seen = []
-    monkeypatch.setattr(apply_jobs, "load_json", lambda path, default=None: default)
-    monkeypatch.setattr(apply_jobs, "apply_to_job", apply)
-    monkeypatch.setattr(apply_jobs, "_busy_sites", {})
-    monkeypatch.setattr(apply_jobs.config, "maybe_human_delay", lambda *a: asyncio.sleep(0))
-    queue, stats = asyncio.Queue(), {}
-    for url in urls:
-        queue.put_nowait({"url": url, "title": "Intern"})
-    asyncio.run(apply_jobs.worker("W1", 1, queue, {}, {}, [], False, stats))
-    assert seen == urls[:2] and stats == {"applied": 1, "limit": 1} and queue.qsize() == 2
+    queue, stats, flag = _waiting_worker(monkeypatch, urls, apply)
+    task = asyncio.ensure_future(apply_jobs.worker("W1", 1, queue, {}, {}, [], False, stats, cancel_flag=flag))
+    await asyncio.wait({task}, timeout=0.3)
+    assert seen == urls[:2] and queue.qsize() == 3                             # the cut-off job is back in line
     assert "resets in about 90 minutes" in apply_jobs.run_notice()["text"]
+    usage_meter.reset()
+    usage_meter._state["loaded"] = True
+    await asyncio.wait_for(task, 5)
+    assert sorted(seen) == sorted(urls + [urls[1]]) and stats == {"applied": 4, "limit": 1}
 
 
 def test_a_limit_that_resets_within_minutes_is_waited_for(monkeypatch):
@@ -146,7 +222,7 @@ def test_a_limit_that_resets_within_minutes_is_waited_for(monkeypatch):
     monkeypatch.setattr(apply_jobs.asyncio, "sleep", sleep_then_reset)
     assert asyncio.run(apply_jobs._hold_for_limit("W1", None)) is True
     assert notices[0]["kind"] == "limit_wait" and notices[0]["text"].startswith("Waiting: ChatGPT limit")
-    assert apply_jobs.run_notice() == {"text": "", "kind": ""}
+    assert apply_jobs.run_notice() == QUIET
 
 
 # ── a site where every job ends the same way ────────────────────────────────────

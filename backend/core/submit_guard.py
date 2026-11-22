@@ -81,11 +81,16 @@ _ACCOUNT_CREATION = re.compile(
     r"\b(sign\s*-?\s*up|register|registration|create\s+(?:an?\s+|my\s+|your\s+|new\s+)?account)\b", re.I)
 
 
-def is_account_creation(control) -> bool:
-    """An account step that registers ("Create Account", "Register", "Submit Registration"), not one that signs in."""
+def is_account_creation(control, clicked: bool = False) -> bool:
+    """An account step that registers ("Create Account", "Register", "Submit Registration"), not one that signs in.
+
+    `clicked`: the control itself was clicked, so only its own label counts. The form's default button
+    (submitter_text) is what Enter in one of its fields presses; seen 2026-11-20, a checkbox and a
+    privacy link in a sign-up form each counted as "Create Account"."""
     if not is_account_step(control):
         return False
-    return any(_ACCOUNT_CREATION.search(t) for t in (*control.labels, control.submitter_text) if t)
+    texts = control.labels if clicked else (*control.labels, control.submitter_text)
+    return any(_ACCOUNT_CREATION.search(t) for t in texts if t)
 
 
 # "Print Application", "Download PDF", "Save as PDF": a copy of the form for the candidate. It is never
@@ -138,6 +143,30 @@ def is_submit_label(text: str) -> bool:
     return not _NOT_APPLICATION.search(text) or bool(re.search(r"appl", text, re.I))
 
 
+# A Submit button that names one section of the application ("Submit Profile", "Submit Answers").
+_SECTION_SUBMIT = re.compile(
+    r"^\s*submit\s+(?:my\s+|your\s+|the\s+|this\s+)?(?:profile|answers?|questions?|questionnaire|section|page|step|"
+    r"information|info|details|eeo\w*|self[-\s]?identification|disclosures?|availability|preferences|"
+    r"personal\s+\w+|contact\s+\w+|work\s+history|employment\s+history|education|experience)\b", re.I)
+
+
+def section_step(control) -> bool:
+    """A Submit button of one section of a longer application, not its end: it names the section
+    ("Submit Profile"), or it is a bare one in a form that can also be finished later ("Finish
+    Later"). Seen 2026-11-19 on an iCIMS site: each section's button said "Submit Profile" or
+    "Submit", and a job the limit cut off after the first one stayed "may have been sent" for good.
+    In Full auto it is a possible submit: the mark comes off when the next section shows, and stays
+    when the page says the application was received. A final step's heading keeps it final."""
+    if control is None or control.final_context or control.application_review:
+        return False
+    labels = [t for t in control.labels if t]
+    if any(re.search(r"appl", t, re.I) for t in labels):
+        return False                    # "Submit Application", "Submit my application"
+    if any(_SECTION_SUBMIT.search(t) for t in labels):
+        return True
+    return bool(control.save_later) and any(_GENERIC_STEP.fullmatch(t) for t in labels)
+
+
 @dataclass
 class Control:
     """What an action would act on: a clickable element, or the focused element for a key press.
@@ -167,6 +196,9 @@ class Control:
     # The control sits in a dialog or form that names itself a sign-in / sign-up / registration one
     # (its id, label or class), and nothing there mentions an application.
     account_context: bool = False
+    # The control's form also has a "Finish Later" / "Save for later" button: a section of a longer
+    # application, not its end.
+    save_later: bool = False
 
     def __post_init__(self):
         self.tag, self.type = (self.tag or "").lower(), (self.type or "").lower()
@@ -413,7 +445,7 @@ class SubmitGuard:
                            "if it isn't the last page). " + why.split(": ", 1)[-1])
                 return Decision(False, why, submit=True)
             self._approval["used"] = True
-        return Decision(True, submit=True, tentative=bool(self.mode == "auto" and native_only))
+        return Decision(True, submit=True, tentative=bool(self.mode == "auto" and (native_only or section_step(control))))
 
     def _mode_name(self) -> str:
         return "Training run" if self.mode == "training" else "Trial run"
@@ -478,11 +510,23 @@ _CONTROL_NAME_JS = r"""
     }
     const text = trim(el.innerText || el.value);
     if (text) return text;
+    // A button inside a web component shows text the page puts in its slot (innerText leaves it out).
+    // Seen 2026-11-20: a hiring site's Submit was <button><slot></slot></button> in a shadow root,
+    // read as a button with no name, and the application it sent was never marked as sent.
+    const slotted = Array.from(el.querySelectorAll('slot')).slice(0,8)
+      .flatMap(s => s.assignedNodes ? s.assignedNodes({flatten: true}) : [])
+      .map(n => trim(n.innerText || n.textContent)).filter(Boolean).join(' ');
+    if (slotted) return trim(slotted);
     const images = Array.from(el.querySelectorAll('img[alt]')).slice(0,16)
       .map(n => trim(n.getAttribute('alt'))).filter(Boolean).join(' ');
     if (images) return trim(images);
     const title = trim(el.getAttribute('title'));
     if (title) return title;
+    if (root instanceof ShadowRoot && root.host && root.host.shadowRoot === root) {
+      // The web component's own name: what the page wrote inside it, or its label.
+      const host = trim(root.host.getAttribute('aria-label') || root.host.innerText || root.host.textContent);
+      if (host) return host;
+    }
     return trim(pseudo);
   }
   function generatedControlName(el) {
@@ -543,8 +587,12 @@ _FORM_CONTEXT_JS = r"""
       if (/appl/i.test(said)) break;
       if (accountWords.test(said)) { account_context = true; break; }
     }
+    // A "Finish Later" / "Save for later" button in the same form: a section of a longer application.
+    const laterWords = /\b(?:finish|complete|continue)\s+later\b|\bsave\s+(?:for\s+later|(?:and|&)\s+(?:finish|continue|complete)\s+later|(?:and|&)\s+exit)\b/i;
+    const save_later = !!form && Array.from(root.querySelectorAll('button,input[type=submit],input[type=button],a,[role=button]'))
+      .slice(0, 200).some(n => (n.form === form || form.contains(n)) && n !== el && laterWords.test(String(n.innerText || n.value || n.getAttribute('aria-label') || '')));
     return {final_context: final, application_review, submitter_text: submitter ? controlName(submitter, submitter_pseudo) : '',
-      submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo, form_fields, account_context};
+      submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo, form_fields, account_context, save_later};
   }
 """
 
@@ -604,10 +652,14 @@ NODE_JS = """function() {
   const hit = (label && label.control) || start;
   const el = (hit.closest && hit.closest('button, a, input, summary, [role=button], [role=link]')) || hit;
   const text_pseudo = generatedControlName(el), text = controlName(el, text_pseudo), text_alternative = legacyControlName(el);
-  let hidden = false;
-  for (let root = el.getRootNode(); root instanceof ShadowRoot; root = root.host.getRootNode()) hidden = hidden || root.mode === 'closed';
+  let hidden = false, hostForm = null;
+  for (let root = el.getRootNode(); root instanceof ShadowRoot; root = root.host.getRootNode()) {
+    hidden = hidden || root.mode === 'closed';
+    // A web component's button sends the form its component sits in.
+    hostForm = hostForm || (root.host.closest && root.host.closest('form'));
+  }
   return JSON.stringify({ ...formContext(el), text, text_alternative, text_pseudo, tag: (el.tagName || '').toLowerCase(), type: String(el.type || (el.getAttribute && el.getAttribute('type')) || '').toLowerCase(),
-                          role: (el.getAttribute && el.getAttribute('role')) || '', in_form: !!(el.form || (el.closest && el.closest('form'))),
+                          role: (el.getAttribute && el.getAttribute('role')) || '', in_form: !!(el.form || (el.closest && el.closest('form')) || hostForm),
                           document_url: el.ownerDocument.location.href, hidden_tree: hidden });
 }"""
 

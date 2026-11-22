@@ -446,7 +446,7 @@ def is_placeholder(title: str | None) -> bool:
 
 
 # What a careers system calls itself, not who the employer is: Oracle's "Candidate Experience
-# site", "UN Careers", "Careers", "Job Search", ... A job saved under one of these still needs
+# site", "Acme Careers", "Careers", "Job Search", ... A job saved under one of these still needs
 # its employer's name (the posting data, or the agent on its first look at the page).
 _GENERIC_COMPANIES = re.compile(
     r"^(unknown|n/?a|none|candidate experience( site| page)?|careers?( site| page| portal| center| home)?|"

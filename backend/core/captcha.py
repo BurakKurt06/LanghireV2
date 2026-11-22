@@ -643,21 +643,27 @@ def _solve_sync(api_key: str, challenge: Challenge) -> str:
         src = challenge.image_b64
         match = re.fullmatch(r"data:image/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/=\r\n]+)", src)
         if not match or len(src) > 1_500_000:
-            raise ValueError("the CAPTCHA image isn't embedded in the page")
+            raise NotSendable("its picture isn't embedded in the page, so it can't be sent to 2Captcha")
         body = match[1].replace("\r", "").replace("\n", "")
         try:
             decoded = base64.b64decode(body, validate=True)
         except (ValueError, binascii.Error) as error:
-            raise ValueError("the CAPTCHA image is not valid base64") from error
+            raise NotSendable("its picture couldn't be read, so it can't be sent to 2Captcha") from error
         if not decoded:
-            raise ValueError("the CAPTCHA image is empty")
+            raise NotSendable("its picture is empty, so it can't be sent to 2Captcha")
         # normal(string) guesses URL/file/base64 from the string, including
         # opening a local path or fetching a URL hidden after 'data:image/...'.
         # This explicit SDK operation cannot select either of those branches.
         res = solver.solve(method="base64", body=body)
     else:
-        raise ValueError(f"unsupported challenge type: {challenge.type}")
+        raise NotSendable(f"2Captcha can't solve this kind of check ({challenge.type})")
     return (res or {}).get("code", "")
+
+
+class NotSendable(ValueError):
+    """The check can't be sent to 2Captcha at all (found here, before any request): trying again
+    won't change that. Seen 2026-11-20: both of a job's tries failed within 3 ms as
+    "2Captcha error (ValueError)"."""
 
 
 async def solve(challenge: Challenge, api_key: str) -> str:
@@ -675,6 +681,10 @@ async def solve(challenge: Challenge, api_key: str) -> str:
         # some SDK errors embed the request URL (and key) into.
         if isinstance(e, TimeoutError) or type(e).__name__ in {"TimeoutException", "ReadTimeout", "ConnectTimeout"}:
             raise CaptchaUnsolved(challenge.type, "2Captcha gave no answer within its time limit") from e
+        if isinstance(e, NotSendable):
+            unsolved = CaptchaUnsolved(challenge.type, f"{e}: solve it in the browser")
+            unsolved.retry = False
+            raise unsolved from e
         if isinstance(e, SolverRejected):
             # Its own fixed error word, in plain words (it used to read "2Captcha error (ValueError)").
             unsolved = CaptchaUnsolved(challenge.type, _SOLVER_ERRORS.get(e.code, f"2Captcha refused it ({e.code})"))

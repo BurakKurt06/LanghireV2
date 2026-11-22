@@ -68,11 +68,12 @@ def test_the_solver_switched_off_is_not_checked():
     assert found == [] and calls == []
 
 
-def test_no_room_on_the_ai_plan_stops_a_start():
+def test_no_room_on_the_ai_plan_is_said_but_the_run_waits_for_the_reset():
     usage_meter.note_reply(headers(primary=97, secondary=20, primary_reset=7200))
     found = problems()
-    assert ids(found) == ["ai_limit"] and found[0]["required"]
+    assert ids(found) == ["ai_limit"] and not found[0]["required"]
     assert "97% of the 5-hour limit is used" in found[0]["message"] and "resets in about 2 hours" in found[0]["message"]
+    assert "The run will wait and start by itself when it resets" in found[0]["message"]
 
 
 def test_a_limit_that_resets_within_minutes_does_not_stop_a_start():

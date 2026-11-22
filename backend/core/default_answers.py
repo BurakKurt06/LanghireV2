@@ -20,9 +20,12 @@ DEFAULTS: tuple[tuple[str, str, str], ...] = (
      "If the list has no such option, pick 'Company website', 'Careers page' or 'Other' (type 'Company careers "
      "website' if it asks)."),
     ("work_authorization", "Are you legally authorized to work in the job's country / the country you live in?",
-     "Yes, when Profile → Work authorization says I am authorized to work there."),
+     "Yes, when Profile → Work authorization says I am authorized to work there. Those profile answers are about "
+     "the country in my profile: for a job in another country, No, unless my profile or saved answers say I may "
+     "work in that country."),
     ("sponsorship", "Will you now or in the future need visa sponsorship?",
-     "What Profile → Visa sponsorship needed says."),
+     "What Profile → Visa sponsorship needed says, for the country in my profile. For a job in another country: "
+     "Yes, I would need sponsorship there, unless my profile or saved answers say otherwise for that country."),
     ("relocation", "Are you willing to relocate, commute or work on site?",
      "What Profile → Willing to relocate and Preferred work mode say; when they say nothing, Yes."),
     ("ordinary_yes", "Are you at least 18? Can you do the essential duties of the job? Will you follow company policies?",
@@ -38,7 +41,9 @@ DEFAULTS: tuple[tuple[str, str, str], ...] = (
      "clearance, discipline, ...)",
      "No."),
     ("certify", "Certifications and declarations that the application is true, complete and accurate",
-     "Agree: tick the box (or type my name where it asks for a signature). The same one asked twice gets the same answer."),
+     "Agree: tick the box, type my full name where it asks for a signature, or my initials where it asks for "
+     "initials (also \"to confirm a human is completing this application\": a declaration, not a CAPTCHA). The "
+     "same one asked twice gets the same answer."),
     ("consent_required", "Required consent: privacy policy, terms, data processing, background or reference checks, drug test",
      "Agree."),
     ("marketing", "Optional marketing emails, text messages, newsletters or talent communities",
@@ -156,9 +161,16 @@ def salary_lines(salary: dict | None) -> str:
             f"- {row('hourly')}\n- {row('monthly')}\n- {row('yearly')}")
 
 
+def initials(name: str | None) -> str:
+    """'Ada Lovelace Test' -> 'ALT' (letters only; '' without a name)."""
+    return "".join(part[0] for part in (name or "").replace("-", " ").split() if part[:1].isalpha()).upper()[:6]
+
+
 def prompt_block(settings: dict | None, profile: dict | None) -> str:
     """The DEFAULT ANSWERS section of the agent's instructions."""
     lines = "\n".join(f"- {row['question']}: {row['answer']}" for row in answers(settings))
+    mine = initials((profile or {}).get("name"))
     return ("DEFAULT ANSWERS (the ordinary answer applies whenever the profile, the notes and the saved answers "
             "don't say otherwise; never ask the user about these):\n"
-            f"{lines}\n{salary_lines((profile or {}).get('salary_expectation'))}")
+            f"{lines}\n{salary_lines((profile or {}).get('salary_expectation'))}"
+            + (f"\nINITIALS (where a form asks for initials): {mine}" if mine else ""))

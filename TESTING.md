@@ -25,6 +25,17 @@ What the new tests cover (all with fake pages, fake accounts, fake AI):
   `test_usage_meter.py`, `test_dates.py`, `test_run_checks.py`, `test_last_page_and_solver.py`,
   `test_posting_apply_and_print.py`, `test_start_check_api.py`. The same file covers a progress
   tracker whose unfinished section is reached through the PROGRESS TRACKER note, with Print refused.
+- `tests/backend/cli/test_fourth_run_live.py` (real browser, 1.3.5): a Submit inside a web component
+  (`<button><slot>` in a shadow root) is read as Submit (marked before it is pressed; Trial refuses
+  it); a section's "Submit" next to "Finish Later" is only possibly final; answered react-select lists
+  and Workday's `pill-...` choices count as answered; an iCIMS "Make a Selection" box is chosen in the
+  list behind it. Unit side: `test_fourth_run.py` (the small print "if you have applied ..." is no
+  confirmation; a confirmed job is Applied whatever the agent says next; one wait per job; the
+  verification step has room for the mail and the 5-minute wait and ends when the page moved on; a
+  code read for an account being made; initials, U.S. citizenship, a remote employer's city, jobs in
+  other countries; invisible reCAPTCHA left to pass first; a browser that never starts; the meter
+  line; jobs failed by the limit on 1.3.2 ready again) and `test_second_supervised_run.py` (the
+  limit pauses the run, Continue now).
 - `tests/backend/cli/test_collect_stall_live.py` (real browser): a board whose results page never
   answers ends in seconds with the phase named, and the next board is collected; a results page
   with a privacy wall, or with job links in an unknown shape, logs what the reader saw. Unit side:
@@ -320,7 +331,7 @@ without accounts, forms sent to employers, real applications or paid providers:
 - [Lever demo application](https://jobs.lever.co/leverdemo/58db3f8e-b108-47d1-9e6e-87a1712497cd/apply),
   [current résumé parser](https://jobs.lever.co/js/parseResume.js): `/parseResume` receives
   exactly `accountId` from the observed employer form and the authorized résumé bytes.
-- [Greenhouse public application](https://job-boards.greenhouse.io/anthropic/jobs/5183044008),
+- Greenhouse public application (`job-boards.greenhouse.io/<board>/jobs/<id>`),
   [current client](https://job-boards.cdn.greenhouse.io/assets/entry.client-DnzCgKgt.js):
   signing uses `https://boards.greenhouse.io/uncacheable_attributes/presigned_fields`,
   repeated `fields[]`, and a returned S3 URL/fields/key template. The vendor appends
@@ -333,12 +344,12 @@ without accounts, forms sent to employers, real applications or paid providers:
   Nested read selections may grow without disabling a newer UI. Extra operations,
   root fragments, renamed aliases, spoofed operationName, batches and foreign tenants
   are refused. Returned form IDs and upload handles must belong to this run.
-- [Workable public board](https://apply.workable.com/betterup/),
+- Workable public board (`apply.workable.com/<account>/`),
   [reviewed client](https://dcvxs6ggqztsa.cloudfront.net/candidate/releases/careers.6901cd820c44d775.js):
   `/api/v3/accounts/{tenant}/jobs` is a read-only POST, including the actual `worktype`
   filter. The dedicated form upload lookup can mint an exact S3 upload grant; the
   separate `/api/v1/jobs/{id}/apply` receives no Trial sending authority.
-- [Oracle custom careers domain](https://jobs.navyfederal.org/hcmUI/CandidateExperience/en/sites/nfcu),
+- Oracle custom careers domain (`jobs.<employer>.org/hcmUI/CandidateExperience/en/sites/<site>`),
   [reviewed Oracle runtime](https://static.oracle.com/cdn/fa/oj-hcm-ce/2607.26.262300322/js/main-minimal.js):
   actual APIs use `resources/latest` and `application/vnd.oracle.adf.resourceitem+json`.
   Trusted initial HTML pins its Oracle API origin/site number; this is protocol
@@ -520,7 +531,7 @@ functions are still refused rather than being granted broad writes. This pass
 must not be described as universal ATS parity. No remaining work is delegated to
 Claude or hidden behind an approval prompt.
 
-A concrete semantic limit: [JazzHR's public two-stage client](https://gatelesis.applytojob.com/js/apply/submit-resume.js?master)
+A concrete semantic limit: JazzHR's public two-stage client (`<tenant>.applytojob.com/js/apply/submit-resume.js?master`)
 posts candidate data to `/apply/job/{code}/stage-one` and redirects to an
 application confirmation. A first application submission cannot be permitted in
 Trial merely because the vendor has later questions/screens. Its ordinary
@@ -585,7 +596,7 @@ and verifies persisted logs. The existing simultaneous-run isolation test stays
 unchanged; SQLite's thread-affinity checks remain enabled.
 
 An anonymous GET of the current
-[SAP application sign-in page](https://career5.successfactors.eu/career?company=gieseckede&career_job_req_id=27483&career_ns=job_application)
+SAP application sign-in page (`career5.successfactors.eu/career?company=<id>&career_job_req_id=<id>&career_ns=job_application`)
 exposed a compatibility gap in the earlier login fixture: the served form has
 two identical `career_ns=job_application` fields, with `career_os` and `login_ns`
 empty. Trial now recognizes that exact return route while pinning the company,
