@@ -266,6 +266,52 @@ async def test_the_unfinished_section_is_found_through_the_progress_tracker_and_
     assert [where for how, where, _ in site.requests if how == "GET" and where == "/eform/1/print"] == ["/eform/1/print"]
 
 
+# ── a sign-up dialog that ends with a bare "Submit" (seen 2026-11-19) ───────────
+AUTH_POSTING = f"""<!doctype html><title>Research Intern</title><h1>Research Intern posting</h1><p>{lab.FILLER}</p>
+<button id="apply" type="button" onclick="document.getElementById('candidate-auth-v2-modal').hidden=false">Apply now</button>
+<div id="candidate-auth-v2-modal" role="dialog" aria-label="Authentication" hidden>
+  <p>Your process starts here when you sign up and create a new account.</p>
+  <label for="country">Country/region of residence</label><input id="country" name="country">
+  <label><input type="radio" name="consent" id="no-consent" value="no"> No, do not share my profile</label>
+  <button id="prefs" type="button" onclick="location.href='/signin-provider'">Submit</button>
+</div>"""
+PROVIDER = f"""<!doctype html><title>Sign in</title><h1>Sign in with your security key</h1><p>{lab.FILLER}</p>
+<p>Use your face, fingerprint, PIN or security key.</p>"""
+
+
+async def test_a_bare_submit_in_a_sign_up_dialog_never_marks_the_job_as_possibly_sent(data_dir, monkeypatch):
+    """The real case: after the dialog's Submit the site wanted a passkey; the job ended "Submission
+    outcome unknown" although no application form had been reached. Now it ends "Needs you"."""
+    site = lab.Site({"/job": AUTH_POSTING, "/signin-provider": PROVIDER})
+    state = {}
+
+    def decide(text, step):
+        page = lab.browser_state(text)
+        state.setdefault("pages", []).append(page[:120])
+        if "Sign in with your security key" in page:
+            return {"done": {"success": False, "text": "NEEDS YOU: device sign-in\nThe site asks for a security key."}}
+        if "create a new account" in page:
+            if not state.get("country"):
+                state["country"] = True
+                return [{"input": {"index": at(text, "id=country"), "text": "United States"}},
+                        {"click": {"index": at(text, "id=no-consent")}}]
+            return {"click": {"index": at(text, "id=prefs", "Submit")}}
+        if "Research Intern posting" in page:
+            return {"click": {"index": at(text, "id=apply", "Apply now")}}
+        return {"wait": {"seconds": 1}}
+
+    script = lab.Script(decide)
+    try:
+        apply_jobs, shared_config = lab.prepare(monkeypatch, data_dir, site, script)
+        job = lab.add_job(shared_config, site.url("/job"))
+        status = await finish(lab.run_job(apply_jobs, job), site, state)
+    finally:
+        site.close()
+    saved = shared_config.read_jobs()[job["url"]]
+    assert status == "needs_you", (status, saved.get("error"), state.get("pages"))
+    assert saved["error"].startswith("device sign-in") and not saved.get("submit_attempted_at")
+
+
 # ── the site confirmed it, then the agent left that page ───────────────────────
 PLAIN_POSTING = f"""<!doctype html><title>Test Analyst at Example Works</title><h1>Test Analyst posting</h1><p>{lab.FILLER}</p>
 <a id="apply" href="/apply">Apply Now</a>"""

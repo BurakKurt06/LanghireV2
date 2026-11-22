@@ -1102,6 +1102,28 @@ async def wait_for_user_reply(agent_ref: dict, job: dict, kind: str, problem: st
             future.cancel()
 
 
+_POSTAL = re.compile(r"\b(?:zip|postal|post)\s*(?:/\s*postal\s*)?code\b|\bzip\b|\bpostcode\b", re.I)
+_HISTORY_SECTION = re.compile(r"\b(?:experience|employ\w*|work|job|position|education|school|universit\w*|college|degree)\b", re.I)
+
+
+def address_answer(question: str, section: str, profile: dict | None) -> str | None:
+    """What to tell the agent instead of asking for a ZIP / postal code (None: not one of those).
+
+    Seen 2026-11-19: a site asked the ZIP code of every past employer, and the run waited five minutes
+    for the user. An employer's or school's ZIP follows from its city (that city's main one); the
+    candidate's own is in the profile."""
+    if not _POSTAL.search(question or ""):
+        return None
+    if _HISTORY_SECTION.search(f"{section or ''} {question or ''}"):
+        return ("Not asked: an employer's or school's ZIP / postal code follows from its city in the resume or "
+                "profile: use that city's main ZIP code. Log it with record_guesses (basis 'guess', source "
+                "'<city> in the resume').")
+    own = str(((profile or {}).get("address") or {}).get("zip") or "").strip()
+    if own:
+        return f"Not asked: the candidate's ZIP / postal code is {own} (profile)."
+    return None
+
+
 class UnansweredQuestion(BaseModel):
     question: str = Field(description="The whole question exactly as the form shows it (never just a field label)")
     section: str = Field(default="", description="The form section or heading it is under, e.g. 'Work Experience 1'")
@@ -1548,6 +1570,30 @@ async def _settle_tentative_submit(agent_ref: dict, guard, browser_session) -> N
             agent_ref["tentative_submits"] = pending
 
 
+CUT_SETTLE_SECONDS = 10
+
+
+async def settle_after_cut(agent_ref: dict, browser_session) -> None:
+    """The AI plan's limit ended this attempt right after a click that only *might* have sent the
+    application (Next, Save, a page script): no further step will look at the page that followed,
+    so it is looked at here, the same way (_settle_tentative_submit). Seen 2026-11-19: a job cut off
+    mid-profile was left "may have been sent" and was never tried again. A real Submit stays marked.
+    """
+    guard = agent_ref.get("submit_guard")
+    if guard is None or guard.mode != "auto" or agent_ref.get("firm_submit") or not agent_ref.get("tentative_submits"):
+        return
+    try:
+        deadline = asyncio.get_running_loop().time() + CUT_SETTLE_SECONDS
+        state = await run_watch.page_state(browser_session)
+        while run_watch.is_blank(state) and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            state = await run_watch.page_state(browser_session)
+        if not run_watch.is_blank(state):
+            await _settle_tentative_submit(agent_ref, guard, browser_session)
+    except Exception:
+        pass        # couldn't look: the mark stays (never applied to twice by itself)
+
+
 def enforce_submit_policy(tools: Tools, guard: "submit_guard.SubmitGuard", worker_id: int = 0,
                           agent_ref: dict | None = None) -> None:
     """Run every action through the submit guard; Trial never approves final submission."""
@@ -1801,7 +1847,8 @@ def build_tools(job: dict, domain: str, review: bool, agent_ref: dict, worker_id
         # on any site, in any run.
         told, remaining = [], []
         for q in questions:
-            own = dates.own_answer(q["question"], q["field_type"], agent_ref.get("profile"))
+            own = (dates.own_answer(q["question"], q["field_type"], agent_ref.get("profile"))
+                   or address_answer(q["question"], q["section"], agent_ref.get("profile")))
             earlier = ""
             if own is None:
                 try:
@@ -2542,6 +2589,8 @@ SMART_GUESS_RULES = (
     "- Phone numbers, countries, states, degrees and schools: the profile's value in whatever form the field "
     "or its list uses (USA / United States / US; IL / Illinois; B.S. / Bachelor of Science / Bachelor's degree).\n"
     "- Years of experience (overall or with something): worked out from the resume's dates.\n"
+    "- An employer's or school's address details (ZIP / postal code, state, country): from its city in the "
+    "resume or profile; a ZIP code is that city's main one. Never ask for these.\n"
     "- Start date or availability: from the candidate's graduation or the posting's own dates (an internship's "
     "summer), otherwise 'immediately' / today's date.\n"
     "- 'How did you hear about us': the company's own careers website.\n"
@@ -3586,6 +3635,8 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
                 return "applied"
             else:
                 error_msg = failure_reason(result)
+                if _agent_ref.get("limit_stop") or usage_meter.is_limit_error(error_msg):
+                    await settle_after_cut(_agent_ref, browser)
                 if submit_attempted(_agent_ref):
                     if _agent_ref.get("receipt_seen_after_submit"):
                         # The site confirmed it after the submit; whatever the agent tripped over later.
@@ -3667,6 +3718,8 @@ async def _apply_claimed(job: dict, profile: dict, qa: dict, applied_labels: lis
         error_str = str(e)
         # The full traceback goes to backend.log; the job card only gets one line.
         _log.error(f"Application crashed: {title} at {company} ({url})", exc_info=True)
+        if _agent_ref.get("limit_stop") or usage_meter.is_limit_error(error_str):
+            await settle_after_cut(_agent_ref, browser)
         if submit_attempted(_agent_ref):
             return await unknown_or_confirmed(f"an error followed: {_friendly_error(error_str)[:200]}")
         if _agent_ref.get("limit_stop") or usage_meter.is_limit_error(error_str):

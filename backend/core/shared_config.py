@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import boto3
@@ -557,11 +558,25 @@ def load_json(path: Path, default=None):
     return default if default is not None else []
 
 
+# Windows refuses to replace a file while anything has it open for reading (the app's window reads
+# the job list every 2 seconds). Seen 2026-11: starting 500 jobs failed twice with "Access is
+# denied: jobs.tmp -> jobs.json". Such a refusal lasts milliseconds: the write is tried again.
+REPLACE_TRIES = 40
+REPLACE_WAIT_SECONDS = 0.05
+
+
 def save_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(path)
+    for attempt in range(REPLACE_TRIES):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_TRIES - 1:
+                raise
+            time.sleep(REPLACE_WAIT_SECONDS)
 
 
 def read_jobs() -> dict:

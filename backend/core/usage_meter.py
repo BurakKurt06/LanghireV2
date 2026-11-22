@@ -36,8 +36,12 @@ MAX_SAMPLES = 400
 # OUTSIDE_USE_MIN_POINTS) is somebody else using the plan: not this app's cost.
 OUTSIDE_USE_FACTOR = 8.0
 OUTSIDE_USE_MIN_POINTS = 2.0
-# A running job is, on average, half done: it still needs about half a job's worth.
-RUNNING_JOB_SHARE = 0.5
+# Room kept for each job already running. With half a job each (until 1.3.3), a long job still
+# running used the rest of the limit and was cut off. Each running job now keeps room for a whole one.
+RUNNING_JOB_SHARE = 1.0
+# What a job costs is taken from the larger jobs (this share of measured jobs took fewer requests):
+# the middle one undercounted the long applications that run out of room.
+JOB_SIZE_PERCENTILE = 0.75
 # When the limit resets this soon, a run waits for it instead of stopping.
 WAIT_FOR_RESET_SECONDS = 15 * 60
 
@@ -205,7 +209,8 @@ def _per_request(window: str) -> float | None:
 def _requests_per_job() -> float:
     counts = sorted(_state["job_requests"][-60:])
     if counts:
-        return float(counts[len(counts) // 2])          # the middle job: one runaway job doesn't count
+        # Not the largest job (one runaway job doesn't set the measure), not the middle one either.
+        return float(counts[min(len(counts) - 1, int(len(counts) * JOB_SIZE_PERCENTILE))])
     return float(_state.get("saved_requests_per_job") or DEFAULT_REQUESTS_PER_JOB)
 
 

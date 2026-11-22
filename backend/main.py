@@ -135,7 +135,7 @@ def _stop_operations_and_browsers():
     time.sleep(2)
     _kill_browser_processes()
 
-app = FastAPI(title="LangHireV2 Backend", version="1.3.3", lifespan=lifespan)
+app = FastAPI(title="LangHireV2 Backend", version="1.3.4", lifespan=lifespan)
 
 
 # ── Auth token (generated per-session, written to data dir for frontend) ──
@@ -633,7 +633,7 @@ async def health():
     all_ok = db_ok and chromium_ok and llm_configured
     return {
         "status": "ok" if all_ok else "degraded",
-        "version": "1.3.3",
+        "version": "1.3.4",
         "frozen": getattr(sys, 'frozen', False),
         "checks": {
             "database": db_ok,
@@ -1586,6 +1586,25 @@ JOB_STATUSES = ("pending", "applied", "failed", "blocked", "in_progress", "close
 RETRYABLE_STATUSES = ("pending", "failed", "needs_you", "skipped")
 
 
+def _reset_all_for_apply(urls: list[str]) -> list[dict]:
+    """Every job in `urls` that may be (re)started, back to pending in one write (as _reset_for_apply
+    does for one). Returns those jobs, in the order given, each with its url."""
+    from core.shared_config import mutate_jobs
+
+    def reset(jobs):
+        chosen = []
+        for url in dict.fromkeys(u for u in urls if isinstance(u, str)):
+            job = jobs.get(url)
+            if not job or job.get("status") not in RETRYABLE_STATUSES:
+                continue
+            override = job.get("status") == "skipped" or job.get("fit_override", False)
+            job.update(status="pending", error=None, fit_override=override, submit_attempted_at=None)
+            chosen.append(dict(job, url=url))
+        return chosen
+
+    return mutate_jobs(reset)
+
+
 def _reset_for_apply(url: str, job: dict) -> None:
     """Back to pending so a worker can claim it. Applying to a Skipped job by hand overrides the fit check."""
     from core.shared_config import update_job
@@ -1683,13 +1702,10 @@ async def start_applying(body: ApplyRequest):
             _reset_for_apply(target_job_url, target)
             pending = [target]
         elif target_job_urls:
-            # Batch apply: only apply to the specific selected jobs
-            pending = []
-            for url in target_job_urls:
-                j = jobs.get(url)
-                if j and j.get("status") in RETRYABLE_STATUSES:
-                    _reset_for_apply(url, j)
-                    pending.append(j)
+            # Batch apply: only apply to the specific selected jobs, all reset in ONE write of the job
+            # list (500 jobs used to be 500 rewrites of the whole file: 23 seconds, and a collision
+            # with the window reading it ended the start).
+            pending = _reset_all_for_apply(target_job_urls)
         elif easy_apply_filter is None:
             pending = [j for j in jobs.values() if j.get("status") == "pending"]
         else:

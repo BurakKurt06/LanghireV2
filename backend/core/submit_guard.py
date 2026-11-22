@@ -56,6 +56,11 @@ _ACCOUNT_STEP = re.compile(
     r"create\s+(?:an?\s+|my\s+|your\s+|new\s+)?account|forgot|reset\s+password)\b", re.I)
 
 
+# A button that says nothing about what it does ("Submit", "Continue"): an account step only inside
+# a sign-in / sign-up dialog or form (see account_context).
+_GENERIC_STEP = re.compile(r"\s*(?:submit|continue|next|done|save|confirm|ok|create)\s*[.!]?\s*", re.I)
+
+
 def is_account_step(control) -> bool:
     """The control (or, for Enter in a field, the button Enter presses) signs in or registers."""
     if control is None or control.final_context or control.application_review:
@@ -64,7 +69,12 @@ def is_account_step(control) -> bool:
                          control.submitter_pseudo) if t]
     if any(re.search(r"\bappl(?:y|ication)\b", t, re.I) for t in texts):
         return False
-    return any(_ACCOUNT_STEP.search(t) for t in texts)
+    if any(_ACCOUNT_STEP.search(t) for t in texts):
+        return True
+    # Seen 2026-11: a careers site's sign-up dialog (id "candidate-auth-v2-modal", label
+    # "Authentication") ended with a bare "Submit"; it was counted as the application's submit and
+    # the job was marked "may have been sent" before any application form existed.
+    return bool(control.account_context) and any(_GENERIC_STEP.fullmatch(t) for t in control.labels if t)
 
 
 _ACCOUNT_CREATION = re.compile(
@@ -154,6 +164,9 @@ class Control:
     # How many fields a person could fill in the control's form (None when the page wasn't asked).
     # 0 on a job posting's own "Apply" button, whose form only carries hidden values.
     form_fields: int | None = None
+    # The control sits in a dialog or form that names itself a sign-in / sign-up / registration one
+    # (its id, label or class), and nothing there mentions an application.
+    account_context: bool = False
 
     def __post_init__(self):
         self.tag, self.type = (self.tag or "").lower(), (self.type or "").lower()
@@ -520,8 +533,18 @@ _FORM_CONTEXT_JS = r"""
     };
     const form_fields = root ? Array.from(root.querySelectorAll('input,select,textarea,[contenteditable=""],[contenteditable="true"]'))
       .filter(n => n.isContentEditable ? form.contains(n) : fillable(n)).length : null;
+    // A sign-in / sign-up dialog or form, by how it names itself. "auth" alone or "authentication",
+    // never "authorization" (a work-authorization section is part of an application).
+    const accountWords = /(?:^|[^a-z])(?:auth(?:entication|enticate)?|log[-_ ]?in|sign[-_ ]?(?:in|up)|regist(?:er|ration)|create[-_ ]?(?:an?[-_ ]?|your[-_ ]?|new[-_ ]?)?account)(?![a-z])/i;
+    let account_context = false;
+    for (let e = el.parentElement; e; e = e.parentElement) {
+      if (!e.matches || !e.matches('[role=dialog],[role=alertdialog],dialog,form,[role=form]')) continue;
+      const said = [e.id || '', e.getAttribute('aria-label') || '', typeof e.className === 'string' ? e.className : ''].join(' ');
+      if (/appl/i.test(said)) break;
+      if (accountWords.test(said)) { account_context = true; break; }
+    }
     return {final_context: final, application_review, submitter_text: submitter ? controlName(submitter, submitter_pseudo) : '',
-      submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo, form_fields};
+      submitter_alternative: submitter ? legacyControlName(submitter) : '', submitter_pseudo, form_fields, account_context};
   }
 """
 
