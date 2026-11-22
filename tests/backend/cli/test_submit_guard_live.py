@@ -240,6 +240,18 @@ async def policy_browser(url, mode, tmp_path, monkeypatch):
         await browser.kill()
 
 
+async def _settle(posts, mode, timeout=10.0):
+    """After the action: in auto (the control) wait until the form arrives. A fixed 0.7 s missed the
+    POST of Tab-then-Space on the slower Windows CI runner (11-22; reproduced with the browser's CPU
+    throttled). A refused action sends nothing, so the guard modes keep the short wait."""
+    if mode == "auto":
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not posts and loop.time() < deadline:
+            await asyncio.sleep(0.1)
+    await asyncio.sleep(0.7)   # and long enough for a second POST to show up
+
+
 EMBED = ("(src) => new Promise(done => { const f = document.createElement('iframe'); f.id = 'frame';"
          " f.onload = () => done(1); f.src = src; document.body.replaceChildren(f); })")
 SWAP = "(src) => new Promise(done => { const f = document.getElementById('frame'); f.onload = () => done(1); f.src = src; })"
@@ -408,7 +420,7 @@ def test_no_input_method_sends_an_embedded_form_on_a_parent_approval(policy_site
                 await browser_policy.call_on_node(browser, target, "function() { this.focus(); return 1; }")
                 keys = "Space" if method == "space_on_button" else "Enter"
                 result = await run("send_keys", {"keys": keys}, browser_session=browser)
-            await asyncio.sleep(0.7)
+            await _settle(posts, mode)
             if mode == "auto":
                 assert posts == ["/submitted"], f"the control didn't send the form: {result.error!r}"
             else:
@@ -467,7 +479,7 @@ def test_a_form_in_a_closed_shadow_root_is_checked(policy_site, tmp_path, monkey
                     await run("send_keys", {"keys": "Tab"}, browser_session=browser)
                 result = await run("send_keys", {"keys": "Space" if method == "space_after_tab" else "Enter"},
                                    browser_session=browser)
-            await asyncio.sleep(0.7)
+            await _settle(posts, mode)
             if mode == "auto":
                 assert posts == ["/submitted"], f"the control didn't send the form: {result.error!r}"
             else:
@@ -498,7 +510,7 @@ def test_a_scaled_coordinate_click_is_checked_where_it_lands(policy_site, tmp_pa
             tools.set_coordinate_clicking(True)
             result = await tools.registry.execute_action("click", {"coordinate_x": 290, "coordinate_y": 210},
                                                          browser_session=browser)
-            await asyncio.sleep(0.7)
+            await _settle(posts, mode)
             if mode == "auto":
                 assert posts == ["/submitted"], f"the control didn't send the form: {result.error!r}"
             else:
@@ -518,7 +530,7 @@ def test_typing_into_a_submit_button_is_checked(policy_site, tmp_path, monkeypat
             nodes = (await browser.get_browser_state_summary()).dom_state.selector_map
             send = next(i for i, n in nodes.items() if n.attributes.get("id") == "send")
             result = await tools.registry.execute_action("input", {"index": send, "text": "a b"}, browser_session=browser)
-            await asyncio.sleep(0.7)
+            await _settle(posts, mode)
             if mode == "auto":
                 assert posts == ["/submitted"], f"the control didn't send the form: {result.error!r}"
             else:
@@ -553,7 +565,7 @@ def test_choosing_a_dropdown_item_cant_press_a_submit_button(policy_site, tmp_pa
             assert ordinary.error is None and not posts   # choosing an ordinary item still works, in every mode
             result = await tools.registry.execute_action("select_dropdown", {"index": index, "text": "Submit application"},
                                                          browser_session=browser)
-            await asyncio.sleep(0.7)
+            await _settle(posts, mode)
             if mode == "auto":
                 assert posts == ["/submitted"], f"the control didn't send the form: {result.error!r} {result.extracted_content!r}"
                 assert ref["submit_guard"].attempts == 1   # recorded first; the ordinary choice wasn't counted
@@ -626,7 +638,7 @@ def test_clicking_a_label_of_a_submit_button_is_checked(policy_site, tmp_path, m
             tools.set_coordinate_clicking(True)
             result = await tools.registry.execute_action(
                 "click", {"coordinate_x": round(point[0]), "coordinate_y": round(point[1])}, browser_session=browser)
-            await asyncio.sleep(0.7)
+            await _settle(posts, mode)
             if mode == "auto":
                 assert posts == ["/submitted"], f"the control didn't send the form: {result.error!r}"
             else:
