@@ -29,6 +29,10 @@ import type {
 
 type ProfileSettings = Pick<CandidateProfile, (typeof PROFILE_SETTINGS_FIELDS)[number]>;
 
+/** The profile fields Settings edits and saves (the backend keeps the rest as it is). */
+const ownProfileFields = (profile: CandidateProfile): Partial<CandidateProfile> =>
+  Object.fromEntries(PROFILE_SETTINGS_FIELDS.map((key) => [key, profile[key]]));
+
 export default function SettingsPage() {
   const { t } = useTranslation("settings");
   const { t: tp } = useTranslation("profile");
@@ -69,7 +73,9 @@ export default function SettingsPage() {
   // The profile couldn't be read: those fields aren't shown (saving them could replace the profile).
   const [profile, setProfile] = useState<CandidateProfile | null>(null);
   const [profileFailed, setProfileFailed] = useState(false);
-  const [profileChanged, setProfileChanged] = useState(false);
+  // What the backend has of the profile's Settings fields (set on load and after each save), so an
+  // edit made while a save is on its way is still "changed" when that save comes back.
+  const [savedProfileKey, setSavedProfileKey] = useState<string | null>(null);
   const [newTitle, setNewTitle] = useState("");
   const [newLocation, setNewLocation] = useState("");
   // Saved at once, as before: tailoring options (browser storage) and the Inbox schedule.
@@ -114,15 +120,16 @@ export default function SettingsPage() {
       }).catch(() => setLoadFailed(true)), []);
   const loadProfile = useCallback(() => getProfile().then((data) => {
         // The same defaults Profile fills in, so a save never writes a partial object.
-        setProfile({
+        const loaded: CandidateProfile = {
           ...data,
           target_job_titles: data.target_job_titles || [],
           target_locations: data.target_locations || [],
           search_area: { center_zip: "", radius: "any", ...(data.search_area || {}) },
           job_search: withDefaults(data.job_search),
           notes: data.notes || "",
-        });
-        setProfileChanged(false);
+        };
+        setProfile(loaded);
+        setSavedProfileKey(JSON.stringify(ownProfileFields(loaded)));
         setProfileFailed(false);
       }).catch(() => setProfileFailed(true)), []);
   const loadLists = useCallback(() => Promise.all([
@@ -146,7 +153,6 @@ export default function SettingsPage() {
 
   const updateProfile = <K extends keyof ProfileSettings>(key: K, value: ProfileSettings[K]) => {
     setProfile((p) => (p ? { ...p, [key]: value } : p));
-    setProfileChanged(true);
   };
 
   const addToList = (key: "target_job_titles" | "target_locations", value: string, clear: () => void) => {
@@ -244,17 +250,29 @@ export default function SettingsPage() {
   };
   const payloadKey = JSON.stringify(settingsPayload);
   const savedKey = useRef<string | null>(null);
+  // Set when a settings save comes back, only so that the autosave effect looks again: a change
+  // made while that save was on its way was otherwise never saved (savedKey is a ref).
+  const [settingsSentKey, setSettingsSentKey] = useState<string | null>(null);
+  const profileKey = profile ? JSON.stringify(ownProfileFields(profile)) : null;
+  const profileChanged = profileKey !== null && savedProfileKey !== null && profileKey !== savedProfileKey;
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleSave = async () => {
+    if (autosaveTimer.current !== null) {
+      clearTimeout(autosaveTimer.current);   // Save Settings now: not the same save again in a moment
+      autosaveTimer.current = null;
+    }
     try {
       setSaveError(null);
+      const sentKey = payloadKey;
       await saveSettings(settingsPayload);
-      savedKey.current = payloadKey;
+      savedKey.current = sentKey;
+      setSettingsSentKey(sentKey);
       if (profile && profileChanged) {
         // Only these fields, updated atomically by the backend: what Profile saved meanwhile is kept.
-        const own = Object.fromEntries(PROFILE_SETTINGS_FIELDS.map((key) => [key, profile[key]]));
+        const own = ownProfileFields(profile);
         await patchProfile(own as Partial<CandidateProfile>);
-        setProfileChanged(false);
+        setSavedProfileKey(JSON.stringify(own));   // what was sent, not what the page shows now
       }
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -266,9 +284,14 @@ export default function SettingsPage() {
 
   // Changes save by themselves, a moment after the last one (the AI model, tailoring and Inbox
   // parts always did; "Jobs at the same time" set to 4 without pressing Save did nothing).
+  // profileKey is a dependency so that every profile edit restarts the wait (a flag that was
+  // already true didn't: the save came 800 ms after the first edit, then again for the rest).
   const saveNow = useRef(handleSave);
+  const unsaved = useRef(false);
   useEffect(() => {
     saveNow.current = handleSave;
+    unsaved.current = !loading && !loadFailed && savedKey.current !== null
+      && (payloadKey !== savedKey.current || profileChanged);
   });
   useEffect(() => {
     if (loading || loadFailed) return;
@@ -277,9 +300,18 @@ export default function SettingsPage() {
       return;
     }
     if (payloadKey === savedKey.current && !profileChanged) return;
-    const timer = setTimeout(() => { void saveNow.current(); }, 800);
-    return () => clearTimeout(timer);
-  }, [payloadKey, profileChanged, loading, loadFailed]);
+    const timer = setTimeout(() => { autosaveTimer.current = null; void saveNow.current(); }, 800);
+    autosaveTimer.current = timer;
+    return () => {
+      clearTimeout(timer);
+      if (autosaveTimer.current === timer) autosaveTimer.current = null;
+    };
+  }, [payloadKey, settingsSentKey, profileKey, profileChanged, loading, loadFailed]);
+  // Leaving the page within 800 ms of the last change saves it then (the wait restarts with every
+  // edit, so steady typing followed by a click elsewhere would otherwise save nothing).
+  useEffect(() => () => {
+    if (unsaved.current) void saveNow.current();
+  }, []);
 
   if (loading) return <LoadingSpinner />;
 

@@ -164,7 +164,7 @@ def test_webrtc_tcp_cannot_bypass_the_proxy(tmp_path, monkeypatch):
     }"""
     try:
         _run_in_agent_browser(tmp_path / "control", monkeypatch, script, listener.getsockname()[1],
-                              wait=3, protect=False)
+                              wait=15, protect=False, until=lambda: connections)  # slow CI runner (11-22)
         assert connections, "The unprotected control must actually reach the TCP listener"
         connections.clear()
         _run_in_agent_browser(tmp_path / "protected", monkeypatch, script, listener.getsockname()[1], wait=3)
@@ -212,7 +212,9 @@ def test_running_profile_cannot_be_secured_by_rewriting_preferences(tmp_path):
                 "(port) => { const pc = new RTCPeerConnection({iceServers: [{urls: 'stun:127.0.0.1:' + port}]}); "
                 "pc.createDataChannel('probe'); pc.createOffer().then(o => pc.setLocalDescription(o)); "
                 "window.probe = pc; return 1; }", listener.getsockname()[1])
-            await asyncio.sleep(3)
+            deadline = asyncio.get_running_loop().time() + 10   # not a fixed 3 s: slow CI runner (11-22)
+            while not received and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.1)
             assert not applied, f"Reported secured while running browser sent {len(received)} UDP packets"
             assert received, "The unsafe control browser should demonstrate the live-policy mismatch"
         finally:
@@ -270,6 +272,12 @@ def test_one_workers_open_sockets_dont_block_another_workers_pages(tmp_path, mon
     monkeypatch.setattr(shared_config, "selected_browser",
                         lambda settings=None: (conftest.live_browser(), tmp_path / "browser"))
 
+    async def until(done, timeout):
+        """Poll done() for up to `timeout` s: the slower CI runner can need more than a fixed wait (11-22)."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not done() and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.1)
+
     async def go():
         browsers = []
         for worker in (1, 2):
@@ -285,12 +293,14 @@ def test_one_workers_open_sockets_dont_block_another_workers_pages(tmp_path, mon
                 "(url) => { window.held = []; for (let i = 0; i < 120; i++) window.held.push(new WebSocket(url)); return 1; }",
                 f"ws://127.0.0.1:{port}/ws")
             await asyncio.sleep(6)
+            await until(lambda: len(held) >= 60, 9)   # up to 15 s in all
             assert len(held) >= 60, "worker 1's page should be holding most of its proxy connections"
             await two.navigate_to("about:blank")
             await (await two.get_current_page()).evaluate(
                 "(url) => { const i = document.createElement('img'); i.src = url; document.body.appendChild(i); return 1; }",
                 f"http://127.0.0.1:{port}/second")
-            await asyncio.sleep(2)
+            await until(lambda: pages, 10)
+            await asyncio.sleep(2)   # and long enough for a second request to show up
             assert pages == ["/second"]
         finally:
             for browser in browsers:

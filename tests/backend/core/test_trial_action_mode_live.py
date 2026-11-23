@@ -44,19 +44,31 @@ async def test_default_live_flow_logs_in_saves_next_and_stops_only_final_control
     apply_jobs.set_run_mode(mode);ref={'request_gate':gate}
     try:tools=apply_jobs.build_tools({'url':job,'company':'Acme','title':'Local'},'',mode=='trial',ref,1)
     finally:apply_jobs.set_run_mode('auto')
-    async def click():
-        state=await browser.get_browser_state_summary()
-        index=next(i for i,node in state.dom_state.selector_map.items() if node.tag_name=='button')
+    async def click(label):
+        # Slow CI runner (11-22): read the page until this step's own button is there. Right after a
+        # POST the redirected page may not have replaced the previous one, whose button would be clicked twice.
+        deadline=asyncio.get_running_loop().time()+15
+        while True:
+            state=await browser.get_browser_state_summary()
+            buttons=[i for i,node in state.dom_state.selector_map.items() if node.tag_name=='button']
+            mine=[i for i in buttons if (state.dom_state.selector_map[i].get_all_children_text() or '').strip()==label]
+            if mine or asyncio.get_running_loop().time()>deadline:break
+            await asyncio.sleep(.1)
+        index=(mine or buttons)[0]
         return await tools.registry.execute_action('click',{'index':index},browser_session=browser)
+    final_label={'icims':'Submit application','sap':'Apply','taleo':'Submit'}[vendor]
     try:
         assert not gate.strict_trial_protocols
         await browser.navigate_to(shell if embedded else job)
-        for path in ('/login','/profile','/opaque-command'):
-            result=await click()
+        for path,label in (('/login','Sign in'),('/profile','Submit profile'),('/opaque-command','Next')):
+            result=await click(label)
             assert not result.error,result
             assert await wait_for(lambda:any(r[0]=='POST' and r[1]==root+path for r in seen),gate)
         assert await wait_for(lambda:any(r[0]=='GET' and r[1]==root+'/review' for r in seen),gate)
-        result=await click();await asyncio.sleep(.3);await gate.wait_idle()
+        result=await click(final_label)
+        # Slow CI runner (11-22): in Auto wait for the final POST before the quiet wait.
+        if mode=='auto':await wait_for(lambda:any(r[0]=='POST' and r[1]==root+'/submit' for r in seen),gate,tries=200)
+        await asyncio.sleep(.3);await gate.wait_idle()
         assert bool(result.error)==(mode=='trial')
         assert any(r[0]=='POST' and r[1]==root+'/submit' for r in seen)==(mode=='auto'),seen
         # The user's accepted distinction: a site's own request is not stopped
@@ -79,7 +91,7 @@ async def test_default_trial_advances_a_cross_origin_embedded_application(wire_s
 from tests.backend.core.test_request_gate_live import bridge_to  # noqa: E402
 
 
-async def _click_the_button(wire_site, monkeypatch, html):
+async def _click_the_button(wire_site, monkeypatch, html, expect_send=False):
     local, seen, site = wire_site
     site['html'] = html
     job = 'https://careers.example.test/role'
@@ -95,7 +107,8 @@ async def _click_the_button(wire_site, monkeypatch, html):
         state = await browser.get_browser_state_summary()
         index = next(i for i, node in state.dom_state.selector_map.items() if node.tag_name == 'button')
         result = await tools.registry.execute_action('click', {'index': index}, browser_session=browser)
-        sent = await wait_for(lambda: any(r[0] == 'POST' for r in seen), gate, tries=10)
+        # Slow CI runner (11-22): an expected send gets up to 10 s; the final-label cases keep the short wait.
+        sent = await wait_for(lambda: any(r[0] == 'POST' for r in seen), gate, tries=200 if expect_send else 10)
         return result, sent
     finally:
         apply_jobs.set_run_mode('auto')
@@ -129,7 +142,7 @@ async def test_trial_still_uploads_a_resume_on_an_upload_step(wire_site, monkeyp
     """The other side: an upload step whose button says "Upload resume" goes through in Trial."""
     result, sent = await _click_the_button(wire_site, monkeypatch,
         '<h1>Documents</h1><form method="post" action="/upload-step" enctype="multipart/form-data">'
-        '<input type="file" name="resume"><button id="upload">Upload resume</button></form>')
+        '<input type="file" name="resume"><button id="upload">Upload resume</button></form>', expect_send=True)
     assert sent and not result.error, result.error
 
 
@@ -201,8 +214,16 @@ async def test_default_trial_initial_apply_and_native_next_still_progress(wire_s
         apply_jobs.set_run_mode('auto')
     try:
         await browser.navigate_to(url)
-        for _ in range(2):
-            state = await browser.get_browser_state_summary()
+        for step in range(2):
+            # Slow CI runner (11-22): both pages' buttons are id="action", so read the page again only once
+            # /prepare has replaced /job (else 'Apply now' could be clicked twice).
+            deadline = asyncio.get_running_loop().time() + 15
+            while True:
+                state = await browser.get_browser_state_summary()
+                ready = any(node.attributes.get('id') == 'action' for node in state.dom_state.selector_map.values())
+                if (ready and (not step or state.url.endswith('/prepare'))) or asyncio.get_running_loop().time() > deadline:
+                    break
+                await asyncio.sleep(.1)
             index = next(i for i, node in state.dom_state.selector_map.items() if node.attributes.get('id') == 'action')
             result = await tools.registry.execute_action('click', {'index': index}, browser_session=browser)
             assert not result.error, result

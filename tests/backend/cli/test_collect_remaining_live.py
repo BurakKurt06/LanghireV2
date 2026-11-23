@@ -7,11 +7,24 @@ import pytest
 from cli import collect_jobs
 from core import browser_policy, request_gate
 from core.collection_policy import CollectionPolicy
-from tests.backend.core.test_request_gate_live import browser_and_gate, bridge_to, wire_site  # noqa: F401
+from tests.backend.core.test_request_gate_live import browser_and_gate, bridge_to, wait_for, wire_site  # noqa: F401
 from tests.backend.test_main_api import _isolate_state  # noqa: F401
 
 pytestmark = [pytest.mark.real_browser, pytest.mark.skipif(
     os.environ.get("LANGHIRE_REAL_BROWSER") != "1", reason="opt-in local browser")]
+
+
+async def _read_until(browser, done, pattern=r"/job/(\d+)", timeout=20.0):
+    """The listings read once done(ids) holds, or the last read after `timeout` s. A frame from another
+    site joins the CDP sessions some time after it loads and is skipped until then: one read after a
+    fixed wait can miss its listings on the slower CI runner (11-22)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        result = await browser_policy.collection_evaluate(browser, collect_jobs.LISTING_JS, [pattern], 60)
+        if done({c["id"] for c in result["cards"]}) or loop.time() >= deadline:
+            return result
+        await asyncio.sleep(0.5)
 
 @pytest.mark.asyncio
 async def test_collection_scripts_cannot_send_writes_or_arbitrary_gets(wire_site):
@@ -30,6 +43,7 @@ async def test_collection_scripts_cannot_send_writes_or_arbitrary_gets(wire_site
         await gate.wait_idle()
         result = await browser_policy.evaluate(browser, collect_jobs.NEXT_JS)
         assert result.get("clicked") == "Show more jobs"
+        await wait_for(lambda: gate.collection_policy.refused >= 4, gate, tries=300)  # slow CI runner (11-22)
         await asyncio.sleep(.7)
         assert await browser_policy.evaluate(browser, "() => document.body.dataset.more") == "yes"
         assert seen == [("GET", "/search"),("GET","/logo.png")], seen
@@ -61,6 +75,13 @@ async def test_a_refused_write_is_answered_so_a_retrying_script_stops(wire_site)
     gate.collection_policy = CollectionPolicy(url)
     try:
         await browser.navigate_to(url)
+        # The 403 can take more than 2 s to reach the page on the slower CI runner (11-22); the 2 s
+        # quiet wait for a retry stays.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 10
+        while (await browser_policy.evaluate(browser, "() => document.body.dataset.status || ''") != "403"
+               and loop.time() < deadline):
+            await asyncio.sleep(.1)
         await asyncio.sleep(2)
         tries = await browser_policy.evaluate(browser, "() => document.body.dataset.tries")
         status = await browser_policy.evaluate(browser, "() => document.body.dataset.status || ''")
@@ -98,7 +119,7 @@ async def test_reader_sees_cross_origin_nested_frames_and_closed_roots_but_not_t
     try:
         await browser.navigate_to(url)
         await asyncio.sleep(1)
-        result = await browser_policy.collection_evaluate(browser, collect_jobs.LISTING_JS, [r"/job/(\d+)"], 60)
+        result = await _read_until(browser, lambda ids: {"1", "2", "3", "4"} <= ids)
         diagnostic = {}
         if {c["id"] for c in result["cards"]} != {"1", "2", "3", "4"}:
             _, frames, parents = await browser_policy._collection_frames(browser)
@@ -158,7 +179,7 @@ async def test_rotated_frame_is_read_and_cross_frame_opacity_still_hides_traps(w
     try:
         await browser.navigate_to(url)
         await asyncio.sleep(.4)
-        result=await browser_policy.collection_evaluate(browser,collect_jobs.LISTING_JS,[r"/job/(\d+)"],60)
+        result=await _read_until(browser,lambda ids:{"1","2"}<=ids)
         assert {c["id"] for c in result["cards"]}=={"1","2"},result
     finally:
         await gate.close()
@@ -176,6 +197,7 @@ async def test_embedded_scrolling_keeps_all_listings_before_the_outer_page_moves
     try:
         await browser.navigate_to(url)
         await asyncio.sleep(.4)
+        await _read_until(browser,bool)  # the framed list is readable before the first scroll
         found=set()
         for _ in range(12):
             result=await browser_policy.collection_evaluate(browser,collect_jobs.LISTING_JS,[r"/job/(\d+)"],60)
@@ -240,7 +262,6 @@ async def test_production_collector_loads_runtime_third_party_reads_without_writ
     from core import job_page, shared_config
     import conftest
     from sources.registry import PluginRegistry
-    from tests.backend.core.test_request_gate_live import wait_for
 
     local, seen, site = wire_site
     url = 'https://www.linkedin.com/jobs/search/?keywords=Local'
@@ -285,9 +306,11 @@ async def test_production_collector_loads_runtime_third_party_reads_without_writ
         await gate.start()
         await browser.navigate_to(url)
         if builtin:
-            assert await wait_for(lambda: ('GET', '/jobs/api') in seen, gate), seen
+            assert await wait_for(lambda: ('GET', '/jobs/api') in seen, gate, tries=300), seen
         await asyncio.sleep(.5)
-        result = await browser_policy.collection_evaluate(browser, collect_jobs.LISTING_JS, [r'/jobs/view/(\d+)'], 60)
+        # builtin: the card is inserted after /jobs/api answers; poll for it (slow CI runner, 11-22).
+        # Not builtin: one read after the fixed wait, as before.
+        result = await _read_until(browser, lambda ids: not builtin or '1234567890' in ids, r'/jobs/view/(\d+)')
         assert {c['id'] for c in result['cards']} == ({'1234567890'} if builtin else set()), (result, seen)
         assert (('GET', '/runtime.js') in seen) == builtin
         assert not any(r[0] != 'GET' or r[1] in ('/private', '/mail/u/0/', '/write') for r in seen), seen

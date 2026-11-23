@@ -45,6 +45,9 @@ async def test_native_login_next_cookie_redirect_and_final_button(wire_site, mon
         assert await wait_for(lambda:any(r[0]=='POST' and r[1]==STEP for r in seen),gate)
         await browser.navigate_to(BASE+'/review')
         result=await click()
+        # Slow CI runner (11-22): Auto's final POST can take seconds; Trial keeps a quiet wait before its negative.
+        if mode=='auto': await wait_for(lambda:any(r[0]=='POST' and r[1]==FINAL for r in seen),gate,tries=200)
+        else: await asyncio.sleep(.5)
         await gate.wait_idle()
         assert any(r[0]=='POST' and r[1]==FINAL for r in seen)==(mode=='auto'),seen
         assert bool(result.error)==(mode=='trial')
@@ -72,6 +75,8 @@ async def test_scripts_cannot_turn_next_into_final_or_unknown_writes(wire_site,m
         await browser.navigate_to(URL)
         # Bypass action labels on purpose: prove the actual transport boundary.
         await browser_policy.evaluate(browser,'() => {'+commands[attack]+';return true;}')
+        # Slow CI runner (11-22): in Auto wait for the request (popup/iframe are slowest) before the quiet wait.
+        if mode=='auto': await wait_for(lambda:any(r[0]=='POST' or 'PRIVATE' in r[1] for r in seen),gate,tries=200)
         await asyncio.sleep(.5)
         await gate.wait_idle()
         outgoing=[r for r in seen if r[0]=='POST' or 'PRIVATE' in r[1]]
@@ -112,6 +117,8 @@ async def test_oracle_draft_reaches_wire_but_final_and_hidden_action_do_not(wire
         await browser.navigate_to(base+'/application')
         for path,data in ((draft,{'SiteNumber':'CX','RequisitionNumber':'1','Content':'bG9jYWw='}),(draft,{'CustomAction':'SUBMIT','Content':'PRIVATE'}),(draft.replace('JobApplicationDrafts','JobApplications'),{'Email':'PRIVATE'})):
             await browser_policy.evaluate(browser,'() => {fetch('+json.dumps(path)+',{method:"POST",headers:{"Content-Type":"application/json"},body:'+json.dumps(json.dumps(data))+'}).catch(()=>{});return true;}')
+        # Slow CI runner (11-22): wait for the allowed draft POST before the quiet wait.
+        await wait_for(lambda:any(r[0]=='POST' and r[1]==draft for r in seen),gate,tries=200)
         await asyncio.sleep(.5)
         await gate.wait_idle()
         posts=[r for r in seen if r[0]=='POST']
@@ -170,6 +177,8 @@ async def test_trial_workday_read_lookup_post_and_runtime_resources_stay_live(wi
         assert await wait_for(lambda:any(r[0]=='POST' and r[1]==path for r in seen),gate)
         assert not gate.trial_blocked_operation and not request_gate.pending()
         await browser_policy.evaluate(browser,'() => {fetch("'+path+'",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({submit:true})}).catch(()=>{});return true;}')
+        # Slow CI runner (11-22): wait for the refusal to be recorded before the quiet wait.
+        await wait_for(lambda:bool(gate.trial_blocked_operation),gate,tries=200)
         await asyncio.sleep(.3)
         await gate.wait_idle()
         assert len([r for r in seen if r[0]=='POST'])==1 and gate.trial_blocked_operation,seen

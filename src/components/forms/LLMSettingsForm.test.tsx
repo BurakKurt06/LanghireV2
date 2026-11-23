@@ -390,7 +390,8 @@ describe("LLMSettingsForm", () => {
 
       render(<LLMSettingsForm />);
 
-      expect(await screen.findByRole("option", { name: "gemini-9-flash" })).toBeInTheDocument();
+      // After the 500 ms debounce, which starts once the loaded settings are shown (slow CI: 3 s).
+      expect(await screen.findByRole("option", { name: "gemini-9-flash" }, { timeout: 3000 })).toBeInTheDocument();
       // TTS and embedding models are filtered out.
       expect(screen.queryByRole("option", { name: "gemini-9-flash-tts" })).not.toBeInTheDocument();
       expect(screen.queryByRole("option", { name: "text-embedding-9" })).not.toBeInTheDocument();

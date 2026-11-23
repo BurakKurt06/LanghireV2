@@ -26,6 +26,9 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
     css: false,
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
+    // The long Settings tests ran past the default 5 s with coverage on a busy machine (11-22);
+    // the Windows CI runner is slower still. Only a time limit: no check changes.
+    testTimeout: 20_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "text-summary", "html", "lcov"],

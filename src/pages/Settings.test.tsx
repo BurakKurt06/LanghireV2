@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import SettingsPage from "./Settings";
@@ -84,6 +84,13 @@ function renderSettings(section = "applications") {
     </MemoryRouter>,
   );
 }
+
+// Unmount here, before the global afterEach clears the mocks: leaving the page saves pending
+// edits, and that save's calls would otherwise land in the next test.
+afterEach(async () => {
+  cleanup();
+  await new Promise((done) => setTimeout(done, 0));
+});
 
 const mockGetSettings = vi.mocked(getSettings);
 const mockSaveSettings = vi.mocked(saveSettings);
@@ -454,10 +461,9 @@ describe("SettingsPage", () => {
       await user.click(findSwitch("Stealth mode"));
       await user.click(screen.getByRole("button", { name: /Save Settings/ }));
 
-      await waitFor(() => expect(mockSaveSettings).toHaveBeenCalled());
-      const saved = mockSaveSettings.mock.calls.at(-1)![0];
-      expect(saved.job_collection_enabled).toBe(false);
-      expect(saved.stealth_enabled).toBe(true);
+      // The last save (an autosave may come between the steps on a slow machine).
+      await waitFor(() => expect(mockSaveSettings.mock.lastCall?.[0].stealth_enabled).toBe(true));
+      expect(mockSaveSettings.mock.lastCall![0].job_collection_enabled).toBe(false);
     });
 
     it("shows the delay window only when delays are enabled", async () => {
@@ -508,18 +514,16 @@ describe("SettingsPage", () => {
       await user.type(screen.getByLabelText("2Captcha API key"), "abc123");
       await user.click(screen.getByRole("button", { name: /Save Settings/ }));
 
-      await waitFor(() => expect(mockSaveSettings).toHaveBeenCalled());
-      const saved = mockSaveSettings.mock.calls.at(-1)![0];
-      expect(saved.captcha_api_key).toBe("abc123");
-      expect(saved.captcha_solver_enabled).toBe(true);
+      // The last save, not a count: a step slower than the 800 ms autosave wait (the Windows CI
+      // runner) saves in between, so how many saves there are depends on the machine.
+      await waitFor(() => expect(mockSaveSettings.mock.lastCall?.[0].captcha_api_key).toBe("abc123"));
+      expect(mockSaveSettings.mock.lastCall![0].captcha_solver_enabled).toBe(true);
 
       await user.click(findSwitch("Solve CAPTCHAs with 2Captcha"));
       // The button reads "Saved" for a few seconds after the first save.
       await user.click(screen.getByRole("button", { name: /Saved|Save Settings/ }));
-      await waitFor(() => expect(mockSaveSettings).toHaveBeenCalledTimes(2));
-      const second = mockSaveSettings.mock.calls.at(-1)![0];
-      expect(second.captcha_api_key).toBe("abc123");
-      expect(second.captcha_solver_enabled).toBe(false);
+      await waitFor(() => expect(mockSaveSettings.mock.lastCall?.[0].captcha_solver_enabled).toBe(false));
+      expect(mockSaveSettings.mock.lastCall![0].captcha_api_key).toBe("abc123");
     });
 
     it("keeps the account password field working", async () => {
@@ -721,6 +725,10 @@ describe("Settings categories (reorganization, user-approved 11-01)", () => {
   });
 
   it("Job search edits the profile's search fields and saves only those (review R05: one atomic PATCH)", async () => {
+    // Every PATCH holds only Settings' own fields and the last one all the edits. How many PATCHes
+    // there are depends on the machine: a step slower than the 800 ms autosave wait (the Windows CI
+    // runner, 11-22) saves what was there, and Save Settings the rest. The count is pinned, with the
+    // clock under control, in "every profile edit restarts the autosave wait".
     const user = userEvent.setup();
     renderSettings("job-search");
     expect(await screen.findByText("Backend Engineer")).toBeVisible();
@@ -730,16 +738,119 @@ describe("Settings categories (reorganization, user-approved 11-01)", () => {
     await user.selectOptions(screen.getByLabelText("searchArea.radius"), "50");
     await user.click(screen.getByRole("checkbox", { name: "Part-time" }));
     await user.click(screen.getByRole("button", { name: /Save Settings/ }));
-    await waitFor(() => expect(mockSaveProfile).toHaveBeenCalledTimes(1));
-    const saved = mockSaveProfile.mock.calls[0][0];
-    // Only Settings' own profile fields: the backend keeps everything else as saved now.
-    expect(Object.keys(saved).sort()).toEqual(["job_search", "notes", "search_area", "target_job_titles", "target_locations"]);
+    await waitFor(() => expect(mockSaveProfile.mock.lastCall?.[0].job_search?.job_types).toEqual(["part_time"]));
+    for (const [sent] of mockSaveProfile.mock.calls) {
+      // Only Settings' own profile fields: the backend keeps everything else as saved now.
+      expect(Object.keys(sent).sort()).toEqual(["job_search", "notes", "search_area", "target_job_titles", "target_locations"]);
+    }
+    const saved = mockSaveProfile.mock.lastCall![0];
     expect(saved.target_job_titles).toEqual(["Backend Engineer", "Data Analyst"]);
     expect(saved.target_locations).toEqual(["Boston, MA"]);
     expect(saved.search_area).toEqual({ center_zip: "", radius: "50" });
     expect(saved.job_search).toEqual(expect.objectContaining({ job_types: ["part_time"], mode: "quick" }));
     expect(saved.notes).toBe("Use Apply with resume first.");
     expect(mockSaveSettings).toHaveBeenCalled();
+  });
+
+  it("every profile edit restarts the autosave wait: edits 500 ms apart are one PATCH, 800 ms after the last", async () => {
+    // It used to come 800 ms after the first edit (the "changed" flag was already true), then again.
+    renderSettings("job-search");
+    await screen.findByText("Backend Engineer");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.change(screen.getByLabelText("searchArea.radius"), { target: { value: "50" } });
+      act(() => { vi.advanceTimersByTime(500); });
+      fireEvent.click(screen.getByRole("checkbox", { name: "Part-time" }));
+      act(() => { vi.advanceTimersByTime(500); });
+      fireEvent.change(screen.getByLabelText("searchArea.radius"), { target: { value: "25" } });
+      await act(async () => { vi.advanceTimersByTime(500); });
+      expect(mockSaveProfile).not.toHaveBeenCalled();                   // 1.5 s after the first edit
+      await act(async () => { vi.advanceTimersByTime(300); });
+      await act(async () => { await Promise.resolve(); });
+      expect(mockSaveProfile).toHaveBeenCalledTimes(1);
+      expect(mockSaveProfile.mock.calls[0][0]).toEqual(expect.objectContaining({
+        search_area: { center_zip: "", radius: "25" },
+        job_search: expect.objectContaining({ job_types: ["part_time"] }),
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an edit made while an autosave is on its way is saved too (it used to be dropped)", async () => {
+    const user = userEvent.setup();
+    let arrive = () => {};
+    mockSaveProfile.mockImplementationOnce(() => new Promise((done) => {
+      arrive = () => done({ success: true } as never);
+    }));
+    renderSettings("job-search");
+    await screen.findByText("Backend Engineer");
+    await user.selectOptions(screen.getByLabelText("searchArea.radius"), "50");
+    await waitFor(() => expect(mockSaveProfile).toHaveBeenCalledTimes(1), { timeout: 3000 });   // the autosave
+    expect(mockSaveProfile.mock.calls[0][0].job_search?.job_types).not.toContain("part_time");
+    await user.click(screen.getByRole("checkbox", { name: "Part-time" }));                       // while it's on its way
+    await act(async () => { arrive(); });
+    await waitFor(() => expect(mockSaveProfile.mock.lastCall?.[0]).toEqual(expect.objectContaining({
+      search_area: { center_zip: "", radius: "50" },
+      job_search: expect.objectContaining({ job_types: ["part_time"] }),
+    })), { timeout: 3000 });
+  });
+
+  it("a settings change made while a save is on its way is saved too (it used to be dropped)", async () => {
+    // Turned off, saved by itself; turned back on while that save was on its way: the page showed
+    // it on, the backend kept it off.
+    const user = userEvent.setup();
+    let arrive = () => {};
+    mockSaveSettings.mockImplementationOnce(() => new Promise((done) => {
+      arrive = () => done({ success: true } as never);
+    }));
+    renderSettings("job-search");
+    await screen.findByText("Backend Engineer");
+    const collection = screen.getByRole("switch", { name: "Job board collection" });
+    await user.click(collection);                                                   // off
+    await waitFor(() => expect(mockSaveSettings).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    expect(mockSaveSettings.mock.calls[0][0].job_collection_enabled).toBe(false);
+    await user.click(collection);                                                   // on again, meanwhile
+    await act(async () => { arrive(); });
+    await waitFor(() => expect(mockSaveSettings.mock.lastCall?.[0].job_collection_enabled).toBe(true),
+      { timeout: 3000 });
+  });
+
+  it("Save Settings doesn't send the same settings again a moment later", async () => {
+    renderSettings("job-search");
+    await screen.findByText("Backend Engineer");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.click(screen.getByRole("switch", { name: "Job board collection" }));
+      act(() => { vi.advanceTimersByTime(300); });
+      fireEvent.click(screen.getByRole("button", { name: /Save Settings/ }));
+      await act(async () => { await Promise.resolve(); });
+      expect(mockSaveSettings).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(2000); });
+      expect(mockSaveSettings).toHaveBeenCalledTimes(1);   // the autosave that was waiting is cancelled
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaving the page within the autosave wait saves the change then", async () => {
+    const view = renderSettings("job-search");
+    await screen.findByText("Backend Engineer");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      fireEvent.change(screen.getByLabelText("searchArea.radius"), { target: { value: "50" } });
+      fireEvent.click(screen.getByRole("switch", { name: "Job board collection" }));
+      act(() => { vi.advanceTimersByTime(300); });
+      expect(mockSaveSettings).not.toHaveBeenCalled();
+      view.unmount();                                       // another page, 300 ms after the change
+      for (let i = 0; i < 5; i++) await Promise.resolve();
+      expect(mockSaveSettings).toHaveBeenCalledWith(expect.objectContaining({ job_collection_enabled: false }));
+      expect(mockSaveProfile).toHaveBeenCalledWith(expect.objectContaining({
+        search_area: { center_zip: "", radius: "50" },
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("the profile isn't written when none of its fields changed", async () => {

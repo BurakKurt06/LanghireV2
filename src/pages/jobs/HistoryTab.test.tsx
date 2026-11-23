@@ -166,9 +166,13 @@ describe("HistoryTab", () => {
   });
 
   it("pauses so the user can take over, then resumes", async () => {
-    mockGetApplyStatus.mockResolvedValue({ ...idleApply, running: true, log: ["Applying to job..."] } as never);
-    mockPauseApplying.mockResolvedValue({ success: true, paused: true });
-    mockResumeApplying.mockResolvedValue({ success: true, paused: false });
+    // The status follows the pause, as the backend's does (the 2 s poll would otherwise undo it
+    // between the two clicks on a slow machine).
+    let paused = false;
+    mockGetApplyStatus.mockImplementation(async () =>
+      ({ ...idleApply, running: true, paused, log: ["Applying to job..."] }) as never);
+    mockPauseApplying.mockImplementation(async () => { paused = true; return { success: true, paused: true }; });
+    mockResumeApplying.mockImplementation(async () => { paused = false; return { success: true, paused: false }; });
     const user = userEvent.setup();
     render(<HistoryTab onJobsChanged={onJobsChanged} />);
 

@@ -79,6 +79,9 @@ describe("RunPanel", () => {
   });
 
   it("shows the current job, mode, step and time", async () => {
+    // Started 95 s before this render (JOB's own time is from when the file loaded).
+    const job = { ...JOB, started_at: new Date(Date.now() - 95_000).toISOString() };
+    mockStatus.mockResolvedValue(running({ current: [job] }) as never);
     render(<RunPanel />);
     expect(await screen.findByText("Data Intern")).toBeInTheDocument();
     expect(screen.getByText("Contoso")).toBeInTheDocument();

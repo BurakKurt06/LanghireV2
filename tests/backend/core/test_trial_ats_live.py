@@ -37,6 +37,17 @@ async def post(browser,path,data):
     await script(browser,'fetch('+json.dumps(path)+',{method:"POST",headers:{"Content-Type":"application/json"},body:'+json.dumps(json.dumps(data))+'}).catch(()=>{})')
 
 
+def sent(seen, marker=b'PRIVATE FINAL'):
+    return lambda:any(r[0]=='POST' and marker in r[2] for r in seen)
+
+
+async def expect(gate, mode, auto=None, trial=None):
+    # Slow CI runner (11-22): first poll for what this mode must send or record; the fixed
+    # quiet wait after it stays, so the nothing-sent checks keep their full wait.
+    check=auto if mode=='auto' else trial
+    if check:await wait_for(check,gate,tries=200)
+
+
 @pytest.mark.parametrize('vendor',['greenhouse','workable'])
 @pytest.mark.parametrize('mode',['trial','auto'])
 async def test_signed_ats_resume_upload_reaches_storage_once_and_final_is_held(wire_site,tmp_path,vendor,mode):
@@ -68,6 +79,7 @@ async def test_signed_ats_resume_upload_reaches_storage_once_and_final_is_held(w
         assert await wait_for(lambda:any(r[0]=='POST' and r[1]=='/upload' for r in seen),gate)
         await script(browser,command)
         await post(browser,'/api/v1/jobs/LOCAL1/apply' if vendor=='workable' else '/acme/jobs/1',{'candidate':'PRIVATE FINAL'})
+        await expect(gate,mode,auto=lambda:len([r for r in seen if r[0]=='POST' and r[1]=='/upload'])>=2 and sent(seen)())
         await asyncio.sleep(.4);await gate.wait_idle()
         uploads=[r for r in seen if r[0]=='POST' and r[1]=='/upload']
         assert len(uploads)==(1 if mode=='trial' else 2),seen
@@ -91,6 +103,7 @@ async def test_lever_parser_uses_hidden_account_and_complete_file_but_never_fina
         await script(browser,'const f=new FormData();f.append("resume",document.querySelector("#file").files[0]);f.append("accountId","local-account");fetch("/parseResume",{method:"POST",body:f}).catch(()=>{})')
         assert await wait_for(lambda:any(r[0]=='POST' and r[1]=='/parseResume' for r in seen),gate)
         await post(browser,'/acme/role/apply',{'candidate':'PRIVATE FINAL'})
+        await expect(gate,mode,auto=sent(seen))
         await asyncio.sleep(.3);await gate.wait_idle()
         assert any(r[0]=='POST' and b'LOCAL RESUME' in r[2] for r in seen)
         assert any(r[0]=='POST' and b'PRIVATE FINAL' in r[2] for r in seen)==(mode=='auto')
@@ -113,6 +126,7 @@ async def test_ashby_lookup_saves_form_answers_but_spoofed_graphql_final_never_r
         await operation('ApiSetFormValue',{'organizationHostedJobsPageName':'acme','formRenderIdentifier':'local-form','path':'name','value':'Local Test'})
         assert await wait_for(lambda:any(r[0]=='POST' and b'Local Test' in r[2] for r in seen),gate)
         await operation('ApiSetFormValue',{'organizationHostedJobsPageName':'acme','formRenderIdentifier':'local-form','path':'name','value':'PRIVATE FINAL'},'mutation ApiSetFormValue { submitSingleApplicationFormAction }')
+        await expect(gate,mode,auto=sent(seen),trial=lambda:bool(gate.trial_blocked_operation))
         await asyncio.sleep(.3);await gate.wait_idle()
         assert any(r[0]=='POST' and b'PRIVATE FINAL' in r[2] for r in seen)==(mode=='auto'),seen
         assert bool(gate.trial_blocked_operation)==(mode=='trial') and not gate.failed and not request_gate.pending()
@@ -136,6 +150,7 @@ async def test_oracle_custom_domain_login_draft_and_final_use_different_permissi
         assert await wait_for(lambda:any(r[0]=='POST' and 'JobApplicationDrafts' in r[1] for r in seen),gate)
         await post(browser,ORACLE+path,{'Mode':'JOB_APPLY_CONFIRM','URLShortCode':'PRIVATE FINAL'})
         await post(browser,ORACLE+API+'recruitingCEJobApplications',{'Action':'CREATE','Name':'PRIVATE FINAL'})
+        await expect(gate,mode,auto=lambda:sent(seen,b'ShortCode')() and sent(seen)(),trial=sent(seen,b'ShortCode'))
         await asyncio.sleep(.3);await gate.wait_idle()
         assert any(r[0]=='POST' and b'ShortCode' in r[2] for r in seen)
         assert any(r[0]=='POST' and b'PRIVATE FINAL' in r[2] for r in seen)==(mode=='auto'),seen
@@ -208,6 +223,7 @@ async def test_challenge_proof_and_next_do_not_grant_final_submission(wire_site,
         assert await wait_for(lambda:any(r[0]=='POST' and b'dummy-proof' in r[2] for r in seen),gate)
         assert not gate.trial_blocked_operation
         await post(browser,'/wday/cxs/acme/jobapplication/local/finalize',{'answer':'PRIVATE FINAL'})
+        await expect(gate,mode,auto=sent(seen))
         await asyncio.sleep(.3);await gate.wait_idle()
         assert any(r[0]=='POST' and b'PRIVATE FINAL' in r[2] for r in seen)==(mode=='auto'),seen
         assert not request_gate.pending() and gate.healthy()
@@ -229,6 +245,7 @@ async def test_multipart_parameter_ambiguity_cannot_reach_signed_upload(wire_sit
     try:
         await browser.navigate_to(url)
         await script(browser,'fetch("/",{method:"POST",headers:{"Content-Type":'+json.dumps(mime)+'},body:'+json.dumps(body.decode())+'}).catch(()=>{})')
+        await expect(gate,mode,auto=lambda:any(r[0]=='POST' for r in seen))
         await asyncio.sleep(.4);await gate.wait_idle()
         assert any(r[0]=='POST' for r in seen)==(mode=='auto'),seen
         assert not request_gate.pending() and gate.healthy()

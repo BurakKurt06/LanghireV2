@@ -122,6 +122,12 @@ describe("CollectTab", () => {
   });
 
   it("opens the selected board's normal sign-in without a confirmation dialog", async () => {
+    // The backend reports the open sign-in window from then on, as it does (the 2 s status poll
+    // would otherwise turn it back off on a slow machine before the checks below).
+    vi.mocked(launchLogin).mockImplementation(async () => {
+      mockStatus.mockResolvedValue({ ...idleStatus, login_window_open: true } as never);
+      return { success: true, message: "Sign in normally, then close the browser window." };
+    });
     const user = userEvent.setup();
     render(<CollectTab onJobsChanged={onJobsChanged} />);
     await user.click(await screen.findByRole("checkbox", { name: "Indeed" }));

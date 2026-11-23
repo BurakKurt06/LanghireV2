@@ -10,7 +10,7 @@ from cli import apply_jobs, collect_jobs
 from core import browser_policy, captcha, form_check
 from core.collection_policy import CollectionPolicy
 from sources.registry import PluginRegistry
-from tests.backend.core.test_request_gate_live import browser_and_gate, bridge_to, wire_site  # noqa: F401
+from tests.backend.core.test_request_gate_live import browser_and_gate, bridge_to, wait_for, wire_site  # noqa: F401
 from tests.backend.test_main_api import _isolate_state  # noqa: F401
 
 pytestmark = [pytest.mark.real_browser, pytest.mark.skipif(
@@ -73,6 +73,8 @@ async def test_real_browser_keeps_the_captcha_budget_and_token_can_reach_local_s
         index = next(i for i,n in state.dom_state.selector_map.items() if n.tag_name == "button")
         result = await tools.registry.execute_action("click", {"index": index}, browser_session=browser)
         assert result.error is None
+        # Wait for the form's POST (a fixed 0.4 s is too short on the slower Windows CI runner, 11-22).
+        await wait_for(lambda: any(r[0] == "POST" and r[1] == "/step" for r in seen), tries=200)
         await asyncio.sleep(.4)
         assert any(r[0] == "POST" and r[1] == "/step" and b"local-only-token" in r[2] for r in seen), seen
     finally:
@@ -163,11 +165,22 @@ async def test_modes_advance_and_save_steps_but_trial_holds_final_submit(wire_si
         index = next(i for i,n in state.dom_state.selector_map.items() if n.tag_name == "button")
         result = await tools.registry.execute_action("click", {"index":index}, browser_session=browser)
         assert result.error is None
+        # wait_idle doesn't wait for a request the page is about to make: poll for the save, then for the
+        # final form its reply swaps in (the slower Windows CI runner, 11-22).
+        await wait_for(lambda: any(r[0] == "POST" and r[1] == "/wday/cxs/acme/jobapplication/local/educations"
+                                   for r in seen), gate, tries=200)
         await gate.wait_idle()
         assert any(r[0] == "POST" and r[1] == "/wday/cxs/acme/jobapplication/local/educations" for r in seen), seen
+        for _ in range(150):
+            if await browser_policy.evaluate(browser, "() => document.body.innerText.includes('Submit application')"):
+                break
+            await asyncio.sleep(.1)
         state = await browser.get_browser_state_summary()
         index = next(i for i,n in state.dom_state.selector_map.items() if n.tag_name == "button")
         result = await tools.registry.execute_action("click", {"index":index}, browser_session=browser)
+        if mode == "auto":   # the final form goes out: wait for it
+            await wait_for(lambda: any(r[0] == "POST" and r[1] == "/final" for r in seen), gate, tries=200)
+        await asyncio.sleep(.5)   # then quiet, so a (second) final POST would show up
         await gate.wait_idle()
         finals = [r for r in seen if r[0] == "POST" and r[1] == "/final"]
         assert len(finals) == (1 if mode == "auto" else 0), (result, seen)

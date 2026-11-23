@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from tests.backend.cli.test_submit_guard_live import policy_browser, policy_site
+from tests.backend.cli.test_submit_guard_live import _settle, policy_browser, policy_site
 
 pytestmark = [pytest.mark.real_browser,
               pytest.mark.skipif(os.environ.get("LANGHIRE_REAL_BROWSER") != "1", reason="opt-in: launches a real browser")]
@@ -25,7 +25,7 @@ def test_native_input_enter_cannot_be_disguised(policy_site, tmp_path, monkeypat
             field = next(n for n in nodes.values() if n.attributes.get("id") == "field")
             await browser_policy.call_on_node(browser, field, "function() { this.focus(); return 1; }")
             result = await tools.registry.execute_action("send_keys", {"keys": "Enter"}, browser_session=browser)
-            await asyncio.sleep(0.6)
+            await _settle(posts, mode)   # auto waits for the POST (slower Windows CI runner, 11-22); others 0.7 s
             if mode == "auto":
                 assert posts == ["/submitted"], f"positive control did not post: {result.error!r}"
             else:
@@ -57,7 +57,7 @@ def test_aria_label_descendant_cannot_hide_its_submit(policy_site, tmp_path, mon
                 tools.set_coordinate_clicking(True)
                 params = {"coordinate_x": round(point[0]), "coordinate_y": round(point[1])}
             result = await tools.registry.execute_action("click", params, browser_session=browser)
-            await asyncio.sleep(0.6)
+            await _settle(posts, mode)   # auto waits for the POST (slower Windows CI runner, 11-22); others 0.7 s
             if mode == "auto":
                 assert posts == ["/submitted"], f"positive control did not post: {result.error!r}"
             else:

@@ -8,7 +8,11 @@
  */
 import "@testing-library/jest-dom/vitest";
 import { afterEach, vi } from "vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
+
+// findBy*/waitFor give up after 3 s instead of 1 s: on the slower Windows CI runner a page's first
+// load and debounce could take longer than 1 s (11-22). They still return as soon as it's there.
+configure({ asyncUtilTimeout: 3000 });
 
 // ── Mock the Tauri core bridge ──────────────────────────────────────────────
 // api.ts does `invoke<string>("get_api_token")`; default to a dummy token so

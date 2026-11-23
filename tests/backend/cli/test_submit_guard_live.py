@@ -53,7 +53,10 @@ def site():
         server.server_close()
 
 
-async def _click_submit(mode, url):
+async def _click_submit(mode, url, sends=None):
+    """`sends`: the site's posts, passed only when the click is expected to send the form; then it waits
+    for the POST first (a fixed 1.5 s was too short on the slower Windows CI runner, 11-22). Every
+    click waits 1.5 s afterwards, so a form that shouldn't go out has the same time to show up."""
     from browser_use import BrowserSession
     browser = BrowserSession(executable_path=conftest.live_browser(),
                              user_data_dir=tempfile.mkdtemp(), headless=True, permissions=[])
@@ -70,6 +73,11 @@ async def _click_submit(mode, url):
         finally:
             apply_jobs.set_run_mode("auto")
         result = await tools.registry.execute_action("click", {"index": index}, browser_session=browser)
+        if sends is not None:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 15
+            while not sends and loop.time() < deadline:
+                await asyncio.sleep(0.1)
         await asyncio.sleep(1.5)
         return result
     finally:
@@ -86,7 +94,7 @@ def test_a_trial_never_sends_the_form_without_approval(site, monkeypatch):
 def test_auto_sends_it(site, monkeypatch):
     url, posts = site
     monkeypatch.setattr(apply_jobs, "update_job", lambda *a, **k: True)   # the attempt is recorded
-    result = asyncio.run(_click_submit("auto", url))
+    result = asyncio.run(_click_submit("auto", url, sends=posts))
     assert result.error is None and posts == ["/submitted"]
 
 

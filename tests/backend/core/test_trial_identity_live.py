@@ -30,6 +30,12 @@ async def run_js(browser, js):
     return await browser_policy.evaluate(browser,'() => {'+js+';return true;}')
 
 
+async def auto_sent(mode, gate, check):
+    # Slow CI runner (11-22): in auto, first poll for the writes that must arrive; the fixed
+    # quiet wait after it stays, so Trial's nothing-sent checks keep their full wait.
+    if mode=='auto':await wait_for(check,gate,tries=200)
+
+
 @pytest.mark.parametrize('mode',['trial','auto'])
 async def test_icims_auth0_redirect_types_the_job_site_password_and_blocks_final(wire_site,mode,monkeypatch):
     # Was "...types_employer_scoped_password...": the password is the one saved in Settings now (the
@@ -71,6 +77,7 @@ async def test_icims_auth0_redirect_types_the_job_site_password_and_blocks_final
         # Provider authentication never grants an application-write permission.
         await browser.navigate_to(JOB.rsplit('/',1)[0]+'/review')
         await run_js(browser,'fetch("/applications/finalize",{method:"POST",body:"PRIVATE FINAL"}).catch(()=>{})')
+        await auto_sent(mode,gate,lambda:any(r[0]=='POST' and b'PRIVATE FINAL' in r[2] for r in seen))
         await asyncio.sleep(.4);await gate.wait_idle()
         assert any(r[0]=='POST' and b'PRIVATE FINAL' in r[2] for r in seen)==(mode=='auto'),seen
         assert gate.healthy() and not request_gate.pending() and not apply_jobs.pending_reviews()
@@ -94,6 +101,7 @@ async def test_native_authentication_reaches_wire_but_changed_dispatch_does_not(
         assert await wait_for(lambda:any(r[0]=='POST' for r in seen),gate)
         before=len([r for r in seen if r[0]=='POST'])
         await send(data|{'operation':'submit','marker':'PRIVATE FINAL'})
+        await auto_sent(mode,gate,lambda:len([r for r in seen if r[0]=='POST'])>=before+1 and any(r[0]=='POST' and b'PRIVATE+FINAL' in r[2] for r in seen))
         await asyncio.sleep(.4);await gate.wait_idle()
         posts=[r for r in seen if r[0]=='POST']
         assert len(posts)==before+(1 if mode=='auto' else 0),seen
@@ -124,6 +132,7 @@ async def test_sap_native_job_return_login_posts_but_application_commands_stay_b
                 ('company','Other'),('career_job_req_id','43')]:
             payload=urlencode([(k,value if k==key else v) for k,v in data])
             await run_js(browser,'fetch('+json.dumps(dest)+',{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:'+json.dumps(payload)+'}).catch(()=>{})')
+        await auto_sent(mode,gate,lambda:len([r for r in seen if r[0]=='POST'])>=6)
         await asyncio.sleep(.5)
         await gate.wait_idle()
         assert len([r for r in seen if r[0]=='POST'])==(6 if mode=='auto' else 1),seen
@@ -152,6 +161,7 @@ async def test_provider_authentication_cannot_smuggle_another_operation(wire_sit
         if poison=='destination':target=AUTH0+'/u/login?state=unbound'
         body=urlencode(data)+('&action=default' if poison=='duplicate' else '')
         await run_js(browser,'fetch('+json.dumps(target)+',{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:'+json.dumps(body)+'}).catch(()=>{})')
+        await auto_sent(mode,gate,lambda:any(r[0]=='POST' for r in seen))
         await asyncio.sleep(.4);await gate.wait_idle()
         assert any(r[0]=='POST' for r in seen)==(mode=='auto'),seen
         assert not request_gate.pending() and gate.healthy()
@@ -199,6 +209,7 @@ async def test_successfactors_api_alias_allows_login_but_holds_application_dispa
         for payload in (data,data|{'career_ns':'job_application','career_os':'submit'}):
             await run_js(browser,'fetch('+json.dumps(dest)+',{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:'+json.dumps(urlencode(payload))+'}).catch(()=>{})')
         assert await wait_for(lambda:any(r[0]=='POST' for r in seen),gate)
+        await auto_sent(mode,gate,lambda:any(parse_qs(r[2].decode(),keep_blank_values=True).get('career_os')==['submit'] for r in seen if r[0]=='POST'))
         await asyncio.sleep(.4);await gate.wait_idle()
         posts=[parse_qs(r[2].decode(),keep_blank_values=True) for r in seen if r[0]=='POST']
         assert any(p.get('career_os')==['submit'] for p in posts)==(mode=='auto'),posts

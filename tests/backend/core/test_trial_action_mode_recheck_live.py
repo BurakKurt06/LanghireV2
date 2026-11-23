@@ -169,7 +169,9 @@ async def test_trial_action_matrix(wire_site, monkeypatch, case, label, kind, ac
             target = 'answer' if action in ('Enter', 'Control+Enter') else 'final'
             await browser_policy.evaluate(browser, '() => {document.getElementById(' + json.dumps(target) + ').focus();return true;}')
             result = await tools.registry.execute_action('send_keys', {'keys': action}, browser_session=browser)
-        sent = await wait_for(lambda: any(r[0]=='POST' for r in seen), gate, tries=20)
+        # Slow CI runner (11-22): a send this case expects gets up to 10 s; the final cases keep the short wait.
+        expect_send = classification != 'final' and action != 'Control+Enter'
+        sent = await wait_for(lambda: any(r[0]=='POST' for r in seen), gate, tries=200 if expect_send else 20)
         record = {'case':case,'classification':classification,'encoding':encoding,'observed_label':nodes[found[0]].get_all_children_text(),'action_error':str(result.error) if result.error else None,
                   'posts':[{'path':r[1],'body':r[2].decode(errors='replace')} for r in seen if r[0]=='POST']}
         print('RECHECK ' + json.dumps(record, ensure_ascii=False))
